@@ -14,10 +14,18 @@ export class WalmartAdapter extends RetailerAdapter {
 
   static fromEnv(env = process.env) {
     const tracker = new PriceTracker({ filePath: env.PRICE_HISTORY_FILE ?? 'data/price-history.json' });
-    if ((env.WALMART_MODE ?? 'demo').toLowerCase() === 'live') {
+    // Live whenever credentials are present, unless WALMART_MODE says otherwise.
+    const hasKeys = Boolean(env.WALMART_CONSUMER_ID && (env.WALMART_PRIVATE_KEY || env.WALMART_PRIVATE_KEY_PATH));
+    const mode = (env.WALMART_MODE || (hasKeys ? 'live' : 'demo')).toLowerCase();
+    if (mode === 'live') {
+      if (!hasKeys) {
+        throw new Error('WALMART_MODE=live needs WALMART_CONSUMER_ID and WALMART_PRIVATE_KEY or WALMART_PRIVATE_KEY_PATH');
+      }
       const source = new WalmartLiveSource({
         consumerId: env.WALMART_CONSUMER_ID,
         keyVersion: env.WALMART_KEY_VERSION ?? '1',
+        // Hosting platforms often only take env vars, so accept the PEM inline too.
+        privateKey: env.WALMART_PRIVATE_KEY ? env.WALMART_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
         privateKeyPath: env.WALMART_PRIVATE_KEY_PATH,
         publisherId: env.WALMART_PUBLISHER_ID,
       });

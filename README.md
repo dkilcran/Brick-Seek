@@ -1,4 +1,4 @@
-# Brick Seek
+# Clearance Tracker
 
 A local inventory & price checker: look up a product, enter your ZIP, and see
 store-by-store stock, shelf prices, clearance markdowns, price history and a
@@ -26,12 +26,15 @@ npm test
 
 | Mode | Set with | What you get |
 | --- | --- | --- |
-| `demo` (default) | nothing | Synthetic catalog, stores and stock. Stable per product/store/day. Good for development and demos. |
-| `live` | `WALMART_MODE=live` + Walmart I/O keys | Real catalog, online prices and store locations via the [Walmart I/O Affiliate API](https://walmart.io/). |
+| `demo` | no keys set | Synthetic catalog, stores and stock. Stable per product/store/day. Good for development and demos. |
+| `live` | Walmart I/O keys set (automatic) | Real catalog, online prices and store locations via the [Walmart I/O Affiliate API](https://walmart.io/). |
 
-Copy `.env.example` and fill in `WALMART_CONSUMER_ID`, `WALMART_KEY_VERSION`
-and `WALMART_PRIVATE_KEY_PATH` for live mode (load it with
-`node --env-file=.env src/server.js`).
+To go live, create a Walmart I/O account, generate an RSA key pair, upload the
+public key, then copy `.env.example` to `.env` and fill in
+`WALMART_CONSUMER_ID`, `WALMART_KEY_VERSION`, and either
+`WALMART_PRIVATE_KEY_PATH` or `WALMART_PRIVATE_KEY`. Live mode switches on
+automatically once those are set (`WALMART_MODE=demo` forces demo data).
+Run with `node --env-file=.env src/server.js`.
 
 **Limitation:** Walmart's public API does not expose per-store stock counts, so
 in live mode store rows show the online price and "Check store" status. Getting
@@ -83,3 +86,11 @@ public/                     single-page UI (vanilla JS)
 3. Remove it from the "coming soon" list (`UPCOMING`) in `public/app.js`.
 
 The new retailer then shows up as a tab in the UI and under `/api/<id>/...`.
+
+## Deploying
+
+`npm start` runs `node src/server.js`, a single web server on `$PORT`
+(default 3000) that serves both the UI and the API. Any Node host works.
+For Render, `render.yaml` is included: in the Render dashboard choose
+**New → Blueprint**, pick this repo, and optionally paste the Walmart I/O
+credentials when prompted.

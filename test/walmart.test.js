@@ -113,3 +113,14 @@ test('live source normalizes affiliate API responses', async () => {
   assert.ok(calls.some((u) => u.includes('/search?query=thing')));
   assert.equal(adapter.features.storeQuantities, false);
 });
+
+test('fromEnv picks live mode only when credentials are present', () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const pem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const base = { PRICE_HISTORY_FILE: '' };
+  assert.equal(WalmartAdapter.fromEnv(base).mode, 'demo');
+  const keys = { ...base, WALMART_CONSUMER_ID: 'abc', WALMART_PRIVATE_KEY: pem.replace(/\n/g, '\\n') };
+  assert.equal(WalmartAdapter.fromEnv(keys).mode, 'live');
+  assert.equal(WalmartAdapter.fromEnv({ ...keys, WALMART_MODE: 'demo' }).mode, 'demo');
+  assert.throws(() => WalmartAdapter.fromEnv({ ...base, WALMART_MODE: 'live' }), /WALMART_CONSUMER_ID/);
+});

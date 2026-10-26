@@ -1,5 +1,5 @@
 {
-  "name": "brick-seek",
+  "name": "clearance-tracker",
   "version": "0.1.0",
   "description": "Retail inventory & price checker. Walmart first, built to add more retailers.",
   "type": "module",

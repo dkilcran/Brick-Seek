@@ -64,6 +64,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const registry = createDefaultRegistry();
   createApp(registry).listen(port, () => {
     const modes = registry.list().map((r) => `${r.name} (${r.mode})`).join(', ');
-    console.log(`Brick Seek running at http://localhost:${port} — retailers: ${modes}`);
+    console.log(`Clearance Tracker running at http://localhost:${port} — retailers: ${modes}`);
   });
 }
