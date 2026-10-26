@@ -1,0 +1,17 @@
+# One-click deploy on Render (https://render.com): New > Blueprint > pick this repo.
+services:
+  - type: web
+    name: clearance-tracker
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      # Leave these unset to run on demo data; set them to go live.
+      - key: WALMART_CONSUMER_ID
+        sync: false
+      - key: WALMART_PRIVATE_KEY
+        sync: false
+      - key: WALMART_KEY_VERSION
+        value: "1"
