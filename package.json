@@ -1,0 +1,14 @@
+{
+  "name": "brick-seek",
+  "version": "0.1.0",
+  "description": "Retail inventory & price checker. Walmart first, built to add more retailers.",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brick Seek — Local Inventory &amp; Price Checker</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="logo" href="#/">Brick<span>Seek</span></a>
+      <nav>
+        <a href="#/" data-nav="home">Check Stock</a>
+        <a href="#/deals" data-nav="deals">Deals</a>
+      </nav>
+      <form id="zip-form" class="zip-pill" autocomplete="off">
+        <label for="zip-input">ZIP</label>
+        <input id="zip-input" inputmode="numeric" maxlength="5" pattern="\d{5}" placeholder="12345">
+      </form>
+    </div>
+  </header>
+  <div id="mode-banner" class="banner" hidden></div>
+  <main id="app" class="wrap"></main>
+  <footer class="wrap footer">
+    Prices and stock can change at any time; confirm with the store before you go.
+    Not affiliated with any retailer.
+  </footer>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
