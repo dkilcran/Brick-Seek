@@ -62,6 +62,8 @@ export function createApp(registry = createDefaultRegistry()) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT ?? 3000);
   const registry = createDefaultRegistry();
+  registry.tracker.prune();
+  setInterval(() => registry.tracker.prune(), 24 * 60 * 60 * 1000).unref();
   createApp(registry).listen(port, () => {
     const modes = registry.list().map((r) => `${r.name} (${r.mode})`).join(', ');
     console.log(`Clearance Tracker running at http://localhost:${port} — retailers: ${modes}`);

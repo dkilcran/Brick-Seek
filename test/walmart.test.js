@@ -164,7 +164,7 @@ test('live deal pool merges trends, offer feeds and categories without duplicate
 test('fromEnv picks live mode only when credentials are present', () => {
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const pem = privateKey.export({ type: 'pkcs8', format: 'pem' });
-  const base = { PRICE_HISTORY_FILE: '' };
+  const base = {};
   assert.equal(WalmartAdapter.fromEnv(base).mode, 'demo');
   const keys = { ...base, WALMART_CONSUMER_ID: 'abc', WALMART_PRIVATE_KEY: pem.replace(/\n/g, '\\n') };
   assert.equal(WalmartAdapter.fromEnv(keys).mode, 'live');

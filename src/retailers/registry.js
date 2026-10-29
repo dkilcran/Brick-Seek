@@ -1,5 +1,6 @@
 // Central list of retailers. To add one: implement a RetailerAdapter subclass
 // under src/retailers/<name>/ and register it in createDefaultRegistry().
+import { PriceTracker } from '../lib/priceTracker.js';
 import { WalmartAdapter } from './walmart/index.js';
 
 export class RetailerRegistry {
@@ -24,6 +25,16 @@ export class RetailerRegistry {
   }
 }
 
-export function createDefaultRegistry(env = process.env) {
-  return new RetailerRegistry().register(WalmartAdapter.fromEnv(env));
+/** One price history database shared by every retailer. */
+export function createPriceTracker(env = process.env) {
+  return new PriceTracker({
+    dbPath: env.DATABASE_PATH || 'data/clearance-tracker.db',
+    legacyJsonPath: env.PRICE_HISTORY_FILE || 'data/price-history.json',
+  });
+}
+
+export function createDefaultRegistry(env = process.env, { tracker = createPriceTracker(env) } = {}) {
+  const registry = new RetailerRegistry().register(WalmartAdapter.fromEnv(env, { tracker }));
+  registry.tracker = tracker;
+  return registry;
 }

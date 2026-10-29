@@ -12,8 +12,8 @@ export class WalmartAdapter extends RetailerAdapter {
     this.tracker = tracker;
   }
 
-  static fromEnv(env = process.env) {
-    const tracker = new PriceTracker({ filePath: env.PRICE_HISTORY_FILE ?? 'data/price-history.json' });
+  /** @param {{ tracker?: PriceTracker }} shared  the app-wide price history store */
+  static fromEnv(env = process.env, { tracker = new PriceTracker() } = {}) {
     // Live whenever credentials are present, unless WALMART_MODE says otherwise.
     const hasKeys = Boolean(env.WALMART_CONSUMER_ID && (env.WALMART_PRIVATE_KEY || env.WALMART_PRIVATE_KEY_PATH));
     const mode = (env.WALMART_MODE || (hasKeys ? 'live' : 'demo')).toLowerCase();
@@ -34,6 +34,7 @@ export class WalmartAdapter extends RetailerAdapter {
     return new WalmartAdapter({
       source: new WalmartDemoSource({ publisherId: env.WALMART_PUBLISHER_ID }),
       mode: 'demo',
+      // Demo prices are synthetic, so keep them out of the real history database.
       tracker: new PriceTracker(),
     });
   }

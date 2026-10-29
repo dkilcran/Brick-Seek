@@ -5,7 +5,7 @@ store-by-store stock, shelf prices, clearance markdowns, price history and a
 deals feed. **Walmart is supported today**; the code is organized so more
 retailers can be added without touching the API or UI.
 
-No dependencies — just Node.js 20+.
+No dependencies — just Node.js 22.13+ (it uses Node's built-in SQLite).
 
 ```bash
 npm start        # http://localhost:3000
