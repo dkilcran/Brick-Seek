@@ -189,6 +189,7 @@ export class WalmartLiveSource {
       inStockOnline: onlineStock(item.stock),
       // Walmart only reports a best current offer for listings someone is selling now.
       listingActive: Boolean(item.bestMarketplacePrice),
+      currentOfferPrice: typeof item.bestMarketplacePrice?.price === 'number' ? item.bestMarketplacePrice.price : null,
     };
     RAW_FIELDS.set(product, scalarFields(item));
     return product;

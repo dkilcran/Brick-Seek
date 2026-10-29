@@ -9,7 +9,8 @@
 //   rating, reviewCount,   // null when unknown
 //   specialOffer,          // 'clearance' | 'rollback' | null
 //   inStockOnline,         // boolean, null when unknown
-//   listingActive          // true = someone sells it now, false = stale listing, null = unknown
+//   listingActive,         // true = someone sells it now, false = stale listing, null = unknown
+//   currentOfferPrice      // price of the best current offer, null when unknown
 // }
 // Store {
 //   retailer, id, name, address, city, state, zip, phone, distanceMiles

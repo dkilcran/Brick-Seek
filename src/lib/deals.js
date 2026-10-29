@@ -69,15 +69,31 @@ export function analyzeDeal(product, history = [], { today = new Date().toISOStr
   };
 }
 
+// Not sold online and priced below this share of the current offer: the
+// price is a leftover from when the item was last sold, not a real deal.
+export const STALE_PRICE_RATIO = 0.5;
+
 /**
  * Keep priced items the retailer sells itself. Items unavailable online stay
  * in ("In-store only") when there's a sign they're still sold: an active
- * listing, or the retailer's own Clearance/Rollback flag.
+ * listing, or the retailer's own Clearance/Rollback flag. Their price must
+ * also be near the current offer price, unless the retailer marks it
+ * Clearance (store clearance can sit well below the online offer).
  */
 export function isEligible(product) {
   if (product?.seller?.isRetailer !== true || typeof product.price !== 'number' || product.price <= 0) return false;
-  if (product.inStockOnline === false && product.listingActive === false && !product.specialOffer) return false;
-  return true;
+  if (product.inStockOnline !== false) return true;
+  if (product.listingActive === false && !product.specialOffer) return false;
+  return !isStalePrice(product);
+}
+
+export function isStalePrice(product) {
+  return (
+    product.inStockOnline === false &&
+    product.specialOffer !== 'clearance' &&
+    typeof product.currentOfferPrice === 'number' &&
+    product.price < product.currentOfferPrice * STALE_PRICE_RATIO
+  );
 }
 
 // Brand isn't always given, so fall back to the first word of the name.

@@ -314,6 +314,8 @@ test('listingActive reflects whether Walmart reports a current best offer', () =
   const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: 'unused' });
   assert.equal(source.toProduct({ itemId: 1, name: 'A', salePrice: 1, bestMarketplacePrice: { price: 1 } }).listingActive, true);
   assert.equal(source.toProduct({ itemId: 2, name: 'B', salePrice: 1 }).listingActive, false);
+  assert.equal(source.toProduct({ itemId: 3, name: 'C', salePrice: 5.97, bestMarketplacePrice: { price: 316.91 } }).currentOfferPrice, 316.91);
+  assert.equal(source.toProduct({ itemId: 4, name: 'D', salePrice: 1 }).currentOfferPrice, null);
 });
 
 test('unnamed marketplace listings are not labeled Walmart.com', () => {

@@ -23,6 +23,13 @@ test('isEligible keeps only retailer-sold, buyable items', () => {
   assert.equal(isEligible(product(7, { inStockOnline: false, listingActive: true })), true);
   assert.equal(isEligible(product(8, { inStockOnline: false, listingActive: false, specialOffer: 'clearance' })), true);
   assert.equal(isEligible(product(9, { inStockOnline: true, listingActive: false })), true, 'online stock is enough');
+  // not online, priced far below today's offer: an old price
+  const old = { inStockOnline: false, listingActive: true, price: 5.97, currentOfferPrice: 316.91 };
+  assert.equal(isEligible(product(10, old)), false);
+  assert.equal(isEligible(product(11, { ...old, specialOffer: 'clearance' })), true, 'store clearance can be far below online');
+  assert.equal(isEligible(product(12, { ...old, specialOffer: 'rollback' })), false);
+  assert.equal(isEligible(product(13, { ...old, price: 11.93, currentOfferPrice: 12.69 })), true);
+  assert.equal(isEligible(product(14, { inStockOnline: true, price: 5, currentOfferPrice: 300 })), true, 'online items are not checked');
 });
 
 test('analyzeDeal computes discount, savings and today\'s drop', () => {
