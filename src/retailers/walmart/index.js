@@ -117,8 +117,14 @@ export class WalmartAdapter extends RetailerAdapter {
     return this.source.localClearance(zip, opts);
   }
 
+  /** Departments that have Walmart-sold items in the deal pool, most items first. */
   async getCategories() {
-    return this.source.categories();
+    const counts = new Map();
+    for (const p of await this.source.dealCandidates()) {
+      if (!p.seller?.isRetailer || !p.category) continue;
+      counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
+    }
+    return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name]) => name);
   }
 
   async getPriceHistory(productId, opts = {}) {

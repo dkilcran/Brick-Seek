@@ -21,6 +21,16 @@ export function isWalmartSeller(item) {
   return item.marketplace !== true;
 }
 
+// categoryPath looks like "Home Page/Home/Rugs/Area Rugs"; the department is
+// the first segment after the "Home Page" root.
+export function departmentOf(categoryPath) {
+  const parts = String(categoryPath ?? '')
+    .split('/')
+    .map((p) => p.trim())
+    .filter((p) => p && !/^home ?page$/i.test(p));
+  return parts[0] ?? null;
+}
+
 function specialOfferOf(item) {
   const offer = String(item.specialOffer ?? '').toLowerCase();
   if (item.clearance === true || offer === 'clearance') return 'clearance';
@@ -98,7 +108,7 @@ export class WalmartLiveSource {
   }
 
   toProduct(item) {
-    const category = item.categoryPath?.split('/')[0] ?? null;
+    const category = departmentOf(item.categoryPath);
     return {
       retailer: 'walmart',
       id: String(item.itemId),

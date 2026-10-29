@@ -4,7 +4,7 @@ import { generateKeyPairSync, createVerify } from 'node:crypto';
 import { parseWalmartInput } from '../src/retailers/walmart/identifiers.js';
 import { WalmartAdapter } from '../src/retailers/walmart/index.js';
 import { WalmartDemoSource } from '../src/retailers/walmart/demoSource.js';
-import { WalmartLiveSource, signWalmartRequest, isWalmartSeller } from '../src/retailers/walmart/liveSource.js';
+import { WalmartLiveSource, signWalmartRequest, isWalmartSeller, departmentOf } from '../src/retailers/walmart/liveSource.js';
 import { CATALOG } from '../src/retailers/walmart/catalog.js';
 import { stateForZip } from '../src/lib/geo.js';
 
@@ -124,6 +124,14 @@ test('live source normalizes affiliate API responses', async () => {
   await assert.rejects(adapter.getLocalClearance('72756'), /local clearance/);
 });
 
+test('departmentOf skips the "Home Page" root of real category paths', () => {
+  assert.equal(departmentOf('Home Page/Home/Rugs/Area Rugs'), 'Home');
+  assert.equal(departmentOf('Home Page/Food/Beverages/Soda Pop'), 'Food');
+  assert.equal(departmentOf('Electronics/TVs'), 'Electronics');
+  assert.equal(departmentOf('Home Page'), null);
+  assert.equal(departmentOf(undefined), null);
+});
+
 test('isWalmartSeller keeps only first-party items', () => {
   assert.equal(isWalmartSeller({ sellerInfo: 'Walmart.com' }), true);
   assert.equal(isWalmartSeller({ sellerInfo: 'walmart' }), true);
@@ -134,7 +142,7 @@ test('isWalmartSeller keeps only first-party items', () => {
 
 test('live deal pool merges trends, offer feeds and categories without duplicates', async () => {
   const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
-  const item = (itemId, extra = {}) => ({ itemId, name: `Item ${itemId}`, salePrice: 10, msrp: 20, categoryPath: 'Home/Decor', ...extra });
+  const item = (itemId, extra = {}) => ({ itemId, name: `Item ${itemId}`, salePrice: 10, msrp: 20, categoryPath: 'Home Page/Home/Decor', ...extra });
   const responses = {
     '/taxonomy': { categories: [{ id: '1', name: 'Home' }, { id: '2', name: 'Toys' }] },
     '/trends': { items: [item(1), item(2, { sellerInfo: 'Rug Co', marketplace: true })] },
@@ -159,6 +167,7 @@ test('live deal pool merges trends, offer feeds and categories without duplicate
   assert.equal(byId['3'].specialOffer, 'clearance');
   assert.equal(byId['4'].rating, 4.6);
   assert.equal(byId['4'].inStockOnline, true);
+  assert.equal(byId['4'].category, 'Home');
 });
 
 test('fromEnv picks live mode only when credentials are present', () => {
