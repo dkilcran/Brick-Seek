@@ -184,6 +184,14 @@ export function createRoutes(registry) {
       const started = Date.now();
       const analyzed = await analyzeCandidates(adapter);
       const analysisMs = Date.now() - started;
+      const all = await adapter.getDealCandidates();
+      const excluded = {
+        marketplaceSeller: all.filter((p) => p.seller?.isRetailer !== true).length,
+        outOfStockOnline: all.filter((p) => p.seller?.isRetailer === true && p.inStockOnline === false).length,
+        noPrice: all.filter((p) => p.seller?.isRetailer === true && p.inStockOnline !== false && !(p.price > 0)).length,
+      };
+      const sellers = {};
+      for (const p of all) if (p.seller?.isRetailer !== true) sellers[p.seller?.name ?? '?'] = (sellers[p.seller?.name ?? '?'] ?? 0) + 1;
       const byCategory = {};
       for (const d of analyzed) byCategory[d.product.category ?? 'Other'] = (byCategory[d.product.category ?? 'Other'] ?? 0) + 1;
       return {
@@ -191,6 +199,8 @@ export function createRoutes(registry) {
         mode: adapter.mode,
         pool: adapter.dealPoolStats?.() ?? null,
         eligible: analyzed.length,
+        excluded,
+        topMarketplaceSellers: Object.entries(sellers).sort((x, y) => y[1] - x[1]).slice(0, 10),
         discounted: analyzed.filter((d) => d.discountPercent > 0).length,
         withHistory: analyzed.filter((d) => d.previousPrice !== null).length,
         over100: analyzed.filter((d) => d.product.price >= 100 && d.dollarsOff > 0).length,

@@ -72,6 +72,7 @@ export class WalmartLiveSource {
   constructor({
     consumerId, keyVersion = '1', privateKey, privateKeyPath, publisherId, fetchImpl = fetch,
     poolPages = 3, poolRefreshMs = 60 * 60 * 1000, poolMaxItems = 20000,
+    minIntervalMs = 1000, maxRetries = 3,
   } = {}) {
     if (!consumerId) throw new Error('WALMART_CONSUMER_ID is required for live mode');
     this.consumerId = consumerId;
@@ -85,6 +86,18 @@ export class WalmartLiveSource {
     this.poolMaxItems = poolMaxItems;
     this.pool = null; // { products, fetchedAt, stats }
     this.poolRefresh = null;
+    // Walmart rate-limits the affiliate API, so requests are spaced out.
+    this.minIntervalMs = minIntervalMs;
+    this.maxRetries = maxRetries;
+    this.nextSlot = 0;
+  }
+
+  /** Wait for this request's turn: at most one request per minIntervalMs. */
+  async throttle() {
+    const now = Date.now();
+    const slot = Math.max(now, this.nextSlot);
+    this.nextSlot = slot + this.minIntervalMs;
+    if (slot > now) await new Promise((r) => setTimeout(r, slot - now));
   }
 
   /** @param {{ cache?: boolean }} opts  big paged responses skip the cache */
@@ -94,7 +107,8 @@ export class WalmartLiveSource {
       if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
     }
     if (this.publisherId) url.searchParams.set('publisherId', this.publisherId);
-    const fetchJson = async () => {
+    const fetchJson = async (attempt = 0) => {
+      await this.throttle();
       const res = await this.fetch(url, {
         headers: {
           Accept: 'application/json',
@@ -106,6 +120,13 @@ export class WalmartLiveSource {
         },
       });
       if (res.status === 404) return null;
+      if (res.status === 429 && attempt < this.maxRetries) {
+        // Honor Retry-After when given, otherwise back off 2s, 4s, 8s.
+        const retryAfter = Number(res.headers?.get?.('retry-after'));
+        const waitMs = retryAfter > 0 ? retryAfter * 1000 : 2000 * 2 ** attempt;
+        await new Promise((r) => setTimeout(r, Math.min(waitMs, 30000)));
+        return fetchJson(attempt + 1);
+      }
       if (!res.ok) {
         const err = new Error(`Walmart API ${res.status}: ${await res.text().catch(() => '')}`.trim());
         err.status = 502;
@@ -113,7 +134,7 @@ export class WalmartLiveSource {
       }
       return res.json();
     };
-    return cache ? this.cache.wrap(url.toString(), fetchJson) : fetchJson();
+    return cache ? this.cache.wrap(url.toString(), () => fetchJson()) : fetchJson();
   }
 
   toProduct(item) {
@@ -229,7 +250,8 @@ export class WalmartLiveSource {
       ...SPECIAL_OFFERS.map((offer) => [offer, '/paginated/items', { specialOffer: offer }, this.poolPages]),
       ...cats.map((c) => [c.name, '/paginated/items', { category: c.id }, this.poolPages]),
     ];
-    const results = await mapLimit(feeds, 4, ([name, path, params, pages]) => this.fetchFeed(name, path, params, pages));
+    // One feed at a time; requests are throttled anyway and parallel bursts get rate-limited.
+    const results = await mapLimit(feeds, 1, ([name, path, params, pages]) => this.fetchFeed(name, path, params, pages));
     const byId = new Map();
     for (const { items } of results) {
       for (const item of items) {
@@ -251,13 +273,14 @@ export class WalmartLiveSource {
   /**
    * Deal pool: trending items, plus several pages each of the Clearance and
    * Rollback feeds and every product department. Refreshed hourly in the
-   * background; visitors get the previous pool while a refresh runs.
+   * background; visitors get the previous pool while a refresh runs. The
+   * very first load waits for the whole fetch (a couple of minutes).
    */
   async dealCandidates({ category } = {}) {
     if (!this.pool) {
       this.poolRefresh ??= this.fetchPool().finally(() => { this.poolRefresh = null; });
       this.pool = await this.poolRefresh;
-    } else if (Date.now() - this.pool.fetchedAt > this.poolRefreshMs && !this.poolRefresh) {
+    } else if (Date.now() - this.pool.fetchedAt >= this.poolRefreshMs && !this.poolRefresh) {
       this.poolRefresh = this.fetchPool()
         .then((pool) => { this.pool = pool; })
         .catch((err) => console.warn('walmart: pool refresh failed', err.message))

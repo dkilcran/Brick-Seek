@@ -110,7 +110,7 @@ test('live source normalizes affiliate API responses', async () => {
       : { items: [{ itemId: 42, name: 'Thing', salePrice: 9.98, msrp: 19.99, upc: '000000000042', categoryPath: 'Home/Kitchen', brandName: 'Acme' }] };
     return { ok: true, status: 200, json: async () => body, text: async () => '' };
   };
-  const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
   const adapter = new WalmartAdapter({ source, mode: 'live' });
   const [p] = await adapter.searchProducts('thing');
   assert.equal(p.id, '42');
@@ -156,7 +156,7 @@ test('live deal pool merges trends, offer feeds and categories without duplicate
     if (!key) return { ok: false, status: 500, text: async () => 'boom' };
     return { ok: true, status: 200, json: async () => responses[key], text: async () => '' };
   };
-  const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
   const warn = console.warn;
   console.warn = () => {}; // category 2 fails on purpose
   const pool = await source.dealCandidates();
@@ -203,7 +203,7 @@ test('live pool follows nextPage up to the page limit and refreshes in the backg
     return { ok: true, status: 200, json: async () => body, text: async () => '' };
   };
   const source = new WalmartLiveSource({
-    consumerId: 'abc', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl,
+    consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl,
     poolPages: 3, poolRefreshMs: 0,
   });
   const recorded = [];
@@ -238,7 +238,7 @@ test('a failing feed is reported in stats without emptying the pool', async () =
     if (u.includes('/trends')) return { ok: true, status: 200, json: async () => ({ items: [{ itemId: 1, name: 'A', salePrice: 5, msrp: 9 }] }), text: async () => '' };
     return { ok: false, status: 429, json: async () => ({}), text: async () => 'Too Many Requests' };
   };
-  const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
   const warn = console.warn;
   const log = console.log;
   console.warn = () => {};
@@ -248,4 +248,22 @@ test('a failing feed is reported in stats without emptying the pool', async () =
   console.log = log;
   assert.equal(pool.length, 1);
   assert.match(source.poolStats().feeds.find((f) => f.name === 'Home').error, /429/);
+});
+
+test('live requests retry after a 429 and are spaced out', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const times = [];
+  let calls = 0;
+  const fetchImpl = async () => {
+    times.push(Date.now());
+    calls += 1;
+    if (calls === 1) return { ok: false, status: 429, headers: { get: () => '0.05' }, text: async () => 'slow down' };
+    return { ok: true, status: 200, json: async () => ({ items: [{ itemId: 1, name: 'A', salePrice: 5 }] }), text: async () => '' };
+  };
+  const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl, minIntervalMs: 30 });
+  const [p] = await source.search('a');
+  assert.equal(p.id, '1');
+  assert.equal(calls, 2, 'retried once');
+  await source.search('b');
+  assert.ok(times[2] - times[1] >= 25, 'next request waited its turn');
 });
