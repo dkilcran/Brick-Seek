@@ -17,6 +17,17 @@ export class PriceTracker {
   }
 
   record(retailer, productId, price, date = new Date()) {
+    this.add(retailer, productId, price, date);
+    this.save();
+  }
+
+  /** Record many products' prices with a single write to disk. */
+  recordMany(retailer, products, date = new Date()) {
+    for (const p of products) this.add(retailer, p.id, p.price, date);
+    this.save();
+  }
+
+  add(retailer, productId, price, date) {
     if (typeof price !== 'number') return;
     const key = `${retailer}:${productId}`;
     const day = date.toISOString().slice(0, 10);
@@ -25,7 +36,6 @@ export class PriceTracker {
     if (last?.date === day) last.price = price;
     else series.push({ date: day, price });
     if (series.length > 365) series.shift();
-    this.save();
   }
 
   history(retailer, productId) {

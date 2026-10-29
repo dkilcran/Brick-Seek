@@ -61,6 +61,8 @@ export class WalmartAdapter extends RetailerAdapter {
       storeQuantities: this._mode === 'demo',
       deals: true,
       priceHistory: true,
+      // Walmart's public API has no per-store prices, so only demo data has this.
+      localClearance: this._mode === 'demo',
     };
   }
 
@@ -102,8 +104,16 @@ export class WalmartAdapter extends RetailerAdapter {
     return { product, results };
   }
 
-  async getDeals(opts = {}) {
-    return this.source.deals(opts);
+  async getDealCandidates(opts = {}) {
+    const products = await this.source.dealCandidates(opts);
+    // Every refresh adds a day to the history behind "price drops" and "lowest ever".
+    this.tracker.recordMany(this.id, products);
+    return products;
+  }
+
+  async getLocalClearance(zip, opts = {}) {
+    if (!this.features.localClearance) return super.getLocalClearance(zip, opts);
+    return this.source.localClearance(zip, opts);
   }
 
   async getCategories() {
@@ -113,7 +123,11 @@ export class WalmartAdapter extends RetailerAdapter {
   async getPriceHistory(productId, opts = {}) {
     const product = await this.source.getById(productId);
     if (!product) return null;
+    return this.getPriceHistoryFor(product, opts);
+  }
+
+  async getPriceHistoryFor(product, opts = {}) {
     const fromSource = await this.source.priceHistory(product, opts);
-    return fromSource ?? this.tracker.history(this.id, productId);
+    return fromSource ?? this.tracker.history(this.id, product.id);
   }
 }

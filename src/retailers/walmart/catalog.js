@@ -2,7 +2,7 @@
 // made up; they exist so the full UI can be exercised without API keys.
 
 const RAW = [
-  // [itemId, name, brand, category, msrp, onlinePrice]
+  // [itemId, name, brand, category, msrp, onlinePrice, marketplaceSeller?]
   ['501001', '55" Class 4K UHD Smart LED TV', 'Onn', 'Electronics', 348.0, 268.0],
   ['501002', '65" Class QLED 4K Smart TV', 'Vizio', 'Electronics', 599.99, 478.0],
   ['501003', 'Wireless Noise Cancelling Headphones', 'Sony', 'Electronics', 349.99, 248.0],
@@ -45,6 +45,10 @@ const RAW = [
   ['510002', '27" IPS Monitor, 75Hz', 'Acer', 'Computers', 199.99, 129.0],
   ['510003', 'Wireless Keyboard and Mouse Combo', 'Logitech', 'Computers', 39.99, 24.99],
   ['510004', 'All-in-One Inkjet Printer', 'HP', 'Computers', 129.99, 79.0],
+  // Marketplace listings: sold by third parties, so never shown as deals.
+  ['511001', 'Shag Area Rug 8x10, Gray', 'Rugshop', 'Home', 399.99, 79.99, 'RugDirect Outlet'],
+  ['511002', 'Vintage Medallion Area Rug 5x7', 'Unique Loom', 'Home', 289.0, 54.5, 'HomeDecor Plus LLC'],
+  ['511003', 'Bluetooth Earbuds, 3-Pack', 'Generic', 'Electronics', 99.99, 12.99, 'TechDeals Store'],
 ];
 
 function upcFor(itemId) {
@@ -55,7 +59,7 @@ function upcFor(itemId) {
   return body + ((10 - (sum % 10)) % 10);
 }
 
-export const CATALOG = RAW.map(([itemId, name, brand, category, msrp, price]) => ({
+export const CATALOG = RAW.map(([itemId, name, brand, category, msrp, price, seller]) => ({
   itemId,
   name: `${brand} ${name}`,
   brand,
@@ -63,6 +67,7 @@ export const CATALOG = RAW.map(([itemId, name, brand, category, msrp, price]) =>
   msrp,
   price,
   upc: upcFor(itemId),
+  seller: seller ?? 'Walmart.com',
 }));
 
 export const CATEGORIES = [...new Set(CATALOG.map((p) => p.category))].sort();

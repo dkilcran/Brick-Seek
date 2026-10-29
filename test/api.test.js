@@ -48,11 +48,44 @@ test('search, inventory, history, deals, stores', async () => {
 
   assert.equal((await get('/api/walmart/products/503001/history')).body.history.length, 90);
   assert.ok((await get('/api/walmart/deals?minDiscount=10')).body.deals.length > 0);
+  for (const section of ['top', 'drops', 'bigticket']) {
+    const { status, body } = await get(`/api/walmart/deals?section=${section}`);
+    assert.equal(status, 200, section);
+    assert.ok(body.deals.length > 0, section);
+  }
+  const clearance = await get('/api/walmart/deals?section=clearance&zip=10001');
+  assert.ok(clearance.body.deals.length > 0);
+  assert.ok(clearance.body.deals.every((d) => d.store && d.quantity > 0));
   assert.ok((await get('/api/walmart/stores?zip=10001')).body.stores.length > 0);
   assert.ok((await get('/api/walmart/categories')).body.categories.includes('Toys'));
 });
 
+test('deal sections for the home page', async () => {
+  const { body } = await get('/api/walmart/deals/sections?zip=72712');
+  assert.deepEqual(body.sections.map((s) => s.id), ['top', 'drops', 'lowest', 'bigticket', 'clearance']);
+  const top = body.sections[0].deals;
+  assert.equal(top.length, 8);
+  const perCategory = {};
+  for (const d of top) perCategory[d.product.category] = (perCategory[d.product.category] ?? 0) + 1;
+  assert.ok(Object.values(perCategory).every((n) => n <= 2));
+  const noZip = await get('/api/walmart/deals/sections');
+  assert.match(noZip.body.sections.at(-1).note, /ZIP/);
+});
+
+test('marketplace items never appear', async () => {
+  const { body } = await get('/api/walmart/deals/sections?zip=72712&limit=24');
+  const ids = body.sections.flatMap((s) => s.deals.map((d) => d.product.id));
+  assert.ok(!ids.some((id) => id.startsWith('511')));
+  assert.equal((await get('/api/walmart/search?q=rug')).body.products.length, 0);
+  const direct = await get('/api/walmart/products/511001');
+  assert.equal(direct.status, 404);
+  assert.match(direct.body.error, /sold by RugDirect Outlet, not Walmart/);
+  assert.equal((await get('/api/walmart/products/511001/inventory?zip=10001')).status, 404);
+});
+
 test('validation and error statuses', async () => {
+  assert.equal((await get('/api/walmart/deals?section=bogus')).status, 400);
+  assert.equal((await get('/api/walmart/deals?section=clearance')).status, 400);
   assert.equal((await get('/api/walmart/products/503001/inventory?zip=abc')).status, 400);
   assert.equal((await get('/api/walmart/search')).status, 400);
   assert.equal((await get('/api/walmart/products/000/inventory?zip=10001')).status, 404);
@@ -64,4 +97,11 @@ test('serves the SPA', async () => {
   const res = await fetch(`${base}/`);
   assert.equal(res.status, 200);
   assert.match(await res.text(), /<main id="app"/);
+});
+
+test('home sections never repeat a product', async () => {
+  const { body } = await get('/api/walmart/deals/sections?zip=72712');
+  const ids = body.sections.flatMap((s) => s.deals.map((d) => d.product.id));
+  assert.equal(new Set(ids).size, ids.length);
+  assert.ok(body.sections.filter((s) => s.deals.length).length >= 4);
 });

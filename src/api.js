@@ -1,7 +1,8 @@
 // JSON API. All routes are retailer-scoped (/api/:retailer/...) so new
 // retailers show up automatically once they're in the registry.
 import { isValidZip } from './lib/geo.js';
-import { summarizeAvailability } from './retailers/RetailerAdapter.js';
+import { summarizeAvailability, isSoldByRetailer } from './retailers/RetailerAdapter.js';
+import { analyzeDeal, isEligible, rankSection, SECTIONS } from './lib/deals.js';
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -21,6 +22,51 @@ function requireZip(zip) {
   return zip;
 }
 
+// The site only covers items the retailer sells itself, not marketplace sellers.
+function requireRetailerItem(adapter, product) {
+  if (!product) throw new HttpError(404, 'Product not found');
+  if (!isSoldByRetailer(product)) {
+    throw new HttpError(404, `This item is sold by ${product.seller?.name ?? 'a marketplace seller'}, not ${adapter.name}`);
+  }
+  return product;
+}
+
+async function analyzeCandidates(adapter, { category } = {}) {
+  const products = (await adapter.getDealCandidates({ category })).filter(isEligible);
+  return Promise.all(products.map(async (p) => analyzeDeal(p, await adapter.getPriceHistoryFor(p))));
+}
+
+// One row per product: its best store markdown, plus how many stores have it.
+async function localClearanceDeals(adapter, zip, { category, minDiscount = 0, limit = 50 } = {}) {
+  const rows = (await adapter.getLocalClearance(zip, { category })).filter(
+    (r) => isSoldByRetailer(r.product) && r.discountPercent >= minDiscount,
+  );
+  const byProduct = new Map();
+  for (const r of rows) {
+    const entry = byProduct.get(r.product.id);
+    if (!entry) {
+      byProduct.set(r.product.id, { best: r, stores: 1 });
+    } else {
+      entry.stores += 1;
+      if (r.price < entry.best.price) entry.best = r;
+    }
+  }
+  return [...byProduct.values()]
+    .map(({ best, stores }) => ({
+      product: best.product,
+      lowestPrice: best.price,
+      discountPercent: best.discountPercent,
+      dollarsOff: Number((best.product.msrp - best.price).toFixed(2)),
+      store: best.store,
+      quantity: best.quantity,
+      storesWithDeal: stores,
+      clearance: true,
+      reasons: ['Clearance'],
+    }))
+    .sort((a, b) => b.discountPercent - a.discountPercent)
+    .slice(0, limit);
+}
+
 function clampInt(value, fallback, min, max) {
   const n = Number.parseInt(value, 10);
   if (Number.isNaN(n)) return fallback;
@@ -37,15 +83,14 @@ export function createRoutes(registry) {
       const adapter = requireRetailer(registry, params.retailer);
       const q = (query.get('q') ?? '').trim();
       if (!q) throw new HttpError(400, 'Query parameter "q" is required');
-      const products = await adapter.searchProducts(q, { limit: clampInt(query.get('limit'), 25, 1, 50) });
+      const products = (await adapter.searchProducts(q, { limit: clampInt(query.get('limit'), 25, 1, 50) }))
+        .filter(isSoldByRetailer);
       return { retailer: adapter.id, query: q, products };
     }],
 
     ['GET', '/api/:retailer/products/:id', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);
-      const product = await adapter.getProduct(params.id);
-      if (!product) throw new HttpError(404, 'Product not found');
-      return { product };
+      return { product: requireRetailerItem(adapter, await adapter.getProduct(params.id)) };
     }],
 
     ['GET', '/api/:retailer/products/:id/inventory', async ({ params, query }) => {
@@ -53,7 +98,7 @@ export function createRoutes(registry) {
       const zip = requireZip(query.get('zip'));
       const radiusMiles = clampInt(query.get('radius'), 50, 5, 100);
       const result = await adapter.checkInventory(params.id, zip, { radiusMiles });
-      if (!result) throw new HttpError(404, 'Product not found');
+      requireRetailerItem(adapter, result?.product);
       const sort = query.get('sort') ?? 'distance';
       const results = [...result.results].sort((a, b) =>
         sort === 'price'
@@ -83,17 +128,52 @@ export function createRoutes(registry) {
       return { zip, stores: await adapter.findStores(zip, { radiusMiles: clampInt(query.get('radius'), 50, 5, 100) }) };
     }],
 
+    // One section: top | drops | lowest | bigticket | clearance (needs zip)
     ['GET', '/api/:retailer/deals', async ({ params, query }) => {
       const adapter = requireRetailer(registry, params.retailer);
-      const zip = query.get('zip') || undefined;
-      if (zip) requireZip(zip);
-      const deals = await adapter.getDeals({
-        zip,
+      const section = query.get('section') ?? 'top';
+      if (!SECTIONS[section]) throw new HttpError(400, `Unknown section "${section}"`);
+      const opts = {
         category: query.get('category') || undefined,
         minDiscount: clampInt(query.get('minDiscount'), 0, 0, 100),
         limit: clampInt(query.get('limit'), 50, 1, 100),
-      });
-      return { deals };
+      };
+      if (section === 'clearance') {
+        if (!adapter.features.localClearance) {
+          throw new HttpError(501, `${adapter.name} doesn't publish store-level prices yet`);
+        }
+        return { section, deals: await localClearanceDeals(adapter, requireZip(query.get('zip')), opts) };
+      }
+      return { section, deals: rankSection(section, await analyzeCandidates(adapter, opts), opts) };
+    }],
+
+    // Every section at once, for the home page.
+    ['GET', '/api/:retailer/deals/sections', async ({ params, query }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      const zip = query.get('zip') || undefined;
+      if (zip) requireZip(zip);
+      const opts = { category: query.get('category') || undefined, limit: clampInt(query.get('limit'), 8, 1, 24) };
+      const analyzed = await analyzeCandidates(adapter, opts);
+      // Each product shows up once on the page, in the first section that wants it.
+      const shown = new Set();
+      const unseen = (deals) => deals.filter((d) => !shown.has(d.product.id)).slice(0, opts.limit);
+      const sections = [];
+      for (const [id, meta] of Object.entries(SECTIONS)) {
+        let deals = [];
+        let note = null;
+        if (id === 'clearance') {
+          note = !adapter.features.localClearance
+            ? `${adapter.name} doesn't publish store-level prices, so this needs another data source.`
+            : !zip ? 'Enter your ZIP code to see shelf markdowns at nearby stores.' : null;
+          if (!note) deals = unseen(await localClearanceDeals(adapter, zip, { ...opts, limit: 100 }));
+        } else {
+          // Top goes first so nothing is hidden yet; later sections rank deeper to refill after repeats.
+          deals = id === 'top' ? rankSection(id, analyzed, opts) : unseen(rankSection(id, analyzed, { ...opts, limit: 100 }));
+        }
+        deals.forEach((d) => shown.add(d.product.id));
+        sections.push({ id, ...meta, deals, note });
+      }
+      return { sections };
     }],
 
     ['GET', '/api/:retailer/categories', async ({ params }) => {

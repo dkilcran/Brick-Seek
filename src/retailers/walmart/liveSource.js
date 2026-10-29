@@ -11,6 +11,40 @@ import { STOCK_STATUS } from '../RetailerAdapter.js';
 import { walmartProductUrl } from './identifiers.js';
 
 const BASE_URL = 'https://developer.api.walmart.com/api-proxy/service/affil/product/v2';
+const SPECIAL_OFFERS = ['clearance', 'rollback'];
+const POOL_TTL_MS = 30 * 60 * 1000;
+const POOL_CATEGORY_LIMIT = 20;
+
+// Items without seller info are treated as Walmart's own (first-party).
+export function isWalmartSeller(item) {
+  if (item.sellerInfo) return /^walmart(\.com)?$/i.test(String(item.sellerInfo).trim());
+  return item.marketplace !== true;
+}
+
+function specialOfferOf(item) {
+  const offer = String(item.specialOffer ?? '').toLowerCase();
+  if (item.clearance === true || offer === 'clearance') return 'clearance';
+  if (item.rollback === true || offer === 'rollback') return 'rollback';
+  return null;
+}
+
+function onlineStock(stock) {
+  if (!stock) return null;
+  return /^available$/i.test(stock) ? true : /not available/i.test(stock) ? false : null;
+}
+
+async function mapLimit(list, limit, fn) {
+  const out = [];
+  let i = 0;
+  const workers = Array.from({ length: Math.min(limit, list.length) }, async () => {
+    while (i < list.length) {
+      const idx = i++;
+      out[idx] = await fn(list[idx]);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
 
 export function signWalmartRequest({ consumerId, keyVersion, privateKey, timestamp = Date.now() }) {
   const ts = String(timestamp);
@@ -33,6 +67,7 @@ export class WalmartLiveSource {
     this.publisherId = publisherId;
     this.fetch = fetchImpl;
     this.cache = new TtlCache({ ttlMs: 10 * 60 * 1000 });
+    this.poolCache = new TtlCache({ ttlMs: POOL_TTL_MS });
   }
 
   async request(path, params = {}) {
@@ -76,7 +111,11 @@ export class WalmartLiveSource {
       url: item.productUrl ?? walmartProductUrl(item.itemId, this.publisherId),
       msrp: item.msrp ?? item.salePrice ?? null,
       price: item.salePrice ?? null,
-      onlineStock: item.stock ?? null,
+      seller: { name: item.sellerInfo ?? 'Walmart.com', isRetailer: isWalmartSeller(item) },
+      rating: Number.parseFloat(item.customerRating) || null,
+      reviewCount: item.numReviews ?? null,
+      specialOffer: specialOfferOf(item),
+      inStockOnline: onlineStock(item.stock),
     };
   }
 
@@ -97,9 +136,13 @@ export class WalmartLiveSource {
     return item ? this.toProduct(item) : null;
   }
 
-  async categories() {
+  async taxonomy() {
     const data = await this.request('/taxonomy');
-    return (data?.categories ?? []).map((c) => c.name).sort();
+    return data?.categories ?? [];
+  }
+
+  async categories() {
+    return (await this.taxonomy()).map((c) => c.name).sort();
   }
 
   async stores(zip, { limit = 15 } = {}) {
@@ -134,20 +177,35 @@ export class WalmartLiveSource {
     return null; // fall back to locally recorded observations
   }
 
-  async deals({ category, minDiscount = 0, limit = 50 } = {}) {
-    const data = await this.request('/trends');
-    return (data?.items ?? [])
-      .map((i) => this.toProduct(i))
-      .filter((p) => p.price && p.msrp && (!category || p.category === category))
-      .map((product) => ({
-        product,
-        lowestPrice: product.price,
-        discountPercent: Math.round((1 - product.price / product.msrp) * 100),
-        storesWithDeal: null,
-        clearance: false,
-      }))
-      .filter((d) => d.discountPercent >= minDiscount)
-      .sort((a, b) => b.discountPercent - a.discountPercent)
-      .slice(0, limit);
+  // One upstream call failing shouldn't empty the deals page.
+  async safeItems(path, params) {
+    try {
+      return (await this.request(path, params))?.items ?? [];
+    } catch (err) {
+      console.warn(`walmart: ${path} failed: ${err.message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Deal pool: trending items, the first page of each top-level category,
+   * and the Clearance and Rollback feeds. Cached as a whole for 30 minutes.
+   */
+  async dealCandidates({ category } = {}) {
+    const pool = await this.poolCache.wrap('pool', async () => {
+      const cats = (await this.taxonomy().catch(() => [])).slice(0, POOL_CATEGORY_LIMIT);
+      const requests = [
+        ['/trends', {}],
+        ...SPECIAL_OFFERS.map((offer) => ['/paginated/items', { specialOffer: offer }]),
+        ...cats.map((c) => ['/paginated/items', { category: c.id }]),
+      ];
+      const batches = await mapLimit(requests, 4, ([path, params]) => this.safeItems(path, params));
+      const byId = new Map();
+      for (const item of batches.flat()) {
+        if (item?.itemId && !byId.has(item.itemId)) byId.set(item.itemId, this.toProduct(item));
+      }
+      return [...byId.values()];
+    });
+    return category ? pool.filter((p) => p.category === category) : pool;
   }
 }
