@@ -8,7 +8,8 @@
 //   seller: { name, isRetailer },  // isRetailer false = marketplace seller
 //   rating, reviewCount,   // null when unknown
 //   specialOffer,          // 'clearance' | 'rollback' | null
-//   inStockOnline          // boolean, null when unknown
+//   inStockOnline,         // boolean, null when unknown
+//   listingActive          // true = someone sells it now, false = stale listing, null = unknown
 // }
 // Store {
 //   retailer, id, name, address, city, state, zip, phone, distanceMiles

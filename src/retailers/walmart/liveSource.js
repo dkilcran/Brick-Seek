@@ -31,6 +31,12 @@ export function departmentOf(categoryPath) {
   return parts[0] ?? null;
 }
 
+// Walmart fills msrp with 9999 when it has no real list price.
+const PLACEHOLDER_MSRP = 9999;
+export function realMsrp(msrp) {
+  return typeof msrp === 'number' && msrp > 0 && msrp < PLACEHOLDER_MSRP ? msrp : null;
+}
+
 function specialOfferOf(item) {
   const offer = String(item.specialOffer ?? '').toLowerCase();
   if (item.clearance === true || offer === 'clearance') return 'clearance';
@@ -49,7 +55,13 @@ const RAW_FIELDS = new WeakMap();
 function scalarFields(item) {
   const out = {};
   for (const [k, v] of Object.entries(item)) {
-    if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) {
+    if (k === 'bestMarketplacePrice' && v && typeof v === 'object') {
+      // Flatten this one: it describes the item's current best offer.
+      for (const [sk, sv] of Object.entries(v)) {
+        if (sv === null || ['string', 'number', 'boolean'].includes(typeof sv)) out[`${k}.${sk}`] = sv;
+      }
+      out[k] = '[object]';
+    } else if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) {
       out[k] = typeof v === 'string' && v.length > 120 ? `${v.slice(0, 120)}…` : v;
     } else {
       out[k] = Array.isArray(v) ? `[array ${v.length}]` : '[object]';
@@ -165,7 +177,7 @@ export class WalmartLiveSource {
       category,
       imageUrl: item.largeImage ?? item.mediumImage ?? item.thumbnailImage ?? null,
       url: item.productUrl ?? walmartProductUrl(item.itemId, this.publisherId),
-      msrp: item.msrp ?? item.salePrice ?? null,
+      msrp: realMsrp(item.msrp) ?? item.salePrice ?? null,
       price: item.salePrice ?? null,
       seller: {
         name: item.sellerInfo ?? (item.marketplace === true ? 'Marketplace seller (unnamed)' : 'Walmart.com'),
@@ -175,6 +187,8 @@ export class WalmartLiveSource {
       reviewCount: item.numReviews ?? null,
       specialOffer: specialOfferOf(item),
       inStockOnline: onlineStock(item.stock),
+      // Walmart only reports a best current offer for listings someone is selling now.
+      listingActive: Boolean(item.bestMarketplacePrice),
     };
     RAW_FIELDS.set(product, scalarFields(item));
     return product;

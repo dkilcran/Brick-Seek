@@ -71,10 +71,13 @@ export function analyzeDeal(product, history = [], { today = new Date().toISOStr
 
 /**
  * Keep priced items the retailer sells itself. Items unavailable online stay
- * in: they're often still on store shelves, and get an "In-store only" tag.
+ * in ("In-store only") when there's a sign they're still sold: an active
+ * listing, or the retailer's own Clearance/Rollback flag.
  */
 export function isEligible(product) {
-  return product?.seller?.isRetailer === true && typeof product.price === 'number' && product.price > 0;
+  if (product?.seller?.isRetailer !== true || typeof product.price !== 'number' || product.price <= 0) return false;
+  if (product.inStockOnline === false && product.listingActive === false && !product.specialOffer) return false;
+  return true;
 }
 
 // Brand isn't always given, so fall back to the first word of the name.

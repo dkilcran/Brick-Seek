@@ -31,9 +31,22 @@ function requireRetailerItem(adapter, product) {
   return product;
 }
 
+// Ranking ~20k items takes a few hundred ms, so reuse it until the pool changes.
+const analysisCache = new Map();
+
 async function analyzeCandidates(adapter, { category } = {}) {
-  const products = (await adapter.getDealCandidates({ category })).filter(isEligible);
-  return Promise.all(products.map(async (p) => analyzeDeal(p, await adapter.getPriceHistoryFor(p))));
+  const products = await adapter.getDealCandidates({ category });
+  const today = new Date().toISOString().slice(0, 10);
+  const key = `${adapter.id}|${category ?? ''}|${adapter.dealPoolStamp ?? ''}|${today}`;
+  if (adapter.dealPoolStamp != null && analysisCache.has(key)) return analysisCache.get(key);
+  const analyzed = await Promise.all(
+    products.filter(isEligible).map(async (p) => analyzeDeal(p, await adapter.getPriceHistoryFor(p))),
+  );
+  if (adapter.dealPoolStamp != null) {
+    for (const k of analysisCache.keys()) if (k.startsWith(`${adapter.id}|`) && !k.includes(`|${adapter.dealPoolStamp}|`)) analysisCache.delete(k);
+    analysisCache.set(key, analyzed);
+  }
+  return analyzed;
 }
 
 // One row per product: its best store markdown, plus how many stores have it.
@@ -188,6 +201,8 @@ export function createRoutes(registry) {
       const excluded = {
         marketplaceSeller: all.filter((p) => p.seller?.isRetailer !== true).length,
         noPrice: all.filter((p) => p.seller?.isRetailer === true && !(p.price > 0)).length,
+        staleNotOnline: all.filter((p) => p.seller?.isRetailer === true && p.price > 0 && p.inStockOnline === false
+          && p.listingActive === false && !p.specialOffer).length,
       };
       const sellers = {};
       for (const p of all) if (p.seller?.isRetailer !== true) sellers[p.seller?.name ?? '?'] = (sellers[p.seller?.name ?? '?'] ?? 0) + 1;

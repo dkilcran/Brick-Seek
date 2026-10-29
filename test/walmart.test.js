@@ -4,7 +4,7 @@ import { generateKeyPairSync, createVerify } from 'node:crypto';
 import { parseWalmartInput } from '../src/retailers/walmart/identifiers.js';
 import { WalmartAdapter } from '../src/retailers/walmart/index.js';
 import { WalmartDemoSource } from '../src/retailers/walmart/demoSource.js';
-import { WalmartLiveSource, signWalmartRequest, isWalmartSeller, departmentOf } from '../src/retailers/walmart/liveSource.js';
+import { WalmartLiveSource, signWalmartRequest, isWalmartSeller, departmentOf, realMsrp } from '../src/retailers/walmart/liveSource.js';
 import { CATALOG } from '../src/retailers/walmart/catalog.js';
 import { stateForZip } from '../src/lib/geo.js';
 
@@ -297,6 +297,23 @@ test('a feed that fails again keeps its items from the previous pool', async () 
   const home = second.stats.feeds.find((f) => f.name === 'Home');
   assert.equal(home.reusedPrevious, 2);
   assert.equal(second.stats.failedFeeds, 1);
+});
+
+test('a 9999 list price is a placeholder, not a discount', () => {
+  const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: 'unused' });
+  const rug = source.toProduct({ itemId: 1, name: 'Rug', salePrice: 139.98, msrp: 9999, stock: 'Not available' });
+  assert.equal(rug.msrp, 139.98, 'falls back to the sale price: no discount');
+  assert.equal(source.toProduct({ itemId: 2, name: 'Tee', salePrice: 7, msrp: 8.5 }).msrp, 8.5);
+  assert.equal(realMsrp(9999), null);
+  assert.equal(realMsrp(12000), null);
+  assert.equal(realMsrp(0), null);
+  assert.equal(realMsrp(349.99), 349.99);
+});
+
+test('listingActive reflects whether Walmart reports a current best offer', () => {
+  const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: 'unused' });
+  assert.equal(source.toProduct({ itemId: 1, name: 'A', salePrice: 1, bestMarketplacePrice: { price: 1 } }).listingActive, true);
+  assert.equal(source.toProduct({ itemId: 2, name: 'B', salePrice: 1 }).listingActive, false);
 });
 
 test('unnamed marketplace listings are not labeled Walmart.com', () => {

@@ -117,6 +117,11 @@ export class WalmartAdapter extends RetailerAdapter {
     return products;
   }
 
+  /** Changes whenever the deal pool does; used to cache ranking. */
+  get dealPoolStamp() {
+    return this.source.poolStamp;
+  }
+
   dealPoolStats() {
     return this.source.poolStats();
   }

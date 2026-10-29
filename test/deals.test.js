@@ -18,6 +18,11 @@ test('isEligible keeps only retailer-sold, buyable items', () => {
   assert.equal(isEligible(product(3, { inStockOnline: false })), true, 'in-store only items stay');
   assert.equal(isEligible(product(4, { inStockOnline: null })), true);
   assert.equal(isEligible(product(5, { price: null })), false);
+  // not online and no sign anyone still sells it: stale listing
+  assert.equal(isEligible(product(6, { inStockOnline: false, listingActive: false })), false);
+  assert.equal(isEligible(product(7, { inStockOnline: false, listingActive: true })), true);
+  assert.equal(isEligible(product(8, { inStockOnline: false, listingActive: false, specialOffer: 'clearance' })), true);
+  assert.equal(isEligible(product(9, { inStockOnline: true, listingActive: false })), true, 'online stock is enough');
 });
 
 test('analyzeDeal computes discount, savings and today\'s drop', () => {

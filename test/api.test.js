@@ -1,6 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from '../src/server.js';
+import { createRoutes, matchRoute } from '../src/api.js';
 import { RetailerRegistry } from '../src/retailers/registry.js';
 import { RetailerAdapter } from '../src/retailers/RetailerAdapter.js';
 import { WalmartAdapter } from '../src/retailers/walmart/index.js';
@@ -112,4 +113,25 @@ test('stats describe the deal pool', async () => {
   assert.ok(body.pool.uniqueItems > 40);
   assert.ok(body.eligible > 0 && body.eligible < body.pool.uniqueItems, 'marketplace items excluded');
   assert.equal(typeof body.analysisMs, 'number');
+});
+
+test('deal ranking is reused until the pool changes', async () => {
+  const adapter = new WalmartAdapter();
+  let historyCalls = 0;
+  const original = adapter.getPriceHistoryFor.bind(adapter);
+  adapter.getPriceHistoryFor = (...args) => { historyCalls += 1; return original(...args); };
+  let stamp = 'pool-1';
+  Object.defineProperty(adapter, 'dealPoolStamp', { get: () => stamp });
+  const routes = createRoutes(new RetailerRegistry().register(adapter));
+  const { route, params } = matchRoute(routes, 'GET', '/api/walmart/stats');
+  const run = () => route.handler({ params, query: new URLSearchParams() });
+
+  await run();
+  const afterFirst = historyCalls;
+  assert.ok(afterFirst > 0);
+  await run();
+  assert.equal(historyCalls, afterFirst, 'second request reused the ranking');
+  stamp = 'pool-2';
+  await run();
+  assert.equal(historyCalls, afterFirst * 2, 'a new pool is ranked again');
 });
