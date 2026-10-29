@@ -72,7 +72,7 @@ export class WalmartLiveSource {
   constructor({
     consumerId, keyVersion = '1', privateKey, privateKeyPath, publisherId, fetchImpl = fetch,
     poolPages = 3, poolRefreshMs = 60 * 60 * 1000, poolMaxItems = 20000,
-    minIntervalMs = 1000, maxRetries = 3,
+    minIntervalMs = 2000, maxRetries = 3, retryPassDelayMs = 30000,
   } = {}) {
     if (!consumerId) throw new Error('WALMART_CONSUMER_ID is required for live mode');
     this.consumerId = consumerId;
@@ -89,6 +89,7 @@ export class WalmartLiveSource {
     // Walmart rate-limits the affiliate API, so requests are spaced out.
     this.minIntervalMs = minIntervalMs;
     this.maxRetries = maxRetries;
+    this.retryPassDelayMs = retryPassDelayMs;
     this.nextSlot = 0;
   }
 
@@ -151,7 +152,10 @@ export class WalmartLiveSource {
       url: item.productUrl ?? walmartProductUrl(item.itemId, this.publisherId),
       msrp: item.msrp ?? item.salePrice ?? null,
       price: item.salePrice ?? null,
-      seller: { name: item.sellerInfo ?? 'Walmart.com', isRetailer: isWalmartSeller(item) },
+      seller: {
+        name: item.sellerInfo ?? (item.marketplace === true ? 'Marketplace seller (unnamed)' : 'Walmart.com'),
+        isRetailer: isWalmartSeller(item),
+      },
       rating: Number.parseFloat(item.customerRating) || null,
       reviewCount: item.numReviews ?? null,
       specialOffer: specialOfferOf(item),
@@ -251,23 +255,48 @@ export class WalmartLiveSource {
       ...cats.map((c) => [c.name, '/paginated/items', { category: c.id }, this.poolPages]),
     ];
     // One feed at a time; requests are throttled anyway and parallel bursts get rate-limited.
-    const results = await mapLimit(feeds, 1, ([name, path, params, pages]) => this.fetchFeed(name, path, params, pages));
-    const byId = new Map();
-    for (const { items } of results) {
-      for (const item of items) {
-        if (byId.size >= this.poolMaxItems) break;
-        if (item?.itemId && !byId.has(item.itemId)) byId.set(item.itemId, this.toProduct(item));
-      }
+    const fetchAll = (list) => mapLimit(list, 1, ([name, path, params, pages]) => this.fetchFeed(name, path, params, pages));
+    const results = await fetchAll(feeds);
+    // Give rate-limited feeds one more try after a pause.
+    const failed = feeds.filter((_, i) => results[i].stat.error);
+    if (failed.length) {
+      await new Promise((r) => setTimeout(r, this.retryPassDelayMs));
+      const retried = await fetchAll(failed);
+      failed.forEach((feed, j) => {
+        const i = feeds.indexOf(feed);
+        if (retried[j].items.length >= results[i].items.length) {
+          results[i] = { items: retried[j].items, stat: { ...retried[j].stat, retried: true } };
+        }
+      });
     }
+
+    const previous = this.pool;
+    const byId = new Map();
+    const feedIds = {};
+    results.forEach(({ items, stat }) => {
+      let products = items.filter((item) => item?.itemId).map((item) => this.toProduct(item));
+      // A feed that still failed keeps what it had last time rather than dropping out.
+      const before = previous?.feedIds?.[stat.name];
+      if (stat.error && before && before.length > products.length) {
+        products = before.map((id) => previous.byId.get(id)).filter(Boolean);
+        stat.reusedPrevious = products.length;
+      }
+      feedIds[stat.name] = products.map((p) => p.id);
+      for (const p of products) {
+        if (byId.size >= this.poolMaxItems) break;
+        if (!byId.has(p.id)) byId.set(p.id, p);
+      }
+    });
     const stats = {
       fetchedAt: new Date().toISOString(),
       durationMs: Date.now() - started,
       requests: results.reduce((n, r) => n + r.stat.pages + (r.stat.error ? 1 : 0), 0),
       uniqueItems: byId.size,
+      failedFeeds: results.filter((r) => r.stat.error).length,
       feeds: results.map((r) => r.stat),
     };
-    console.log(`walmart: deal pool ${stats.uniqueItems} items from ${stats.requests} requests in ${stats.durationMs}ms`);
-    return { products: [...byId.values()], fetchedAt: Date.now(), stats };
+    console.log(`walmart: deal pool ${stats.uniqueItems} items, ${stats.failedFeeds} failed feeds, ${stats.requests} requests in ${stats.durationMs}ms`);
+    return { products: [...byId.values()], byId, feedIds, fetchedAt: Date.now(), stats };
   }
 
   /**

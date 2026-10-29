@@ -110,7 +110,7 @@ test('live source normalizes affiliate API responses', async () => {
       : { items: [{ itemId: 42, name: 'Thing', salePrice: 9.98, msrp: 19.99, upc: '000000000042', categoryPath: 'Home/Kitchen', brandName: 'Acme' }] };
     return { ok: true, status: 200, json: async () => body, text: async () => '' };
   };
-  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, retryPassDelayMs: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
   const adapter = new WalmartAdapter({ source, mode: 'live' });
   const [p] = await adapter.searchProducts('thing');
   assert.equal(p.id, '42');
@@ -156,7 +156,7 @@ test('live deal pool merges trends, offer feeds and categories without duplicate
     if (!key) return { ok: false, status: 500, text: async () => 'boom' };
     return { ok: true, status: 200, json: async () => responses[key], text: async () => '' };
   };
-  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, retryPassDelayMs: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
   const warn = console.warn;
   console.warn = () => {}; // category 2 fails on purpose
   const pool = await source.dealCandidates();
@@ -203,7 +203,7 @@ test('live pool follows nextPage up to the page limit and refreshes in the backg
     return { ok: true, status: 200, json: async () => body, text: async () => '' };
   };
   const source = new WalmartLiveSource({
-    consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl,
+    consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, retryPassDelayMs: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl,
     poolPages: 3, poolRefreshMs: 0,
   });
   const recorded = [];
@@ -238,7 +238,7 @@ test('a failing feed is reported in stats without emptying the pool', async () =
     if (u.includes('/trends')) return { ok: true, status: 200, json: async () => ({ items: [{ itemId: 1, name: 'A', salePrice: 5, msrp: 9 }] }), text: async () => '' };
     return { ok: false, status: 429, json: async () => ({}), text: async () => 'Too Many Requests' };
   };
-  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, retryPassDelayMs: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
   const warn = console.warn;
   const log = console.log;
   console.warn = () => {};
@@ -266,4 +266,42 @@ test('live requests retry after a 429 and are spaced out', async () => {
   assert.equal(calls, 2, 'retried once');
   await source.search('b');
   assert.ok(times[2] - times[1] >= 25, 'next request waited its turn');
+});
+
+test('a feed that fails again keeps its items from the previous pool', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  let homeFails = false;
+  const ok = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => '' });
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes('/taxonomy')) return ok({ categories: [{ id: '1', name: 'Home' }, { id: '2', name: 'Toys' }] });
+    if (u.includes('category=1')) {
+      if (homeFails) return { ok: false, status: 429, text: async () => 'Too Many Requests' };
+      return ok({ items: [{ itemId: 11, name: 'Lamp', salePrice: 5 }, { itemId: 12, name: 'Rug', salePrice: 6 }] });
+    }
+    if (u.includes('category=2')) return ok({ items: [{ itemId: 21, name: 'Ball', salePrice: 3 }] });
+    return ok({ items: [] });
+  };
+  const source = new WalmartLiveSource({
+    consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, retryPassDelayMs: 0,
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl,
+  });
+  const quiet = [console.warn, console.log];
+  console.warn = () => {};
+  console.log = () => {};
+  source.pool = await source.fetchPool();
+  homeFails = true;
+  const second = await source.fetchPool();
+  [console.warn, console.log] = quiet;
+  assert.deepEqual(second.products.map((p) => p.id).sort(), ['11', '12', '21']);
+  const home = second.stats.feeds.find((f) => f.name === 'Home');
+  assert.equal(home.reusedPrevious, 2);
+  assert.equal(second.stats.failedFeeds, 1);
+});
+
+test('unnamed marketplace listings are not labeled Walmart.com', () => {
+  const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: 'unused' });
+  const p = source.toProduct({ itemId: 1, name: 'X', salePrice: 1, marketplace: true });
+  assert.equal(p.seller.isRetailer, false);
+  assert.notEqual(p.seller.name, 'Walmart.com');
 });
