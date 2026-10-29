@@ -209,6 +209,13 @@ export function createRoutes(registry) {
       };
     }],
 
+    // Diagnostics: raw retailer fields, to find signals of stale listings.
+    ['GET', '/api/:retailer/stats/fields', async ({ params }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      await adapter.getDealCandidates();
+      return adapter.fieldSurvey?.() ?? { error: 'not available for this retailer' };
+    }],
+
     ['GET', '/api/:retailer/categories', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);
       return { categories: await adapter.getCategories() };

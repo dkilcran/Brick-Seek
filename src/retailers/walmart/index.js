@@ -121,6 +121,10 @@ export class WalmartAdapter extends RetailerAdapter {
     return this.source.poolStats();
   }
 
+  fieldSurvey() {
+    return this.source.fieldSurvey?.() ?? null;
+  }
+
   async getLocalClearance(zip, opts = {}) {
     if (!this.features.localClearance) return super.getLocalClearance(zip, opts);
     return this.source.localClearance(zip, opts);

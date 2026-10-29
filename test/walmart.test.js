@@ -305,3 +305,26 @@ test('unnamed marketplace listings are not labeled Walmart.com', () => {
   assert.equal(p.seller.isRetailer, false);
   assert.notEqual(p.seller.name, 'Walmart.com');
 });
+
+test('field survey splits raw Walmart fields by online availability', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const items = [
+    { itemId: 1, name: 'Old', salePrice: 1.4, msrp: 140, stock: 'Not available', offerType: 'ONLINE_AND_STORE', availableOnline: false },
+    { itemId: 2, name: 'Live', salePrice: 9.97, msrp: 20, stock: 'Available', offerType: 'ONLINE_AND_STORE', availableOnline: true },
+  ];
+  const fetchImpl = async (url) => ({
+    ok: true, status: 200, text: async () => '',
+    json: async () => (String(url).includes('/taxonomy') ? { categories: [] } : { items: String(url).includes('/trends') ? items : [] }),
+  });
+  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, retryPassDelayMs: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const log = console.log;
+  console.log = () => {};
+  await source.dealCandidates();
+  console.log = log;
+  const survey = source.fieldSurvey();
+  assert.deepEqual(survey.sizes, { online: 1, notOnline: 1 });
+  assert.deepEqual(survey.flags.availableOnline, { online: { true: 1 }, notOnline: { false: 1 } });
+  assert.deepEqual(survey.priceCents, { online: { 97: 1 }, notOnline: { 40: 1 } });
+  assert.equal(survey.samples.notOnlineHugeDiscount[0].itemId, 1);
+  assert.ok(!('offerType' in (await source.dealCandidates())[0]), 'raw fields stay out of products');
+});

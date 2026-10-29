@@ -43,6 +43,21 @@ function onlineStock(stock) {
   return /^available$/i.test(stock) ? true : /not available/i.test(stock) ? false : null;
 }
 
+// Raw Walmart fields per product, kept out of API responses; used by fieldSurvey().
+const RAW_FIELDS = new WeakMap();
+
+function scalarFields(item) {
+  const out = {};
+  for (const [k, v] of Object.entries(item)) {
+    if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) {
+      out[k] = typeof v === 'string' && v.length > 120 ? `${v.slice(0, 120)}…` : v;
+    } else {
+      out[k] = Array.isArray(v) ? `[array ${v.length}]` : '[object]';
+    }
+  }
+  return out;
+}
+
 async function mapLimit(list, limit, fn) {
   const out = [];
   let i = 0;
@@ -140,7 +155,7 @@ export class WalmartLiveSource {
 
   toProduct(item) {
     const category = departmentOf(item.categoryPath);
-    return {
+    const product = {
       retailer: 'walmart',
       id: String(item.itemId),
       sku: String(item.itemId),
@@ -160,6 +175,60 @@ export class WalmartLiveSource {
       reviewCount: item.numReviews ?? null,
       specialOffer: specialOfferOf(item),
       inStockOnline: onlineStock(item.stock),
+    };
+    RAW_FIELDS.set(product, scalarFields(item));
+    return product;
+  }
+
+  /**
+   * Diagnostics for spotting stale listings: which fields Walmart sends and
+   * their values, split by available-online vs not, plus price-cent endings
+   * and samples of the biggest "discounts" among items not sold online.
+   */
+  fieldSurvey() {
+    const products = this.pool?.products ?? [];
+    const group = (p) => (p.inStockOnline === false ? 'notOnline' : 'online');
+    const keys = { online: {}, notOnline: {} };
+    const values = {};
+    const cents = { online: {}, notOnline: {} };
+    const sizes = { online: 0, notOnline: 0 };
+    for (const p of products) {
+      if (!p.seller?.isRetailer) continue;
+      const g = group(p);
+      sizes[g] += 1;
+      const raw = RAW_FIELDS.get(p) ?? {};
+      for (const [k, v] of Object.entries(raw)) {
+        keys[g][k] = (keys[g][k] ?? 0) + 1;
+        if (typeof v === 'string' && v.length > 40) continue;
+        values[k] ??= { online: {}, notOnline: {} };
+        const key = String(v);
+        values[k][g][key] = (values[k][g][key] ?? 0) + 1;
+      }
+      if (typeof p.price === 'number') {
+        const c = Math.round((p.price % 1) * 100).toString().padStart(2, '0');
+        cents[g][c] = (cents[g][c] ?? 0) + 1;
+      }
+    }
+    const top = (obj, n = 12) => Object.fromEntries(Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, n));
+    // Only fields with a handful of distinct values are useful as flags.
+    const flags = {};
+    for (const [k, v] of Object.entries(values)) {
+      const distinct = new Set([...Object.keys(v.online), ...Object.keys(v.notOnline)]).size;
+      if (distinct <= 15) flags[k] = { online: top(v.online, 15), notOnline: top(v.notOnline, 15) };
+    }
+    const offPct = (p) => (p.msrp > 0 ? 1 - p.price / p.msrp : 0);
+    const sample = (list) => list.slice(0, 8).map((p) => ({ ...RAW_FIELDS.get(p), _discountPct: Math.round(offPct(p) * 100) }));
+    const sold = products.filter((p) => p.seller?.isRetailer && p.price > 0);
+    return {
+      sizes,
+      keys: { online: top(keys.online, 80), notOnline: top(keys.notOnline, 80) },
+      flags,
+      priceCents: { online: top(cents.online, 15), notOnline: top(cents.notOnline, 15) },
+      samples: {
+        notOnlineHugeDiscount: sample(sold.filter((p) => p.inStockOnline === false && offPct(p) >= 0.9)),
+        notOnlineModestDiscount: sample(sold.filter((p) => p.inStockOnline === false && offPct(p) > 0.1 && offPct(p) < 0.4)),
+        onlineDiscounted: sample(sold.filter((p) => p.inStockOnline !== false && offPct(p) > 0.2)),
+      },
     };
   }
 
