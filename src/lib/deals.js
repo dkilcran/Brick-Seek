@@ -78,14 +78,25 @@ export function isEligible(product) {
   );
 }
 
-/** Take the best-scored deals, at most `perCategory` from any one category. */
-export function diversify(deals, { limit, perCategory = 2 }) {
-  const counts = new Map();
+// Brand isn't always given, so fall back to the first word of the name.
+function brandOf(product) {
+  return String(product.brand || product.name.split(/\s+/)[0] || '').toLowerCase();
+}
+
+/**
+ * Take deals in order, at most `perCategory` from one category and
+ * `perBrand` from one brand (pass Infinity to turn either cap off).
+ */
+export function diversify(deals, { limit, perCategory = 2, perBrand = 2 }) {
+  const cats = new Map();
+  const brands = new Map();
   const picked = [];
   for (const deal of deals) {
     const cat = deal.product.category ?? 'Other';
-    if ((counts.get(cat) ?? 0) >= perCategory) continue;
-    counts.set(cat, (counts.get(cat) ?? 0) + 1);
+    const brand = brandOf(deal.product);
+    if ((cats.get(cat) ?? 0) >= perCategory || (brands.get(brand) ?? 0) >= perBrand) continue;
+    cats.set(cat, (cats.get(cat) ?? 0) + 1);
+    brands.set(brand, (brands.get(brand) ?? 0) + 1);
     picked.push(deal);
     if (picked.length >= limit) break;
   }
@@ -104,7 +115,7 @@ export const SECTIONS = Object.freeze({
  * Rank analyzed deals for one section.
  * @param {ReturnType<typeof analyzeDeal>[]} analyzed
  */
-export function rankSection(section, analyzed, { category, minDiscount = 0, limit = 50, perCategory } = {}) {
+export function rankSection(section, analyzed, { category, minDiscount = 0, limit = 50, perCategory, perBrand } = {}) {
   let list = analyzed.filter(
     (d) => d.discountPercent >= minDiscount && (!category || d.product.category === category),
   );
@@ -120,11 +131,14 @@ export function rankSection(section, analyzed, { category, minDiscount = 0, limi
       break;
     case 'top':
       list = list.filter((d) => d.discountPercent > 0 || d.dropPercent > 0).sort((a, b) => b.score - a.score);
-      // A single category can still fill the page when the user picked it.
-      if (!category) return diversify(list, { limit, perCategory: perCategory ?? Math.max(2, Math.ceil(limit / 8)) });
       break;
     default:
       throw Object.assign(new Error(`Unknown deal section "${section}"`), { status: 400 });
   }
-  return list.slice(0, limit);
+  // Caps grow with the page size; a picked category can fill the page, but one brand can't.
+  return diversify(list, {
+    limit,
+    perCategory: category ? Infinity : perCategory ?? Math.max(2, Math.ceil(limit / 8)),
+    perBrand: perBrand ?? Math.max(2, Math.ceil(limit / 12)),
+  });
 }

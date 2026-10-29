@@ -168,7 +168,9 @@ export function createRoutes(registry) {
           if (!note) deals = unseen(await localClearanceDeals(adapter, zip, { ...opts, limit: 100 }));
         } else {
           // Top goes first so nothing is hidden yet; later sections rank deeper to refill after repeats.
-          deals = id === 'top' ? rankSection(id, analyzed, opts) : unseen(rankSection(id, analyzed, { ...opts, limit: 100 }));
+          // Keep the caps for the visible count even though later sections rank deeper.
+          const caps = { perCategory: Math.max(2, Math.ceil(opts.limit / 8)), perBrand: Math.max(2, Math.ceil(opts.limit / 12)) };
+          deals = id === 'top' ? rankSection(id, analyzed, opts) : unseen(rankSection(id, analyzed, { ...opts, ...caps, limit: 100 }));
         }
         deals.forEach((d) => shown.add(d.product.id));
         sections.push({ id, ...meta, deals, note });

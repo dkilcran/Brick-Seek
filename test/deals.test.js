@@ -44,11 +44,23 @@ test('clearance, rollback and bigger savings raise the score', () => {
   assert.ok(bigger > base, 'same percent off, more dollars off');
 });
 
-test('diversify caps items per category', () => {
-  const deals = [1, 2, 3, 4].map((i) => ({ product: product(i, { category: 'Rugs' }) }))
-    .concat([5, 6].map((i) => ({ product: product(i, { category: 'Toys' }) })));
-  const picked = diversify(deals, { limit: 10, perCategory: 2 });
-  assert.deepEqual(picked.map((d) => d.product.id), [1, 2, 5, 6]);
+test('diversify caps items per category and per brand', () => {
+  const deals = [1, 2, 3, 4].map((i) => ({ product: product(i, { category: 'Rugs', brand: `B${i}` }) }))
+    .concat([5, 6].map((i) => ({ product: product(i, { category: 'Toys', brand: `B${i}` }) })));
+  assert.deepEqual(diversify(deals, { limit: 10, perCategory: 2 }).map((d) => d.product.id), [1, 2, 5, 6]);
+
+  // Same brand across categories, brand missing (falls back to first word of the name)
+  const safavieh = [1, 2, 3].map((i) => ({ product: product(i, { category: `C${i}`, brand: null, name: `SAFAVIEH Rug ${i}` }) }))
+    .concat([{ product: product(4, { category: 'C4', brand: 'Safavieh' }) }, { product: product(5, { category: 'C5', brand: 'Other' }) }]);
+  assert.deepEqual(diversify(safavieh, { limit: 10, perCategory: Infinity }).map((d) => d.product.id), [1, 2, 5]);
+});
+
+test('big-ticket on the home page is not one brand', () => {
+  const rugs = [1, 2, 3, 4, 5].map((i) => analyzeDeal(product(i, { price: 200, msrp: 330 + i, brand: 'Safavieh' }), [], { today: TODAY }));
+  const tv = analyzeDeal(product(9, { price: 300, msrp: 400, category: 'TV', brand: 'Onn' }), [], { today: TODAY });
+  const picked = rankSection('bigticket', [...rugs, tv], { limit: 8 });
+  assert.equal(picked.filter((d) => d.product.brand === 'Safavieh').length, 2);
+  assert.ok(picked.some((d) => d.product.id === 9));
 });
 
 test('rankSection builds each section', () => {
