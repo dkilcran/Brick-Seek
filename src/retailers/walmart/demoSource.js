@@ -31,6 +31,9 @@ export class WalmartDemoSource {
   }
 
   toProduct(item) {
+    const rng = seeded('product', item.itemId);
+    const isRetailer = item.seller === 'Walmart.com';
+    const offerRoll = rng();
     return {
       retailer: 'walmart',
       id: item.itemId,
@@ -43,6 +46,11 @@ export class WalmartDemoSource {
       url: walmartProductUrl(item.itemId, this.publisherId),
       msrp: item.msrp,
       price: item.price,
+      seller: { name: item.seller, isRetailer },
+      rating: Number((3.4 + rng() * 1.6).toFixed(1)),
+      reviewCount: intBetween(rng, 3, 9000),
+      specialOffer: offerRoll < 0.12 ? 'clearance' : offerRoll < 0.35 ? 'rollback' : null,
+      inStockOnline: rng() > 0.08,
     };
   }
 
@@ -136,11 +144,13 @@ export class WalmartDemoSource {
     const today = this.now();
     const points = [];
     let price = walmartPrice(product.msrp * (0.85 + rng() * 0.15), rng);
+    // About a quarter of items changed price today; the rest have held for a while.
+    const daysAtCurrent = rng() < 0.25 ? 0 : intBetween(rng, 1, Math.min(45, days - 2));
     for (let i = days - 1; i >= 0; i--) {
       const date = new Date(today.getTime() - i * 86400000);
-      if (i === 0) {
+      if (i <= daysAtCurrent) {
         points.push({ date: dayKey(date), price: product.price });
-        break;
+        continue;
       }
       if (rng() < 0.06) {
         // occasional rollback or price change
@@ -152,27 +162,26 @@ export class WalmartDemoSource {
     return points;
   }
 
-  async deals({ zip, category, minDiscount = 0, limit = 50 } = {}) {
-    const sampleZip = zip || '72712';
-    const stores = await this.stores(sampleZip);
-    const deals = [];
-    for (const item of CATALOG) {
-      if (category && item.category !== category) continue;
-      const product = this.toProduct(item);
-      const availability = stores
-        .map((store) => this.storeAvailability(product, store))
-        .filter((a) => a.status !== STOCK_STATUS.OUT_OF_STOCK);
-      const lowest = Math.min(product.price, ...availability.map((a) => a.price));
-      const discountPercent = Math.round((1 - lowest / product.msrp) * 100);
-      if (discountPercent < minDiscount) continue;
-      deals.push({
-        product,
-        lowestPrice: lowest,
-        discountPercent,
-        storesWithDeal: availability.filter((a) => a.price <= lowest + 0.01).length,
-        clearance: availability.some((a) => a.clearance && a.price === lowest),
-      });
+  async dealCandidates({ category } = {}) {
+    return CATALOG.filter((item) => !category || item.category === category).map((item) => this.toProduct(item));
+  }
+
+  async localClearance(zip, { radiusMiles = 50, category } = {}) {
+    const stores = await this.stores(zip, { radiusMiles });
+    const found = [];
+    for (const product of await this.dealCandidates({ category })) {
+      for (const store of stores) {
+        const a = this.storeAvailability(product, store);
+        if (!a.clearance || !a.quantity) continue;
+        found.push({
+          product,
+          store,
+          price: a.price,
+          quantity: a.quantity,
+          discountPercent: Math.round((1 - a.price / product.msrp) * 100),
+        });
+      }
     }
-    return deals.sort((a, b) => b.discountPercent - a.discountPercent).slice(0, limit);
+    return found;
   }
 }

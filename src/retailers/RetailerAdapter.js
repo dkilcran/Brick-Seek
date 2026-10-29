@@ -4,7 +4,11 @@
 //
 // Product {
 //   retailer, id, name, brand, category, upc, sku, imageUrl, url,
-//   msrp, price            // national/online price
+//   msrp, price,           // national/online price
+//   seller: { name, isRetailer },  // isRetailer false = marketplace seller
+//   rating, reviewCount,   // null when unknown
+//   specialOffer,          // 'clearance' | 'rollback' | null
+//   inStockOnline          // boolean, null when unknown
 // }
 // Store {
 //   retailer, id, name, address, city, state, zip, phone, distanceMiles
@@ -17,8 +21,9 @@
 //   aisle: string|null,
 //   clearance: boolean
 // }
-// Deal {
-//   product: Product, lowestPrice, discountPercent, storesWithDeal, clearance
+// Deal: see analyzeDeal() in src/lib/deals.js
+// LocalClearance {
+//   product: Product, store: Store, price, discountPercent, quantity
 // }
 // PricePoint { date: 'YYYY-MM-DD', price }
 
@@ -60,7 +65,7 @@ export class RetailerAdapter {
 
   /** Feature flags so the UI can hide what a retailer can't do. */
   get features() {
-    return { search: true, inventory: true, deals: true, priceHistory: true };
+    return { search: true, inventory: true, deals: true, priceHistory: true, localClearance: false };
   }
 
   /** Hint text describing what identifiers the search box accepts. */
@@ -107,9 +112,22 @@ export class RetailerAdapter {
     throw new NotSupportedError(this.name, 'inventory');
   }
 
-  /** @returns {Promise<Deal[]>} */
-  async getDeals(_opts = {}) {
+  /**
+   * Products to rank for the deal sections. Only items the retailer sells
+   * itself are kept, so adapters can return marketplace items too.
+   * @returns {Promise<Product[]>}
+   */
+  async getDealCandidates(_opts = {}) {
     throw new NotSupportedError(this.name, 'deals');
+  }
+
+  /**
+   * Store-level markdowns near a ZIP. Needs per-store pricing, which many
+   * retailers don't publish; set features.localClearance when implemented.
+   * @returns {Promise<LocalClearance[]>}
+   */
+  async getLocalClearance(_zip, _opts = {}) {
+    throw new NotSupportedError(this.name, 'local clearance');
   }
 
   /** @returns {Promise<string[]>} */
@@ -121,6 +139,20 @@ export class RetailerAdapter {
   async getPriceHistory(_productId, _opts = {}) {
     throw new NotSupportedError(this.name, 'price history');
   }
+
+  /**
+   * History for a product already in hand. Override when the default
+   * (look the product up again by id) would cost an API call per product.
+   * @returns {Promise<PricePoint[]>}
+   */
+  async getPriceHistoryFor(product, opts = {}) {
+    return (await this.getPriceHistory(product.id, opts)) ?? [];
+  }
+}
+
+/** True when the retailer itself sells the product (not a marketplace seller). */
+export function isSoldByRetailer(product) {
+  return product?.seller?.isRetailer === true;
 }
 
 /** Collapse store-level availability into a summary for the UI. */

@@ -59,7 +59,7 @@ function thumb(product) {
   return `<div class="thumb">${product.imageUrl ? `<img src="${esc(product.imageUrl)}" alt="" loading="lazy">` : initials(product.brand ?? product.name)}</div>`;
 }
 
-function productCard(product, { zip, price = product.price, extra = '' } = {}) {
+function productCard(product, { zip, price = product.price, extra = '', note = '' } = {}) {
   const off = pctOff(price, product.msrp);
   const href = `#/r/${esc(product.retailer)}/item/${encodeURIComponent(product.id)}${zip ? `?zip=${zip}` : ''}`;
   return `<a class="card product-card" href="${href}">
@@ -70,6 +70,7 @@ function productCard(product, { zip, price = product.price, extra = '' } = {}) {
       ${off ? `<span class="was">${money(product.msrp)}</span><span class="badge off">${off}% off</span>` : ''}
       ${extra}
     </div>
+    ${note}
     <div class="muted" style="font-size:13px">Item #${esc(product.id)}${product.upc ? ` · UPC ${esc(product.upc)}` : ''}</div>
   </a>`;
 }
@@ -157,22 +158,54 @@ async function homeView(query) {
       $results.innerHTML = `<div class="error">${esc(err.message)}</div>`;
     }
   } else if (r.features.deals) {
-    const $deals = $app.querySelector('#home-deals');
-    try {
-      const { deals } = await api(`/api/${r.id}/deals?limit=8${state.zip ? `&zip=${state.zip}` : ''}`);
-      if (deals.length) {
-        $deals.innerHTML = `<div class="section-title"><h2>Top ${esc(r.name)} deals${state.zip ? ` near ${esc(state.zip)}` : ''}</h2><a href="#/deals?retailer=${esc(r.id)}">See all deals →</a></div>
-          <div class="grid">${deals.map(dealCard).join('')}</div>`;
-      }
-    } catch { /* deals are optional on the home page */ }
+    await renderHomeDeals(r, query.get('cat') ?? '');
   }
 }
 
+async function renderHomeDeals(r, category) {
+  const $deals = $app.querySelector('#home-deals');
+  let categories = [];
+  try { ({ categories } = await api(`/api/${r.id}/categories`)); } catch { /* chips are optional */ }
+  const params = new URLSearchParams();
+  if (state.zip) params.set('zip', state.zip);
+  if (category) params.set('category', category);
+  let sections;
+  try {
+    ({ sections } = await api(`/api/${r.id}/deals/sections?${params}`));
+  } catch {
+    return; // deals are optional on the home page
+  }
+  const chip = (value, label) =>
+    `<a class="chip ${value === category ? 'active' : ''}" href="#/?${new URLSearchParams({ retailer: r.id, ...(value ? { cat: value } : {}) })}">${esc(label)}</a>`;
+  $deals.innerHTML = `
+    ${categories.length ? `<div class="chips">${chip('', 'All categories')}${categories.map((c) => chip(c, c)).join('')}</div>` : ''}
+    ${sections.map((sec) => dealSection(r, sec, category)).join('')}`;
+}
+
+function dealSection(r, sec, category) {
+  if (!sec.deals.length && !sec.note) return '';
+  const all = new URLSearchParams({ retailer: r.id, section: sec.id, ...(category ? { category } : {}) });
+  return `<section class="deal-section">
+    <div class="section-title">
+      <div><h2>${esc(sec.title)}</h2><div class="muted" style="font-size:14px">${esc(sec.description)}</div></div>
+      ${sec.deals.length ? `<a href="#/deals?${all}">See all →</a>` : ''}
+    </div>
+    ${sec.deals.length ? `<div class="grid">${sec.deals.map(dealCard).join('')}</div>` : `<div class="card empty">${esc(sec.note)}</div>`}
+  </section>`;
+}
+
 function dealCard(d) {
+  const badges = (d.reasons ?? []).map((reason) =>
+    `<span class="badge ${reason === 'Clearance' ? 'clearance' : reason === 'Rollback' ? 'rollback' : 'signal'}">${esc(reason)}</span>`);
+  const savings = d.dollarsOff >= 1 ? `<span class="muted" style="font-size:13px">Save ${money(d.dollarsOff)}</span>` : '';
+  const store = d.store
+    ? `<div style="font-size:13px"><strong>${esc(d.store.name)}</strong>${d.store.distanceMiles != null ? ` · ${d.store.distanceMiles} mi` : ''} · ${d.quantity} left${d.storesWithDeal > 1 ? ` · ${d.storesWithDeal} stores` : ''}</div>`
+    : '';
   return productCard(d.product, {
     zip: state.zip,
     price: d.lowestPrice,
-    extra: d.clearance ? '<span class="badge clearance">Clearance</span>' : '',
+    extra: savings,
+    note: `${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}${store}`,
   });
 }
 
@@ -312,17 +345,31 @@ function priceChart(history) {
     </div>`;
 }
 
+const DEAL_SECTIONS = [
+  ['top', 'Top deals'],
+  ['drops', 'Price drops'],
+  ['lowest', 'Lowest ever'],
+  ['bigticket', 'Big-ticket'],
+  ['clearance', 'Clearance near you'],
+];
+
 async function dealsView(query) {
   const r = selectRetailer(query.get('retailer') ?? state.retailer?.id);
+  const section = query.get('section') ?? 'top';
   const category = query.get('category') ?? '';
-  const min = query.get('min') ?? '20';
+  const min = query.get('min') ?? '0';
   loading('Finding deals…');
   let categories = [];
   try { ({ categories } = await api(`/api/${r.id}/categories`)); } catch { /* optional */ }
 
+  const tab = ([id, label]) => {
+    const href = `#/deals?${new URLSearchParams({ retailer: r.id, section: id, ...(category ? { category } : {}), min })}`;
+    return `<a class="chip ${id === section ? 'active' : ''}" href="${href}">${esc(label)}</a>`;
+  };
   $app.innerHTML = `
-    <section class="hero"><h1>${esc(r.name)} deals</h1><p>Biggest markdowns versus list price${state.zip ? ` at stores near ${esc(state.zip)}` : ''}.</p></section>
+    <section class="hero"><h1>${esc(r.name)} deals</h1><p>Only items sold by ${esc(r.name)} itself, never marketplace sellers.</p></section>
     ${retailerTabs(r.id)}
+    <div class="chips" style="justify-content:center">${DEAL_SECTIONS.map(tab).join('')}</div>
     <form class="toolbar" id="deal-tools" style="justify-content:center">
       <div class="field"><label for="cat">Category</label><select id="cat" name="category"><option value="">All categories</option>
         ${categories.map((c) => `<option ${c === category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
@@ -331,23 +378,32 @@ async function dealsView(query) {
     </form>
     <div id="deal-list"><div class="loading">Loading…</div></div>`;
 
-  bindRetailerTabs((id) => go('/deals', { retailer: id }));
+  bindRetailerTabs((id) => go('/deals', { retailer: id, section }));
   const tools = $app.querySelector('#deal-tools');
   tools.addEventListener('change', () => {
     const data = new FormData(tools);
-    go('/deals', { retailer: r.id, category: data.get('category'), min: data.get('min') });
+    go('/deals', { retailer: r.id, section, category: data.get('category'), min: data.get('min') });
   });
 
+  const $list = $app.querySelector('#deal-list');
+  if (section === 'clearance' && !r.features.localClearance) {
+    $list.innerHTML = `<div class="card empty">${esc(r.name)} doesn't publish store-level prices, so this needs another data source.</div>`;
+    return;
+  }
+  if (section === 'clearance' && !state.zip) {
+    $list.innerHTML = '<div class="card empty">Enter your ZIP code at the top of the page to see shelf markdowns at nearby stores.</div>';
+    return;
+  }
   try {
-    const params = new URLSearchParams({ minDiscount: min, limit: '60' });
+    const params = new URLSearchParams({ section, minDiscount: min, limit: '60' });
     if (category) params.set('category', category);
     if (state.zip) params.set('zip', state.zip);
     const { deals } = await api(`/api/${r.id}/deals?${params}`);
-    $app.querySelector('#deal-list').innerHTML = deals.length
+    $list.innerHTML = deals.length
       ? `<div class="grid">${deals.map(dealCard).join('')}</div>`
-      : '<div class="empty">No deals match those filters.</div>';
+      : '<div class="empty">No deals match those filters yet. Price drop and lowest-ever deals appear as the app records prices day to day.</div>';
   } catch (err) {
-    $app.querySelector('#deal-list').innerHTML = `<div class="error">${esc(err.message)}</div>`;
+    $list.innerHTML = `<div class="error">${esc(err.message)}</div>`;
   }
 }
 

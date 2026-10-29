@@ -4,7 +4,7 @@ import { generateKeyPairSync, createVerify } from 'node:crypto';
 import { parseWalmartInput } from '../src/retailers/walmart/identifiers.js';
 import { WalmartAdapter } from '../src/retailers/walmart/index.js';
 import { WalmartDemoSource } from '../src/retailers/walmart/demoSource.js';
-import { WalmartLiveSource, signWalmartRequest } from '../src/retailers/walmart/liveSource.js';
+import { WalmartLiveSource, signWalmartRequest, isWalmartSeller } from '../src/retailers/walmart/liveSource.js';
 import { CATALOG } from '../src/retailers/walmart/catalog.js';
 import { stateForZip } from '../src/lib/geo.js';
 
@@ -56,16 +56,24 @@ test('demo inventory is deterministic and well formed', async () => {
   assert.equal(await adapter.checkInventory('nope', '72712'), null);
 });
 
-test('demo deals respect filters and sort by discount', async () => {
+test('demo deal candidates include marketplace items with seller info', async () => {
   const adapter = new WalmartAdapter();
-  const deals = await adapter.getDeals({ minDiscount: 30, category: 'Home' });
-  assert.ok(deals.length > 0);
-  for (const d of deals) {
-    assert.equal(d.product.category, 'Home');
-    assert.ok(d.discountPercent >= 30);
+  const products = await adapter.getDealCandidates();
+  const rug = products.find((p) => p.id === '511001');
+  assert.deepEqual(rug.seller, { name: 'RugDirect Outlet', isRetailer: false });
+  assert.ok(products.filter((p) => p.seller.isRetailer).length > 30);
+  const homeOnly = await adapter.getDealCandidates({ category: 'Home' });
+  assert.ok(homeOnly.every((p) => p.category === 'Home'));
+});
+
+test('demo local clearance only lists stocked clearance items', async () => {
+  const adapter = new WalmartAdapter();
+  const rows = await adapter.getLocalClearance('72712');
+  assert.ok(rows.length > 0);
+  for (const r of rows) {
+    assert.ok(r.quantity > 0);
+    assert.ok(r.price < r.product.price);
   }
-  const pcts = deals.map((d) => d.discountPercent);
-  assert.deepEqual(pcts, [...pcts].sort((x, y) => y - x));
 });
 
 test('demo price history ends at the current price', async () => {
@@ -112,6 +120,45 @@ test('live source normalizes affiliate API responses', async () => {
   assert.equal(inv.results[0].store.city, 'Rogers');
   assert.ok(calls.some((u) => u.includes('/search?query=thing')));
   assert.equal(adapter.features.storeQuantities, false);
+  assert.equal(adapter.features.localClearance, false);
+  await assert.rejects(adapter.getLocalClearance('72756'), /local clearance/);
+});
+
+test('isWalmartSeller keeps only first-party items', () => {
+  assert.equal(isWalmartSeller({ sellerInfo: 'Walmart.com' }), true);
+  assert.equal(isWalmartSeller({ sellerInfo: 'walmart' }), true);
+  assert.equal(isWalmartSeller({ sellerInfo: 'RugDirect Outlet', marketplace: true }), false);
+  assert.equal(isWalmartSeller({ marketplace: true }), false);
+  assert.equal(isWalmartSeller({ marketplace: false }), true);
+});
+
+test('live deal pool merges trends, offer feeds and categories without duplicates', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const item = (itemId, extra = {}) => ({ itemId, name: `Item ${itemId}`, salePrice: 10, msrp: 20, categoryPath: 'Home/Decor', ...extra });
+  const responses = {
+    '/taxonomy': { categories: [{ id: '1', name: 'Home' }, { id: '2', name: 'Toys' }] },
+    '/trends': { items: [item(1), item(2, { sellerInfo: 'Rug Co', marketplace: true })] },
+    'specialOffer=clearance': { items: [item(3, { clearance: true })] },
+    'specialOffer=rollback': { items: [item(1)] },
+    'category=1': { items: [item(4, { customerRating: '4.6', numReviews: 120, stock: 'Available' })] },
+  };
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    const key = Object.keys(responses).find((k) => u.includes(k));
+    if (!key) return { ok: false, status: 500, text: async () => 'boom' };
+    return { ok: true, status: 200, json: async () => responses[key], text: async () => '' };
+  };
+  const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const warn = console.warn;
+  console.warn = () => {}; // category 2 fails on purpose
+  const pool = await source.dealCandidates();
+  console.warn = warn;
+  assert.deepEqual(pool.map((p) => p.id).sort(), ['1', '2', '3', '4']);
+  const byId = Object.fromEntries(pool.map((p) => [p.id, p]));
+  assert.equal(byId['2'].seller.isRetailer, false);
+  assert.equal(byId['3'].specialOffer, 'clearance');
+  assert.equal(byId['4'].rating, 4.6);
+  assert.equal(byId['4'].inStockOnline, true);
 });
 
 test('fromEnv picks live mode only when credentials are present', () => {

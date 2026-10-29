@@ -43,7 +43,8 @@ main { padding: 28px 16px 48px; min-height: 60vh; }
 .retailer-tab.soon { opacity: .5; cursor: default; }
 
 .search-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; display: grid; grid-template-columns: 1fr 120px 120px auto; gap: 12px; max-width: 860px; margin: 0 auto; }
-.field { display: flex; flex-direction: column; gap: 4px; }
+.field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.field input, .field select { width: 100%; }
 .field label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
 input, select { font: inherit; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
 input:focus, select:focus { outline: 2px solid var(--retailer); outline-offset: -1px; }
@@ -70,6 +71,14 @@ input:focus, select:focus { outline: 2px solid var(--retailer); outline-offset: 
 .badge.in_stock { background: #dff3e5; color: var(--ok); }
 .badge.limited { background: #fff0d6; color: var(--warn); }
 .badge.out_of_stock { background: #fbe1e1; color: var(--bad); }
+.badge.rollback { background: #dcebff; color: #0b4fa3; }
+.badge.signal { background: #e5e0ff; color: #4b3aa8; }
+.badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 28px 0 4px; }
+.chip { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 999px; padding: 6px 14px; font-size: 14px; font-weight: 600; }
+.chip:hover { text-decoration: none; border-color: var(--retailer); }
+.chip.active { background: var(--retailer); border-color: var(--retailer); color: #fff; }
+.deal-section .section-title { align-items: end; gap: 12px; }
 .badge.unknown { background: var(--border); color: var(--muted); }
 
 .product-head { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }

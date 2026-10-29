@@ -19,7 +19,12 @@ npm test
   aisle, filterable by radius/availability and sortable by distance or price.
 - **Clearance detection** — stores pricing an item well below online are flagged.
 - **Price history** chart for each product.
-- **Deals** — biggest markdowns versus list price, by category and minimum discount.
+- **Deals** — five sections, each filterable by category and minimum discount:
+  Top deals (capped at 2 per category so one category can't take over),
+  Price drops today, Lowest price ever, Big-ticket (most dollars off items over
+  $100), and Clearance near you (shelf markdowns at stores near your ZIP).
+- **Retailer-sold items only** — marketplace/third-party listings are excluded
+  everywhere: search, deals and product pages.
 - Remembers your ZIP; works on mobile; light/dark theme.
 
 ## Data sources (Walmart)
@@ -42,6 +47,30 @@ true store-level inventory requires another data source (a partner feed or
 your own collection), which plugs in as a new source class in
 `src/retailers/walmart/`. In live mode, price history is built from prices the
 app observes over time (saved to `data/price-history.json`).
+
+## How deals are ranked
+
+`src/lib/deals.js` is shared by every retailer. Each candidate the retailer
+sells itself and has in stock online gets a score from:
+
+| Signal | Weight |
+| --- | --- |
+| % off list price | 35% |
+| Dollars off (log scale, $1,000 off = max) | 20% |
+| Drop since the last recorded price | 15% |
+| At the lowest price recorded (needs 7+ days of history) | 10% |
+| Rating × review count | 10% |
+| Clearance (full) or Rollback (60%) | 10% |
+
+On the home page each product appears only once, in the first section that
+picks it. Price drops and lowest-ever depend on the app's own price history,
+which grows each time the deal pool refreshes (every 30 minutes while in use),
+so they fill in over the first days of running live. On hosts with
+temporary disk (like Render's free plan) that history resets on each
+deploy or restart.
+
+In live mode the deal pool is Walmart's Trending list, the Clearance and
+Rollback feeds, and the first page of each of the top 20 categories.
 
 ## Architecture
 
@@ -71,7 +100,8 @@ public/                     single-page UI (vanilla JS)
 | `GET /api/:retailer/products/:id/inventory?zip=&radius=&sort=` | per-store availability + summary |
 | `GET /api/:retailer/products/:id/history?days=` | price history |
 | `GET /api/:retailer/stores?zip=` | nearby stores |
-| `GET /api/:retailer/deals?zip=&category=&minDiscount=` | deals feed |
+| `GET /api/:retailer/deals?section=&zip=&category=&minDiscount=` | one deal section: `top`, `drops`, `lowest`, `bigticket`, `clearance` (needs `zip`) |
+| `GET /api/:retailer/deals/sections?zip=&category=` | all sections for the home page |
 | `GET /api/:retailer/categories` | categories |
 
 ### Adding a retailer
@@ -79,8 +109,10 @@ public/                     single-page UI (vanilla JS)
 1. Create `src/retailers/<name>/index.js` with a class extending
    `RetailerAdapter`; implement `id`, `name`, `color`, and the methods it can
    support (`searchProducts`, `lookupProduct`, `getProduct`, `findStores`,
-   `checkInventory`, `getDeals`, `getCategories`, `getPriceHistory`), returning
-   the shapes documented in `RetailerAdapter.js`. Anything left unimplemented
+   `checkInventory`, `getDealCandidates`, `getLocalClearance`,
+   `getCategories`, `getPriceHistory`), returning
+   the shapes documented in `RetailerAdapter.js`. Set `seller.isRetailer` on
+   every product; only `true` items are shown. Anything left unimplemented
    returns HTTP 501.
 2. Register it in `createDefaultRegistry()` in `src/retailers/registry.js`.
 3. Remove it from the "coming soon" list (`UPCOMING`) in `public/app.js`.
