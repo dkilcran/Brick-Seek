@@ -53,6 +53,7 @@ export function analyzeDeal(product, history = [], { today = new Date().toISOStr
   if (product.specialOffer === 'rollback') reasons.push('Rollback');
   if (dropPercent >= 0.01) reasons.push(`Dropped ${Math.round(dropPercent * 100)}%`);
   if (atLowest) reasons.push('Lowest price seen');
+  if (product.inStockOnline === false) reasons.push('In-store only');
 
   return {
     product,
@@ -68,14 +69,12 @@ export function analyzeDeal(product, history = [], { today = new Date().toISOStr
   };
 }
 
-/** Keep items the retailer sells itself that can actually be bought online. */
+/**
+ * Keep priced items the retailer sells itself. Items unavailable online stay
+ * in: they're often still on store shelves, and get an "In-store only" tag.
+ */
 export function isEligible(product) {
-  return (
-    product?.seller?.isRetailer === true &&
-    typeof product.price === 'number' &&
-    product.price > 0 &&
-    product.inStockOnline !== false
-  );
+  return product?.seller?.isRetailer === true && typeof product.price === 'number' && product.price > 0;
 }
 
 // Brand isn't always given, so fall back to the first word of the name.

@@ -187,8 +187,7 @@ export function createRoutes(registry) {
       const all = await adapter.getDealCandidates();
       const excluded = {
         marketplaceSeller: all.filter((p) => p.seller?.isRetailer !== true).length,
-        outOfStockOnline: all.filter((p) => p.seller?.isRetailer === true && p.inStockOnline === false).length,
-        noPrice: all.filter((p) => p.seller?.isRetailer === true && p.inStockOnline !== false && !(p.price > 0)).length,
+        noPrice: all.filter((p) => p.seller?.isRetailer === true && !(p.price > 0)).length,
       };
       const sellers = {};
       for (const p of all) if (p.seller?.isRetailer !== true) sellers[p.seller?.name ?? '?'] = (sellers[p.seller?.name ?? '?'] ?? 0) + 1;
@@ -199,6 +198,7 @@ export function createRoutes(registry) {
         mode: adapter.mode,
         pool: adapter.dealPoolStats?.() ?? null,
         eligible: analyzed.length,
+        inStoreOnly: analyzed.filter((d) => d.product.inStockOnline === false).length,
         excluded,
         topMarketplaceSellers: Object.entries(sellers).sort((x, y) => y[1] - x[1]).slice(0, 10),
         discounted: analyzed.filter((d) => d.discountPercent > 0).length,

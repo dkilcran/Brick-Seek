@@ -196,7 +196,7 @@ function dealSection(r, sec, category) {
 
 function dealCard(d) {
   const badges = (d.reasons ?? []).map((reason) =>
-    `<span class="badge ${reason === 'Clearance' ? 'clearance' : reason === 'Rollback' ? 'rollback' : 'signal'}">${esc(reason)}</span>`);
+    `<span class="badge ${reason === 'Clearance' ? 'clearance' : reason === 'Rollback' ? 'rollback' : reason === 'In-store only' ? 'instore' : 'signal'}">${esc(reason)}</span>`);
   const savings = d.dollarsOff >= 1 ? `<span class="muted" style="font-size:13px">Save ${money(d.dollarsOff)}</span>` : '';
   const store = d.store
     ? `<div style="font-size:13px"><strong>${esc(d.store.name)}</strong>${d.store.distanceMiles != null ? ` · ${d.store.distanceMiles} mi` : ''} · ${d.quantity} left${d.storesWithDeal > 1 ? ` · ${d.storesWithDeal} stores` : ''}</div>`
@@ -244,6 +244,7 @@ async function itemView(retailerId, id, query) {
         </div>
         <div class="price-row">
           <span class="price">${money(product.price)}</span><span class="muted">online</span>
+          ${product.inStockOnline === false ? '<span class="badge instore">In-store only</span>' : ''}
           ${off ? `<span class="was">${money(product.msrp)}</span><span class="badge off">${off}% off MSRP</span>` : ''}
         </div>
         <p><a href="${esc(product.url)}" target="_blank" rel="noopener">View on ${esc(r.name)}.com ↗</a></p>

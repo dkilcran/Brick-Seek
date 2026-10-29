@@ -15,7 +15,7 @@ const days = (...prices) => prices.map((price, i) => ({
 test('isEligible keeps only retailer-sold, buyable items', () => {
   assert.equal(isEligible(product(1)), true);
   assert.equal(isEligible(product(2, { seller: { name: 'Rug Co', isRetailer: false } })), false);
-  assert.equal(isEligible(product(3, { inStockOnline: false })), false);
+  assert.equal(isEligible(product(3, { inStockOnline: false })), true, 'in-store only items stay');
   assert.equal(isEligible(product(4, { inStockOnline: null })), true);
   assert.equal(isEligible(product(5, { price: null })), false);
 });
@@ -29,6 +29,11 @@ test('analyzeDeal computes discount, savings and today\'s drop', () => {
   assert.equal(d.dropPercent, 17);
   assert.equal(d.atLowest, true);
   assert.deepEqual(d.reasons, ['Dropped 17%', 'Lowest price seen']);
+});
+
+test('items unavailable online are tagged In-store only', () => {
+  assert.deepEqual(analyzeDeal(product(1, { inStockOnline: false }), [], { today: TODAY }).reasons, ['In-store only']);
+  assert.deepEqual(analyzeDeal(product(1, { inStockOnline: null }), [], { today: TODAY }).reasons, []);
 });
 
 test('analyzeDeal needs enough history for lowest-ever', () => {

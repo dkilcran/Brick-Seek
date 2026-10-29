@@ -72,6 +72,7 @@ input:focus, select:focus { outline: 2px solid var(--retailer); outline-offset: 
 .badge.limited { background: #fff0d6; color: var(--warn); }
 .badge.out_of_stock { background: #fbe1e1; color: var(--bad); }
 .badge.rollback { background: #dcebff; color: #0b4fa3; }
+.badge.instore { background: #dff3e5; color: var(--ok); }
 .badge.signal { background: #e5e0ff; color: #4b3aa8; }
 .badges { display: flex; gap: 6px; flex-wrap: wrap; }
 .chips { display: flex; gap: 8px; flex-wrap: wrap; margin: 28px 0 4px; }
