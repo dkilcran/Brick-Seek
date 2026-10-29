@@ -1,5 +1,6 @@
 import { RetailerAdapter } from '../RetailerAdapter.js';
 import { PriceTracker } from '../../lib/priceTracker.js';
+import { ItemChecks } from '../../lib/itemChecks.js';
 import { WalmartDemoSource } from './demoSource.js';
 import { WalmartLiveSource } from './liveSource.js';
 import { parseWalmartInput } from './identifiers.js';
@@ -30,6 +31,7 @@ export class WalmartAdapter extends RetailerAdapter {
         publisherId: env.WALMART_PUBLISHER_ID,
         poolPages: Number(env.WALMART_POOL_PAGES) || undefined,
         poolRefreshMs: Number(env.WALMART_POOL_REFRESH_MINUTES) * 60000 || undefined,
+        itemChecks: new ItemChecks(tracker.db),
       });
       return new WalmartAdapter({ source, mode: 'live', tracker });
     }
@@ -119,7 +121,7 @@ export class WalmartAdapter extends RetailerAdapter {
 
   /** Changes whenever the deal pool does; used to cache ranking. */
   get dealPoolStamp() {
-    return this.source.poolStamp;
+    return this.source.rankStamp ?? this.source.poolStamp;
   }
 
   dealPoolStats() {

@@ -23,13 +23,12 @@ test('isEligible keeps only retailer-sold, buyable items', () => {
   assert.equal(isEligible(product(7, { inStockOnline: false, listingActive: true })), true);
   assert.equal(isEligible(product(8, { inStockOnline: false, listingActive: false, specialOffer: 'clearance' })), true);
   assert.equal(isEligible(product(9, { inStockOnline: true, listingActive: false })), true, 'online stock is enough');
-  // not online, priced far below today's offer: an old price
-  const old = { inStockOnline: false, listingActive: true, price: 5.97, currentOfferPrice: 316.91 };
-  assert.equal(isEligible(product(10, old)), false);
-  assert.equal(isEligible(product(11, { ...old, specialOffer: 'clearance' })), true, 'store clearance can be far below online');
-  assert.equal(isEligible(product(12, { ...old, specialOffer: 'rollback' })), false);
-  assert.equal(isEligible(product(13, { ...old, price: 11.93, currentOfferPrice: 12.69 })), true);
-  assert.equal(isEligible(product(14, { inStockOnline: true, price: 5, currentOfferPrice: 300 })), true, 'online items are not checked');
+  // seller not confirmed yet, or the listing no longer exists
+  assert.equal(isEligible(product(10, { seller: { name: null, isRetailer: null } })), false);
+  assert.equal(isEligible(product(11, { exists: false })), false);
+  // stores rarely stock books and collectibles, so their not-online listings are out
+  assert.equal(isEligible(product(12, { inStockOnline: false, category: 'Books' })), false);
+  assert.equal(isEligible(product(13, { inStockOnline: true, category: 'Books' })), true);
 });
 
 test('analyzeDeal computes discount, savings and today\'s drop', () => {
@@ -41,6 +40,20 @@ test('analyzeDeal computes discount, savings and today\'s drop', () => {
   assert.equal(d.dropPercent, 17);
   assert.equal(d.atLowest, true);
   assert.deepEqual(d.reasons, ['Dropped 17%', 'Lowest price seen']);
+});
+
+test('not-online discounts are measured against today\'s offer price', () => {
+  // EZ Foil pans: $3.66, list $61.19, best offer today $5.10
+  const pans = analyzeDeal(product(1, { price: 3.66, msrp: 61.19, currentOfferPrice: 5.1, inStockOnline: false }), [], { today: TODAY });
+  assert.equal(pans.referencePrice, 5.1);
+  assert.equal(pans.discountPercent, 28);
+  // Dreamcast game priced above today's offer: no discount, whatever the list price says
+  const game = analyzeDeal(product(2, { price: 44.96, msrp: 417.05, currentOfferPrice: 29.99, inStockOnline: false }), [], { today: TODAY });
+  assert.equal(game.discountPercent, 0);
+  // no current offer: fall back to the list price
+  assert.equal(analyzeDeal(product(3, { price: 5.83, msrp: 28.98, inStockOnline: false }), [], { today: TODAY }).discountPercent, 80);
+  // online items keep using the list price
+  assert.equal(analyzeDeal(product(4, { price: 50, msrp: 100, currentOfferPrice: 55 }), [], { today: TODAY }).referencePrice, 100);
 });
 
 test('items unavailable online are tagged In-store only', () => {

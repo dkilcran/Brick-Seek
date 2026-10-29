@@ -15,11 +15,16 @@ const SPECIAL_OFFERS = ['clearance', 'rollback'];
 // Top-level taxonomy entries that are site sections, not product departments.
 const NON_PRODUCT_SECTIONS = /^(help|ideas|feature|gift registry|gifts & registry|services|photo center|shop by brand|new arrivals|savings|character shop|personalized gifts)$/i;
 
-// Items without seller info are treated as Walmart's own (first-party).
-export function isWalmartSeller(item) {
+// Bulk feeds usually leave sellerInfo out, so there a missing seller means
+// "unknown" (null) until the item is looked up. A single-item lookup names
+// third-party sellers, so there a missing seller means Walmart itself.
+export function isWalmartSeller(item, { fromLookup = true } = {}) {
   if (item.sellerInfo) return /^walmart(\.com)?$/i.test(String(item.sellerInfo).trim());
-  return item.marketplace !== true;
+  if (item.marketplace === true) return false;
+  return fromLookup ? true : null;
 }
+
+const LOOKUP_BATCH = 20; // most item ids Walmart accepts per lookup
 
 // categoryPath looks like "Home Page/Home/Rugs/Area Rugs"; the department is
 // the first segment after the "Home Page" root.
@@ -100,6 +105,7 @@ export class WalmartLiveSource {
     consumerId, keyVersion = '1', privateKey, privateKeyPath, publisherId, fetchImpl = fetch,
     poolPages = 3, poolRefreshMs = 60 * 60 * 1000, poolMaxItems = 20000,
     minIntervalMs = 2000, maxRetries = 3, retryPassDelayMs = 30000,
+    itemChecks = null,
   } = {}) {
     if (!consumerId) throw new Error('WALMART_CONSUMER_ID is required for live mode');
     this.consumerId = consumerId;
@@ -118,6 +124,10 @@ export class WalmartLiveSource {
     this.maxRetries = maxRetries;
     this.retryPassDelayMs = retryPassDelayMs;
     this.nextSlot = 0;
+    /** @type {import('../../lib/itemChecks.js').ItemChecks|null} */
+    this.itemChecks = itemChecks;
+    this.checkVersion = 0; // bumps as lookups confirm sellers, to refresh ranking
+    this.checkStats = { looked: 0, walmart: 0, thirdParty: 0, notFound: 0, errors: 0, running: false, pending: 0 };
   }
 
   /** Wait for this request's turn: at most one request per minIntervalMs. */
@@ -165,8 +175,10 @@ export class WalmartLiveSource {
     return cache ? this.cache.wrap(url.toString(), () => fetchJson()) : fetchJson();
   }
 
-  toProduct(item) {
+  /** @param {{ fromLookup?: boolean }} opts  false for bulk feeds, where sellers are often missing */
+  toProduct(item, { fromLookup = true } = {}) {
     const category = departmentOf(item.categoryPath);
+    const isRetailer = isWalmartSeller(item, { fromLookup });
     const product = {
       retailer: 'walmart',
       id: String(item.itemId),
@@ -180,8 +192,8 @@ export class WalmartLiveSource {
       msrp: realMsrp(item.msrp) ?? item.salePrice ?? null,
       price: item.salePrice ?? null,
       seller: {
-        name: item.sellerInfo ?? (item.marketplace === true ? 'Marketplace seller (unnamed)' : 'Walmart.com'),
-        isRetailer: isWalmartSeller(item),
+        name: item.sellerInfo ?? (item.marketplace === true ? 'Marketplace seller (unnamed)' : isRetailer ? 'Walmart.com' : null),
+        isRetailer,
       },
       rating: Number.parseFloat(item.customerRating) || null,
       reviewCount: item.numReviews ?? null,
@@ -208,7 +220,7 @@ export class WalmartLiveSource {
     const cents = { online: {}, notOnline: {} };
     const sizes = { online: 0, notOnline: 0 };
     for (const p of products) {
-      if (!p.seller?.isRetailer) continue;
+      if (p.seller?.isRetailer === false) continue; // known third-party
       const g = group(p);
       sizes[g] += 1;
       const raw = RAW_FIELDS.get(p) ?? {};
@@ -233,7 +245,7 @@ export class WalmartLiveSource {
     }
     const offPct = (p) => (p.msrp > 0 ? 1 - p.price / p.msrp : 0);
     const sample = (list) => list.slice(0, 8).map((p) => ({ ...RAW_FIELDS.get(p), _discountPct: Math.round(offPct(p) * 100) }));
-    const sold = products.filter((p) => p.seller?.isRetailer && p.price > 0);
+    const sold = products.filter((p) => p.seller?.isRetailer !== false && p.price > 0);
     return {
       sizes,
       keys: { online: top(keys.online, 80), notOnline: top(keys.notOnline, 80) },
@@ -249,7 +261,10 @@ export class WalmartLiveSource {
 
   async search(query, { limit = 25 } = {}) {
     const data = await this.request('/search', { query, numItems: Math.min(limit, 25) });
-    return (data?.items ?? []).map((i) => this.toProduct(i));
+    const products = (data?.items ?? []).map((i) => this.toProduct(i, { fromLookup: false }));
+    this.applySavedChecks(products);
+    await this.checkItems(products.filter((p) => p.seller.isRetailer === null));
+    return products;
   }
 
   async getById(itemId) {
@@ -358,7 +373,7 @@ export class WalmartLiveSource {
     const byId = new Map();
     const feedIds = {};
     results.forEach(({ items, stat }) => {
-      let products = items.filter((item) => item?.itemId).map((item) => this.toProduct(item));
+      let products = items.filter((item) => item?.itemId).map((item) => this.toProduct(item, { fromLookup: false }));
       // A feed that still failed keeps what it had last time rather than dropping out.
       const before = previous?.feedIds?.[stat.name];
       if (stat.error && before && before.length > products.length) {
@@ -380,7 +395,96 @@ export class WalmartLiveSource {
       feeds: results.map((r) => r.stat),
     };
     console.log(`walmart: deal pool ${stats.uniqueItems} items, ${stats.failedFeeds} failed feeds, ${stats.requests} requests in ${stats.durationMs}ms`);
-    return { products: [...byId.values()], byId, feedIds, fetchedAt: Date.now(), stats };
+    const products = [...byId.values()];
+    this.applySavedChecks(products);
+    return { products, byId, feedIds, fetchedAt: Date.now(), stats };
+  }
+
+  // ---- seller / existence checks -------------------------------------------
+
+  applyCheck(product, check) {
+    product.seller = { name: check.seller ?? product.seller?.name ?? null, isRetailer: check.isRetailer };
+    product.exists = check.exists;
+  }
+
+  /** Fill in sellers from earlier lookups saved in the database. */
+  applySavedChecks(products) {
+    if (!this.itemChecks) return;
+    for (const p of products) {
+      if (p.seller?.isRetailer !== null) continue;
+      const check = this.itemChecks.get('walmart', p.id);
+      if (check) this.applyCheck(p, check);
+    }
+  }
+
+  /**
+   * Look items up (20 per call) to learn who sells them and whether they still
+   * exist; save and apply the results.
+   */
+  async checkItems(products) {
+    const results = [];
+    for (let i = 0; i < products.length; i += LOOKUP_BATCH) {
+      const batch = products.slice(i, i + LOOKUP_BATCH);
+      let found;
+      try {
+        const data = await this.request('/items', { ids: batch.map((p) => p.id).join(',') }, { cache: false });
+        found = new Map((data?.items ?? []).map((item) => [String(item.itemId), item]));
+      } catch (err) {
+        // Walmart answers 400 "Results not found" when none of the ids exist.
+        if (/\b400\b/.test(err.message) && /not found/i.test(err.message)) {
+          found = new Map();
+        } else {
+          this.checkStats.errors += 1;
+          console.warn(`walmart: item lookup failed: ${err.message.slice(0, 160)}`);
+          continue;
+        }
+      }
+      const checks = batch.map((p) => {
+        const item = found.get(p.id);
+        if (!item) return { itemId: p.id, seller: null, isRetailer: false, exists: false };
+        const looked = this.toProduct(item, { fromLookup: true });
+        return { itemId: p.id, seller: looked.seller.name, isRetailer: looked.seller.isRetailer === true, exists: true };
+      });
+      this.itemChecks?.putMany('walmart', checks);
+      checks.forEach((c, j) => this.applyCheck(batch[j], c));
+      for (const c of checks) {
+        this.checkStats.looked += 1;
+        if (!c.exists) this.checkStats.notFound += 1;
+        else if (c.isRetailer) this.checkStats.walmart += 1;
+        else this.checkStats.thirdParty += 1;
+      }
+      this.checkVersion += 1;
+      this.checkStats.pending = Math.max(0, this.checkStats.pending - batch.length);
+      results.push(...checks);
+    }
+    return results;
+  }
+
+  /**
+   * Check every pool item with an unknown seller that could be a deal (priced
+   * below its list or current offer price), biggest discounts first. Runs in
+   * the background after each pool load.
+   */
+  checkPoolSellers() {
+    // A run already in progress covers this pool too; share it.
+    this.checkRun ??= this.runPoolChecks().finally(() => { this.checkRun = null; });
+    return this.checkRun;
+  }
+
+  async runPoolChecks() {
+    if (!this.pool) return;
+    const reference = (p) => Math.max(p.msrp ?? 0, p.currentOfferPrice ?? 0);
+    const discount = (p) => 1 - p.price / reference(p);
+    const todo = this.pool.products
+      .filter((p) => p.seller?.isRetailer === null && p.price > 0 && reference(p) > p.price)
+      .sort((a, b) => discount(b) - discount(a));
+    this.checkStats.running = true;
+    this.checkStats.pending = todo.length;
+    try {
+      await this.checkItems(todo);
+    } finally {
+      this.checkStats.running = false;
+    }
   }
 
   /**
@@ -390,12 +494,15 @@ export class WalmartLiveSource {
    * very first load waits for the whole fetch (a couple of minutes).
    */
   async dealCandidates({ category } = {}) {
+    const startChecks = () =>
+      this.checkPoolSellers().catch((err) => console.warn('walmart: seller checks failed', err.message));
     if (!this.pool) {
       this.poolRefresh ??= this.fetchPool().finally(() => { this.poolRefresh = null; });
       this.pool = await this.poolRefresh;
+      startChecks();
     } else if (Date.now() - this.pool.fetchedAt >= this.poolRefreshMs && !this.poolRefresh) {
       this.poolRefresh = this.fetchPool()
-        .then((pool) => { this.pool = pool; })
+        .then((pool) => { this.pool = pool; startChecks(); })
         .catch((err) => console.warn('walmart: pool refresh failed', err.message))
         .finally(() => { this.poolRefresh = null; });
     }
@@ -408,7 +515,12 @@ export class WalmartLiveSource {
     return this.pool?.fetchedAt ?? null;
   }
 
+  /** Changes when the pool is refetched or lookups confirm more sellers. */
+  get rankStamp() {
+    return this.pool ? `${this.pool.fetchedAt}:${this.checkVersion}` : null;
+  }
+
   poolStats() {
-    return this.pool?.stats ?? null;
+    return this.pool ? { ...this.pool.stats, sellerChecks: { ...this.checkStats } } : null;
   }
 }

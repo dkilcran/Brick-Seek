@@ -25,9 +25,9 @@ const MIN_HISTORY_DAYS = 7;
  */
 export function analyzeDeal(product, history = [], { today = new Date().toISOString().slice(0, 10) } = {}) {
   const price = product.price;
-  const msrp = product.msrp && product.msrp > price ? product.msrp : price;
-  const percentOff = msrp ? 1 - price / msrp : 0;
-  const dollarsOff = msrp - price;
+  const reference = referencePrice(product);
+  const percentOff = reference ? 1 - price / reference : 0;
+  const dollarsOff = reference - price;
 
   const past = history.filter((p) => p.date < today);
   const previousPrice = past.length ? past.at(-1).price : null;
@@ -58,6 +58,7 @@ export function analyzeDeal(product, history = [], { today = new Date().toISOStr
   return {
     product,
     lowestPrice: price,
+    referencePrice: reference,
     discountPercent: Math.round(percentOff * 100),
     dollarsOff: Number(dollarsOff.toFixed(2)),
     previousPrice,
@@ -69,31 +70,34 @@ export function analyzeDeal(product, history = [], { today = new Date().toISOStr
   };
 }
 
-// Not sold online and priced below this share of the current offer: the
-// price is a leftover from when the item was last sold, not a real deal.
-export const STALE_PRICE_RATIO = 0.5;
+/**
+ * The price a discount is measured against. For items not sold online it's
+ * today's best offer when there is one, since their list price is often old;
+ * otherwise the list price. Never below the price itself.
+ */
+export function referencePrice(product) {
+  const { price } = product;
+  const base =
+    product.inStockOnline === false && product.currentOfferPrice > 0 ? product.currentOfferPrice : product.msrp;
+  return base && base > price ? base : price;
+}
+
+// Departments the retailer's stores rarely stock: their not-online listings
+// are online catalog entries, not shelf items.
+export const NOT_IN_STORES = new Set(['Books', 'Collectibles']);
 
 /**
- * Keep priced items the retailer sells itself. Items unavailable online stay
- * in ("In-store only") when there's a sign they're still sold: an active
- * listing, or the retailer's own Clearance/Rollback flag. Their price must
- * also be near the current offer price, unless the retailer marks it
- * Clearance (store clearance can sit well below the online offer).
+ * Keep priced items the retailer is confirmed to sell itself and that still
+ * exist. Items unavailable online stay in ("In-store only") when there's a
+ * sign they're still sold (an active listing, or the retailer's own
+ * Clearance/Rollback flag) and they're in a department stores carry.
  */
 export function isEligible(product) {
   if (product?.seller?.isRetailer !== true || typeof product.price !== 'number' || product.price <= 0) return false;
+  if (product.exists === false) return false;
   if (product.inStockOnline !== false) return true;
-  if (product.listingActive === false && !product.specialOffer) return false;
-  return !isStalePrice(product);
-}
-
-export function isStalePrice(product) {
-  return (
-    product.inStockOnline === false &&
-    product.specialOffer !== 'clearance' &&
-    typeof product.currentOfferPrice === 'number' &&
-    product.price < product.currentOfferPrice * STALE_PRICE_RATIO
-  );
+  if (NOT_IN_STORES.has(product.category)) return false;
+  return product.listingActive !== false || Boolean(product.specialOffer);
 }
 
 // Brand isn't always given, so fall back to the first word of the name.

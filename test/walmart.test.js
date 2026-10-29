@@ -6,6 +6,8 @@ import { WalmartAdapter } from '../src/retailers/walmart/index.js';
 import { WalmartDemoSource } from '../src/retailers/walmart/demoSource.js';
 import { WalmartLiveSource, signWalmartRequest, isWalmartSeller, departmentOf, realMsrp } from '../src/retailers/walmart/liveSource.js';
 import { CATALOG } from '../src/retailers/walmart/catalog.js';
+import { ItemChecks } from '../src/lib/itemChecks.js';
+import { PriceTracker } from '../src/lib/priceTracker.js';
 import { stateForZip } from '../src/lib/geo.js';
 
 test('parseWalmartInput recognizes URLs, UPCs, item ids and keywords', () => {
@@ -258,7 +260,7 @@ test('live requests retry after a 429 and are spaced out', async () => {
     times.push(Date.now());
     calls += 1;
     if (calls === 1) return { ok: false, status: 429, headers: { get: () => '0.05' }, text: async () => 'slow down' };
-    return { ok: true, status: 200, json: async () => ({ items: [{ itemId: 1, name: 'A', salePrice: 5 }] }), text: async () => '' };
+    return { ok: true, status: 200, json: async () => ({ items: [{ itemId: 1, name: 'A', salePrice: 5, sellerInfo: 'Walmart.com' }] }), text: async () => '' };
   };
   const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl, minIntervalMs: 30 });
   const [p] = await source.search('a');
@@ -346,4 +348,64 @@ test('field survey splits raw Walmart fields by online availability', async () =
   assert.deepEqual(survey.priceCents, { online: { 97: 1 }, notOnline: { 40: 1 } });
   assert.equal(survey.samples.notOnlineHugeDiscount[0].itemId, 1);
   assert.ok(!('offerType' in (await source.dealCandidates())[0]), 'raw fields stay out of products');
+});
+
+test('feed items have an unknown seller until a lookup confirms it', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const lookups = [];
+  const feed = [
+    { itemId: 1, name: 'Snow bib', salePrice: 5.83, msrp: 28.98 },
+    { itemId: 2, name: 'Cake pans', salePrice: 3.66, msrp: 61.19 },
+    { itemId: 3, name: 'Gone', salePrice: 2, msrp: 10 },
+    { itemId: 4, name: 'Full price', salePrice: 10, msrp: 10 },
+  ];
+  const ok = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => '' });
+  const fetchImpl = async (url) => {
+    const u = new URL(String(url));
+    if (u.pathname.endsWith('/taxonomy')) return ok({ categories: [] });
+    if (u.pathname.endsWith('/trends')) return ok({ items: feed });
+    if (u.pathname.endsWith('/v2/items')) {
+      lookups.push(u.searchParams.get('ids'));
+      return ok({ items: [
+        { itemId: 1, name: 'Snow bib', salePrice: 5.83 },                          // no sellerInfo: Walmart
+        { itemId: 2, name: 'Cake pans', salePrice: 3.66, sellerInfo: 'Fents 7 Ltd' }, // third party
+      ] });                                                                         // 3 missing: gone
+    }
+    return ok({ items: [] });
+  };
+  const checks = new ItemChecks(new PriceTracker().db);
+  const make = () => new WalmartLiveSource({
+    consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, retryPassDelayMs: 0, itemChecks: checks,
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl,
+  });
+  const quiet = console.log;
+  console.log = () => {};
+  const source = make();
+  const pool = await source.dealCandidates();
+  assert.ok(pool.every((p) => p.seller.isRetailer === null), 'unknown before checks');
+  const stampBefore = source.rankStamp;
+  await source.checkPoolSellers();
+  // pans 94% off, "Gone" 80%, snow bib 79.9%; the full-price item isn't a deal
+  assert.deepEqual(lookups, ['2,3,1'], 'one batch, biggest discount first, full-price item skipped');
+  const byId = Object.fromEntries(pool.map((p) => [p.id, p]));
+  assert.deepEqual(byId['1'].seller, { name: 'Walmart.com', isRetailer: true });
+  assert.deepEqual(byId['2'].seller, { name: 'Fents 7 Ltd', isRetailer: false });
+  assert.equal(byId['3'].exists, false);
+  assert.equal(byId['4'].seller.isRetailer, null);
+  assert.notEqual(source.rankStamp, stampBefore, 'ranking refreshes as sellers are confirmed');
+  assert.deepEqual(source.poolStats().sellerChecks, { looked: 3, walmart: 1, thirdParty: 1, notFound: 1, errors: 0, running: false, pending: 0 });
+
+  // A new source (e.g. after a deploy) reuses saved checks instead of looking up again.
+  const restarted = make();
+  const again = await restarted.dealCandidates();
+  console.log = quiet;
+  assert.equal(again.find((p) => p.id === '2').seller.isRetailer, false);
+  assert.equal(again.find((p) => p.id === '3').exists, false);
+});
+
+test('item checks expire after their max age', () => {
+  const checks = new ItemChecks(new PriceTracker().db, { maxAgeDays: 7 });
+  checks.putMany('walmart', [{ itemId: '9', seller: 'Walmart.com', isRetailer: true, exists: true }], 0);
+  assert.equal(checks.get('walmart', '9', 6 * 86400000).isRetailer, true);
+  assert.equal(checks.get('walmart', '9', 8 * 86400000), null);
 });

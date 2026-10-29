@@ -2,7 +2,7 @@
 // retailers show up automatically once they're in the registry.
 import { isValidZip } from './lib/geo.js';
 import { summarizeAvailability, isSoldByRetailer } from './retailers/RetailerAdapter.js';
-import { analyzeDeal, isEligible, isStalePrice, rankSection, SECTIONS } from './lib/deals.js';
+import { analyzeDeal, isEligible, rankSection, SECTIONS } from './lib/deals.js';
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -203,7 +203,6 @@ export function createRoutes(registry) {
         noPrice: all.filter((p) => p.seller?.isRetailer === true && !(p.price > 0)).length,
         staleNotOnline: all.filter((p) => p.seller?.isRetailer === true && p.price > 0 && p.inStockOnline === false
           && p.listingActive === false && !p.specialOffer).length,
-        stalePrice: all.filter((p) => p.seller?.isRetailer === true && p.price > 0 && p.listingActive !== false && isStalePrice(p)).length,
       };
       const sellers = {};
       for (const p of all) if (p.seller?.isRetailer !== true) sellers[p.seller?.name ?? '?'] = (sellers[p.seller?.name ?? '?'] ?? 0) + 1;

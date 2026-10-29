@@ -59,15 +59,15 @@ function thumb(product) {
   return `<div class="thumb">${product.imageUrl ? `<img src="${esc(product.imageUrl)}" alt="" loading="lazy">` : initials(product.brand ?? product.name)}</div>`;
 }
 
-function productCard(product, { zip, price = product.price, extra = '', note = '' } = {}) {
-  const off = pctOff(price, product.msrp);
+function productCard(product, { zip, price = product.price, was = product.msrp, extra = '', note = '' } = {}) {
+  const off = pctOff(price, was);
   const href = `#/r/${esc(product.retailer)}/item/${encodeURIComponent(product.id)}${zip ? `?zip=${zip}` : ''}`;
   return `<a class="card product-card" href="${href}">
     ${thumb(product)}
     <div class="name">${esc(product.name)}</div>
     <div class="price-row">
       <span class="price">${money(price)}</span>
-      ${off ? `<span class="was">${money(product.msrp)}</span><span class="badge off">${off}% off</span>` : ''}
+      ${off ? `<span class="was">${money(was)}</span><span class="badge off">${off}% off</span>` : ''}
       ${extra}
     </div>
     ${note}
@@ -204,6 +204,7 @@ function dealCard(d) {
   return productCard(d.product, {
     zip: state.zip,
     price: d.lowestPrice,
+    was: d.referencePrice ?? d.product.msrp,
     extra: savings,
     note: `${badges.length ? `<div class="badges">${badges.join('')}</div>` : ''}${store}`,
   });
