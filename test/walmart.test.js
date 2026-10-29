@@ -180,3 +180,72 @@ test('fromEnv picks live mode only when credentials are present', () => {
   assert.equal(WalmartAdapter.fromEnv({ ...keys, WALMART_MODE: 'demo' }).mode, 'demo');
   assert.throws(() => WalmartAdapter.fromEnv({ ...base, WALMART_MODE: 'live' }), /WALMART_CONSUMER_ID/);
 });
+
+test('live pool follows nextPage up to the page limit and refreshes in the background', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const calls = [];
+  let generation = 0;
+  const page = (start) => Array.from({ length: 3 }, (_, i) => ({
+    itemId: start + i, name: `Item ${start + i}`, salePrice: 10 + generation, msrp: 20, categoryPath: 'Home Page/Toys',
+  }));
+  const fetchImpl = async (url) => {
+    const u = new URL(String(url));
+    calls.push(u.pathname.split('/').pop() + u.search);
+    let body;
+    if (u.pathname.endsWith('/taxonomy')) body = { categories: [{ id: '7', name: 'Toys' }, { id: '9', name: 'Help' }] };
+    else if (u.pathname.endsWith('/trends')) body = { items: page(900) };
+    else if (u.searchParams.get('specialOffer')) body = { items: [] };
+    else {
+      const n = Number(u.searchParams.get('lastDoc') ?? 0);
+      // endless pages: the page limit has to stop it
+      body = { items: page(100 + n * 10), nextPage: `/api-proxy/service/affil/product/v2/paginated/items?category=7&lastDoc=${n + 1}&publisherId=x` };
+    }
+    return { ok: true, status: 200, json: async () => body, text: async () => '' };
+  };
+  const source = new WalmartLiveSource({
+    consumerId: 'abc', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl,
+    poolPages: 3, poolRefreshMs: 0,
+  });
+  const recorded = [];
+  const adapter = new WalmartAdapter({ source, mode: 'live', tracker: { recordMany: (_r, ps) => recorded.push(ps.length), history: () => [] } });
+
+  const first = await adapter.getDealCandidates();
+  assert.equal(first.length, 3 + 9); // trending + 3 pages of Toys
+  assert.equal(calls.filter((c) => c.includes('category=7')).length, 3);
+  assert.ok(!calls.some((c) => c.includes('category=9')), '"Help" is not a product department');
+  assert.ok(calls.some((c) => c.includes('lastDoc=2')), 'followed nextPage');
+  const stats = adapter.dealPoolStats();
+  assert.equal(stats.uniqueItems, 12);
+  assert.deepEqual(stats.feeds.find((f) => f.name === 'Toys'), { name: 'Toys', pages: 3, items: 9, error: null });
+
+  // Pool is stale (refresh 0ms): callers get the old pool at once while a refresh runs.
+  generation = 1;
+  const again = await adapter.getDealCandidates();
+  // Category pages skip the response cache, so they show the new generation's price.
+  const toy = (list) => list.find((p) => p.id === '100');
+  assert.equal(toy(again).price, 10, 'served the previous pool');
+  await source.poolRefresh;
+  const fresh = await adapter.getDealCandidates();
+  assert.equal(toy(fresh).price, 11, 'refreshed pool replaces it');
+  assert.equal(recorded.length, 2, 'each pool is recorded once, not on every call');
+});
+
+test('a failing feed is reported in stats without emptying the pool', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes('/taxonomy')) return { ok: true, status: 200, json: async () => ({ categories: [{ id: '1', name: 'Home' }] }), text: async () => '' };
+    if (u.includes('/trends')) return { ok: true, status: 200, json: async () => ({ items: [{ itemId: 1, name: 'A', salePrice: 5, msrp: 9 }] }), text: async () => '' };
+    return { ok: false, status: 429, json: async () => ({}), text: async () => 'Too Many Requests' };
+  };
+  const source = new WalmartLiveSource({ consumerId: 'abc', privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const warn = console.warn;
+  const log = console.log;
+  console.warn = () => {};
+  console.log = () => {};
+  const pool = await source.dealCandidates();
+  console.warn = warn;
+  console.log = log;
+  assert.equal(pool.length, 1);
+  assert.match(source.poolStats().feeds.find((f) => f.name === 'Home').error, /429/);
+});

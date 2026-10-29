@@ -28,6 +28,8 @@ export class WalmartAdapter extends RetailerAdapter {
         privateKey: env.WALMART_PRIVATE_KEY ? env.WALMART_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
         privateKeyPath: env.WALMART_PRIVATE_KEY_PATH,
         publisherId: env.WALMART_PUBLISHER_ID,
+        poolPages: Number(env.WALMART_POOL_PAGES) || undefined,
+        poolRefreshMs: Number(env.WALMART_POOL_REFRESH_MINUTES) * 60000 || undefined,
       });
       return new WalmartAdapter({ source, mode: 'live', tracker });
     }
@@ -107,9 +109,16 @@ export class WalmartAdapter extends RetailerAdapter {
 
   async getDealCandidates(opts = {}) {
     const products = await this.source.dealCandidates(opts);
-    // Every refresh adds a day to the history behind "price drops" and "lowest ever".
-    this.tracker.recordMany(this.id, products);
+    // Record each new pool once; this builds the history behind "price drops" and "lowest ever".
+    if (!opts.category && this.source.poolStamp !== this.recordedStamp) {
+      this.tracker.recordMany(this.id, products);
+      this.recordedStamp = this.source.poolStamp;
+    }
     return products;
+  }
+
+  dealPoolStats() {
+    return this.source.poolStats();
   }
 
   async getLocalClearance(zip, opts = {}) {

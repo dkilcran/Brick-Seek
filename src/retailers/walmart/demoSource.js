@@ -162,6 +162,15 @@ export class WalmartDemoSource {
     return points;
   }
 
+  /** Demo prices change once a day. */
+  get poolStamp() {
+    return dayKey(this.now());
+  }
+
+  poolStats() {
+    return { uniqueItems: CATALOG.length, feeds: [{ name: 'demo catalog', pages: 1, items: CATALOG.length, error: null }] };
+  }
+
   async dealCandidates({ category } = {}) {
     return CATALOG.filter((item) => !category || item.category === category).map((item) => this.toProduct(item));
   }

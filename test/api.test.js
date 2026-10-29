@@ -105,3 +105,11 @@ test('home sections never repeat a product', async () => {
   assert.equal(new Set(ids).size, ids.length);
   assert.ok(body.sections.filter((s) => s.deals.length).length >= 4);
 });
+
+test('stats describe the deal pool', async () => {
+  const { body } = await get('/api/walmart/stats');
+  assert.equal(body.mode, 'demo');
+  assert.ok(body.pool.uniqueItems > 40);
+  assert.ok(body.eligible > 0 && body.eligible < body.pool.uniqueItems, 'marketplace items excluded');
+  assert.equal(typeof body.analysisMs, 'number');
+});

@@ -69,8 +69,12 @@ so they fill in over the first days of running live. On hosts with
 temporary disk (like Render's free plan) that history resets on each
 deploy or restart.
 
-In live mode the deal pool is Walmart's Trending list, the Clearance and
-Rollback feeds, and the first page of each of the top 20 categories.
+In live mode the deal pool is Walmart's Trending list plus the first 3 pages
+(`WALMART_POOL_PAGES`) of the Clearance and Rollback feeds and of every product
+department. It refreshes in the background every 60 minutes
+(`WALMART_POOL_REFRESH_MINUTES`); visitors keep seeing the previous pool while
+it does. `GET /api/walmart/stats` shows the pool size, each feed's page and
+item counts and errors, and how long ranking takes.
 
 ## Architecture
 

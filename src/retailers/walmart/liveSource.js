@@ -12,8 +12,8 @@ import { walmartProductUrl } from './identifiers.js';
 
 const BASE_URL = 'https://developer.api.walmart.com/api-proxy/service/affil/product/v2';
 const SPECIAL_OFFERS = ['clearance', 'rollback'];
-const POOL_TTL_MS = 30 * 60 * 1000;
-const POOL_CATEGORY_LIMIT = 20;
+// Top-level taxonomy entries that are site sections, not product departments.
+const NON_PRODUCT_SECTIONS = /^(help|ideas|feature|gift registry|gifts & registry|services|photo center|shop by brand|new arrivals|savings|character shop|personalized gifts)$/i;
 
 // Items without seller info are treated as Walmart's own (first-party).
 export function isWalmartSeller(item) {
@@ -69,7 +69,10 @@ export function signWalmartRequest({ consumerId, keyVersion, privateKey, timesta
 }
 
 export class WalmartLiveSource {
-  constructor({ consumerId, keyVersion = '1', privateKey, privateKeyPath, publisherId, fetchImpl = fetch } = {}) {
+  constructor({
+    consumerId, keyVersion = '1', privateKey, privateKeyPath, publisherId, fetchImpl = fetch,
+    poolPages = 3, poolRefreshMs = 60 * 60 * 1000, poolMaxItems = 20000,
+  } = {}) {
     if (!consumerId) throw new Error('WALMART_CONSUMER_ID is required for live mode');
     this.consumerId = consumerId;
     this.keyVersion = keyVersion;
@@ -77,16 +80,21 @@ export class WalmartLiveSource {
     this.publisherId = publisherId;
     this.fetch = fetchImpl;
     this.cache = new TtlCache({ ttlMs: 10 * 60 * 1000 });
-    this.poolCache = new TtlCache({ ttlMs: POOL_TTL_MS });
+    this.poolPages = poolPages;
+    this.poolRefreshMs = poolRefreshMs;
+    this.poolMaxItems = poolMaxItems;
+    this.pool = null; // { products, fetchedAt, stats }
+    this.poolRefresh = null;
   }
 
-  async request(path, params = {}) {
+  /** @param {{ cache?: boolean }} opts  big paged responses skip the cache */
+  async request(path, params = {}, { cache = true } = {}) {
     const url = new URL(BASE_URL + path);
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
     }
     if (this.publisherId) url.searchParams.set('publisherId', this.publisherId);
-    return this.cache.wrap(url.toString(), async () => {
+    const fetchJson = async () => {
       const res = await this.fetch(url, {
         headers: {
           Accept: 'application/json',
@@ -104,7 +112,8 @@ export class WalmartLiveSource {
         throw err;
       }
       return res.json();
-    });
+    };
+    return cache ? this.cache.wrap(url.toString(), fetchJson) : fetchJson();
   }
 
   toProduct(item) {
@@ -187,35 +196,83 @@ export class WalmartLiveSource {
     return null; // fall back to locally recorded observations
   }
 
-  // One upstream call failing shouldn't empty the deals page.
-  async safeItems(path, params) {
+  /**
+   * Fetch up to `pages` pages of a paginated feed, following `nextPage`.
+   * Never throws: one failing feed shouldn't empty the deals page.
+   */
+  async fetchFeed(name, path, params, pages) {
+    const stat = { name, pages: 0, items: 0, error: null };
+    const items = [];
+    let query = params;
     try {
-      return (await this.request(path, params))?.items ?? [];
+      while (query && stat.pages < pages) {
+        const data = await this.request(path, query, { cache: false });
+        stat.pages += 1;
+        items.push(...(data?.items ?? []));
+        // nextPage is a path with the query for the following page.
+        query = data?.nextPage ? Object.fromEntries(new URL(data.nextPage, BASE_URL).searchParams) : null;
+        if (query) delete query.publisherId;
+      }
     } catch (err) {
-      console.warn(`walmart: ${path} failed: ${err.message}`);
-      return [];
+      stat.error = err.message.slice(0, 200);
+      console.warn(`walmart: ${name} failed: ${stat.error}`);
     }
+    stat.items = items.length;
+    return { items, stat };
+  }
+
+  async fetchPool() {
+    const started = Date.now();
+    const cats = (await this.taxonomy().catch(() => [])).filter((c) => !NON_PRODUCT_SECTIONS.test(c.name));
+    const feeds = [
+      ['trending', '/trends', {}, 1],
+      ...SPECIAL_OFFERS.map((offer) => [offer, '/paginated/items', { specialOffer: offer }, this.poolPages]),
+      ...cats.map((c) => [c.name, '/paginated/items', { category: c.id }, this.poolPages]),
+    ];
+    const results = await mapLimit(feeds, 4, ([name, path, params, pages]) => this.fetchFeed(name, path, params, pages));
+    const byId = new Map();
+    for (const { items } of results) {
+      for (const item of items) {
+        if (byId.size >= this.poolMaxItems) break;
+        if (item?.itemId && !byId.has(item.itemId)) byId.set(item.itemId, this.toProduct(item));
+      }
+    }
+    const stats = {
+      fetchedAt: new Date().toISOString(),
+      durationMs: Date.now() - started,
+      requests: results.reduce((n, r) => n + r.stat.pages + (r.stat.error ? 1 : 0), 0),
+      uniqueItems: byId.size,
+      feeds: results.map((r) => r.stat),
+    };
+    console.log(`walmart: deal pool ${stats.uniqueItems} items from ${stats.requests} requests in ${stats.durationMs}ms`);
+    return { products: [...byId.values()], fetchedAt: Date.now(), stats };
   }
 
   /**
-   * Deal pool: trending items, the first page of each top-level category,
-   * and the Clearance and Rollback feeds. Cached as a whole for 30 minutes.
+   * Deal pool: trending items, plus several pages each of the Clearance and
+   * Rollback feeds and every product department. Refreshed hourly in the
+   * background; visitors get the previous pool while a refresh runs.
    */
   async dealCandidates({ category } = {}) {
-    const pool = await this.poolCache.wrap('pool', async () => {
-      const cats = (await this.taxonomy().catch(() => [])).slice(0, POOL_CATEGORY_LIMIT);
-      const requests = [
-        ['/trends', {}],
-        ...SPECIAL_OFFERS.map((offer) => ['/paginated/items', { specialOffer: offer }]),
-        ...cats.map((c) => ['/paginated/items', { category: c.id }]),
-      ];
-      const batches = await mapLimit(requests, 4, ([path, params]) => this.safeItems(path, params));
-      const byId = new Map();
-      for (const item of batches.flat()) {
-        if (item?.itemId && !byId.has(item.itemId)) byId.set(item.itemId, this.toProduct(item));
-      }
-      return [...byId.values()];
-    });
-    return category ? pool.filter((p) => p.category === category) : pool;
+    if (!this.pool) {
+      this.poolRefresh ??= this.fetchPool().finally(() => { this.poolRefresh = null; });
+      this.pool = await this.poolRefresh;
+    } else if (Date.now() - this.pool.fetchedAt > this.poolRefreshMs && !this.poolRefresh) {
+      this.poolRefresh = this.fetchPool()
+        .then((pool) => { this.pool = pool; })
+        .catch((err) => console.warn('walmart: pool refresh failed', err.message))
+        .finally(() => { this.poolRefresh = null; });
+    }
+    const { products } = this.pool;
+    return category ? products.filter((p) => p.category === category) : products;
+  }
+
+  /** Changes whenever the pool is refetched. */
+  get poolStamp() {
+    return this.pool?.fetchedAt ?? null;
+  }
+
+  poolStats() {
+    return this.pool?.stats ?? null;
   }
 }

@@ -178,6 +178,27 @@ export function createRoutes(registry) {
       return { sections };
     }],
 
+    // Diagnostics: what the deal pool holds and how long ranking takes.
+    ['GET', '/api/:retailer/stats', async ({ params }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      const started = Date.now();
+      const analyzed = await analyzeCandidates(adapter);
+      const analysisMs = Date.now() - started;
+      const byCategory = {};
+      for (const d of analyzed) byCategory[d.product.category ?? 'Other'] = (byCategory[d.product.category ?? 'Other'] ?? 0) + 1;
+      return {
+        retailer: adapter.id,
+        mode: adapter.mode,
+        pool: adapter.dealPoolStats?.() ?? null,
+        eligible: analyzed.length,
+        discounted: analyzed.filter((d) => d.discountPercent > 0).length,
+        withHistory: analyzed.filter((d) => d.previousPrice !== null).length,
+        over100: analyzed.filter((d) => d.product.price >= 100 && d.dollarsOff > 0).length,
+        analysisMs,
+        byCategory: Object.fromEntries(Object.entries(byCategory).sort((x, y) => y[1] - x[1])),
+      };
+    }],
+
     ['GET', '/api/:retailer/categories', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);
       return { categories: await adapter.getCategories() };
