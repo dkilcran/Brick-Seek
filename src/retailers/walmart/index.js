@@ -1,6 +1,8 @@
 import { RetailerAdapter } from '../RetailerAdapter.js';
 import { PriceTracker } from '../../lib/priceTracker.js';
 import { ItemChecks } from '../../lib/itemChecks.js';
+import { DEFAULT_SCAN_CONFIG_PATH, loadScanConfig } from '../../lib/scanConfig.js';
+import { SerpApiClient, StoreScanDb, StoreScanner } from './storeScan.js';
 import { WalmartDemoSource } from './demoSource.js';
 import { WalmartLiveSource } from './liveSource.js';
 import { parseWalmartInput } from './identifiers.js';
@@ -33,7 +35,17 @@ export class WalmartAdapter extends RetailerAdapter {
         poolRefreshMs: Number(env.WALMART_POOL_REFRESH_MINUTES) * 60000 || undefined,
         itemChecks: new ItemChecks(tracker.db),
       });
-      return new WalmartAdapter({ source, mode: 'live', tracker });
+      const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
+      if (env.SERPAPI_KEY) {
+        // Store-level prices for the stores in config/store-scan.json.
+        adapter.storeScanner = new StoreScanner({
+          client: new SerpApiClient({ apiKey: env.SERPAPI_KEY }),
+          db: new StoreScanDb(tracker.db),
+          loadConfig: () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH),
+          departments: () => source.taxonomy(),
+        });
+      }
+      return adapter;
     }
     return new WalmartAdapter({
       source: new WalmartDemoSource({ publisherId: env.WALMART_PUBLISHER_ID }),

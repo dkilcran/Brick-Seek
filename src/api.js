@@ -232,6 +232,13 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       return adapter.fieldSurvey?.() ?? { error: 'not available for this retailer' };
     }],
 
+    // Store-level price scan: budget use, schedule, recent searches, a raw sample result.
+    ['GET', '/api/:retailer/store-scan', async ({ params }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.storeScanner) return { enabled: false, reason: 'Needs live mode and SERPAPI_KEY' };
+      return { enabled: true, ...(await adapter.storeScanner.status()) };
+    }],
+
     // Store scan settings as loaded, checked against the retailer's departments.
     ['GET', '/api/:retailer/scan-config', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);
