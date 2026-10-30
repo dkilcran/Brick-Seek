@@ -24,8 +24,11 @@ export class SerpApiClient {
   }
 
   /** Walmart search limited to one store; results are priced for that store. */
-  walmartSearch({ query, storeId, categoryId, page = 1 }) {
-    return this.get('/search.json', { engine: 'walmart', query, store_id: storeId, cat_id: categoryId, page });
+  walmartSearch({ query, storeId, categoryId, facets = [], page = 1 }) {
+    return this.get('/search.json', {
+      engine: 'walmart', query: query || undefined, store_id: storeId, cat_id: categoryId,
+      facet: facets.length ? facets.join('||') : undefined, page,
+    });
   }
 
   /** Plan and usage; doesn't count as a search. */
@@ -45,6 +48,7 @@ export function parseSearchResult(r) {
     wasPrice: num(r.price_was ?? offer.was_price ?? offer.list_price ?? r.was_price),
     inStock: r.out_of_stock === true ? false : r.out_of_stock === false ? true : null,
     seller: r.seller_name ?? null,
+    sponsored: r.sponsored === true,
     imageUrl: r.thumbnail ?? null,
     url: r.product_page_url ?? null,
   };
@@ -220,9 +224,11 @@ export class StoreScanner {
     const now = this.now();
     const { monthKey } = localParts(now);
     const used = this.db.searchesUsed(this.retailer, monthKey);
-    // The very first search runs right away, to confirm the setup works.
-    const firstEver = !this.db.recentRuns(this.retailer, 1).some((r) => !r.error) && !this.db.lastError(this.retailer);
-    const allowed = this.allowance(now, config.monthlySearchBudget) + (firstEver ? 1 : 0);
+    // After the settings change (or on first start), one search runs right away to confirm they work.
+    const settingsKey = JSON.stringify([config.stores.map((s) => s.id), config.departments, config.filters, config.searchTerms]);
+    const testSearch = this.db.getMeta('testedSettings') !== settingsKey;
+    const scheduled = this.allowance(now, config.monthlySearchBudget);
+    const allowed = testSearch ? Math.max(scheduled, used + 1) : scheduled;
     if (used >= allowed) return { ran: false, reason: 'waiting for schedule', used, allowed };
     if ((await this.searchesLeft(now)) === 0) return { ran: false, reason: 'SerpApi plan has no searches left' };
     const lastErr = this.db.lastError(this.retailer);
@@ -235,11 +241,21 @@ export class StoreScanner {
     this.busy = true;
     const ranAt = now.getTime();
     try {
-      const data = await this.client.walmartSearch({ query: job.term, storeId: job.storeId, categoryId: deptIds.get(job.department) });
+      const data = await this.client.walmartSearch({
+        query: job.term, storeId: job.storeId, categoryId: deptIds.get(job.department), facets: config.filters,
+      });
       const raw = data.organic_results ?? [];
       const results = raw.map(parseSearchResult);
       if (raw.length) this.db.setMeta('sampleResult', { ...job, ranAt, result: raw[0] });
+      this.db.setMeta('lastRunSummary', {
+        ...job, ranAt, filters: config.filters, results: results.length,
+        soldByWalmart: results.filter((r) => /^walmart(\.com)?$/i.test(r.seller ?? '')).length,
+        sponsored: results.filter((r) => r.sponsored).length,
+        sellers: Object.entries(results.reduce((m, r) => ({ ...m, [r.seller ?? '?']: (m[r.seller ?? '?'] ?? 0) + 1 }), {}))
+          .sort((a, b) => b[1] - a[1]).slice(0, 5),
+      });
       this.db.recordRun({ retailer: this.retailer, ...job, month: monthKey, ranAt, results });
+      this.db.setMeta('testedSettings', settingsKey);
       return { ran: true, ...job, results: results.length };
     } catch (err) {
       this.db.recordRun({ retailer: this.retailer, ...job, month: monthKey, ranAt, results: null, error: err.message.slice(0, 300) });
@@ -281,6 +297,7 @@ export class StoreScanner {
       serpapiAccount: account,
       prices: this.db.priceCount(this.retailer),
       recentRuns: this.db.recentRuns(this.retailer),
+      lastRunSummary: this.db.getMeta('lastRunSummary'),
       sampleResult: this.db.getMeta('sampleResult'),
     };
   }

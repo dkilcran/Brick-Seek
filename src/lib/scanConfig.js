@@ -25,7 +25,13 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
   }
   const departments = Array.isArray(raw.departments) ? raw.departments.map((d) => String(d).trim()).filter(Boolean) : [];
   if (!departments.length) errors.push('"departments" needs at least one department');
-  const searchTerms = Array.isArray(raw.searchTerms) && raw.searchTerms.length ? raw.searchTerms.map(String) : ['clearance'];
+  // Walmart search filters (facets), e.g. "special_offers:Clearance", "retailer_type:Walmart".
+  const filters = Array.isArray(raw.filters) ? raw.filters.map((f) => String(f).trim()).filter(Boolean) : [];
+  for (const f of filters) if (!/^[a-z_]+:.+$/.test(f)) errors.push(`Filter ${JSON.stringify(f)} should look like "special_offers:Clearance"`);
+  // Optional keywords; with none, each department is searched by its filters alone.
+  const terms = Array.isArray(raw.searchTerms) ? raw.searchTerms.map((t) => String(t).trim()).filter(Boolean) : [];
+  const searchTerms = terms.length ? terms : [''];
+  if (!terms.length && !filters.length) errors.push('Set "filters" or "searchTerms" (or both)');
   const monthlySearchBudget = Number(raw.monthlySearchBudget);
   if (!(monthlySearchBudget > 0)) errors.push('"monthlySearchBudget" should be a positive number');
 
@@ -34,6 +40,7 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
       zip: raw.zip ?? null,
       stores: stores.map((s) => ({ id: String(s.id), label: s.label ?? null })),
       departments: [...new Set(departments)],
+      filters,
       searchTerms,
       monthlySearchBudget: monthlySearchBudget > 0 ? Math.floor(monthlySearchBudget) : 0,
     },

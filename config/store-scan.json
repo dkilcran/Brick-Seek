@@ -26,8 +26,10 @@
     "Party & Occasions",
     "Food"
   ],
-  "searchTerms": [
-    "clearance"
+  "filters": [
+    "special_offers:Clearance",
+    "retailer_type:Walmart"
   ],
+  "searchTerms": [],
   "monthlySearchBudget": 250
 }

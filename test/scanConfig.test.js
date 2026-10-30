@@ -36,5 +36,5 @@ test('describes scan frequency and flags misspelled departments', () => {
 test('bad settings are reported, not thrown', () => {
   assert.match(loadScanConfig(write('{ not json')).errors[0], /Could not read/);
   const { errors } = loadScanConfig(write({ stores: [{ id: 'Lee\'s Summit' }], departments: [], monthlySearchBudget: 0 }));
-  assert.equal(errors.length, 3);
+  assert.equal(errors.length, 4); // bad store id, no departments, no budget, no filters or terms
 });

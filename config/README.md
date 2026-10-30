@@ -11,13 +11,18 @@ doesn't recognize and how often each department gets scanned.
 | `zip` | ZIP code the stores were chosen for (informational). |
 | `stores` | Walmart store numbers to scan. `label` is just for you. Find store numbers at `/api/walmart/stores?zip=XXXXX`. |
 | `departments` | Departments to search at each store. Names must match the list below exactly. |
-| `searchTerms` | Words searched in each department; `clearance` finds marked-down items. |
+| `filters` | Walmart's own search filters. `special_offers:Clearance` = items Walmart marks Clearance; `retailer_type:Walmart` = sold by Walmart (no marketplace sellers). Other examples: `special_offers:Rollback`, `special_offers:Reduced Price`. |
+| `searchTerms` | Optional keywords searched within each department, on top of the filters. Leave empty (`[]`) to list everything the filters match. Each term multiplies the searches per sweep. |
 | `monthlySearchBudget` | Searches allowed per calendar month. Match your SerpApi plan (the free plan is 100–250). The scan spreads this evenly over the month and stops at the limit. |
 
-Each search covers one term in one department at one store and returns about
-40 products. With 2 stores, 20 departments and 1 term, a full sweep is 40
-searches; a budget of 100 covers every department at both stores about every
-12 days.
+Each search covers one department at one store (and one term, if any) and
+returns about 40 products. With 2 stores and 14 departments a full sweep is 28
+searches; a budget of 250 covers every department at both stores roughly 9
+times a month. Searches cluster on Wednesday/Thursday mornings and the first
+week of the month, when Walmart most often marks prices down.
+
+Whenever these settings change, the scan runs one search right away to check
+they work; `/api/walmart/store-scan` shows how it went (`lastRunSummary`).
 
 ## Departments
 

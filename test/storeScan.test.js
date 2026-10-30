@@ -35,7 +35,7 @@ test('parses SerpApi Walmart results leniently', () => {
   });
   assert.deepEqual(r, {
     itemId: '17216380', title: 'Bath Mat', price: 14.39, wasPrice: 100, inStock: true,
-    seller: 'Walmart.com', imageUrl: 'https://i5.walmartimages.com/x.jpg', url: null,
+    seller: 'Walmart.com', sponsored: false, imageUrl: 'https://i5.walmartimages.com/x.jpg', url: null,
   });
 });
 
@@ -47,7 +47,9 @@ function makeScanner({ now, fetchResults, budget = 250, departments = ['Home', '
     walmartSearch: async (q) => { calls.push(q); return fetchResults(q); },
     account: async () => ({ plan_name: 'Free Plan', searches_per_month: 250, plan_searches_left: searchesLeft }),
   };
-  const config = { stores: [{ id: '573' }, { id: '4590' }], departments, searchTerms: ['clearance'], monthlySearchBudget: budget };
+  const config = { stores: [{ id: '573' }, { id: '4590' }], departments, filters: ['special_offers:Clearance'], searchTerms: [''], monthlySearchBudget: budget };
+  // An existing setup has already run its test search for these settings.
+  if (started) db.setMeta('testedSettings', JSON.stringify([['573', '4590'], departments, config.filters, config.searchTerms]));
   const scanner = new StoreScanner({
     client, db, now,
     loadConfig: () => ({ config, errors: [] }),
@@ -65,7 +67,7 @@ test('scanner runs one search per tick within the allowance, oldest job first', 
   });
   const first = await scanner.tick();
   assert.equal(first.ran, true);
-  assert.deepEqual(calls[0], { query: 'clearance', storeId: '573', categoryId: '4044' });
+  assert.deepEqual(calls[0], { query: '', storeId: '573', categoryId: '4044', facets: ['special_offers:Clearance'] });
   clock = new Date(clock.getTime() + 60000);
   await scanner.tick();
   clock = new Date(clock.getTime() + 60000);
@@ -125,4 +127,27 @@ test('stops when SerpApi reports no searches left', async () => {
   });
   assert.equal((await scanner.tick()).reason, 'SerpApi plan has no searches left');
   assert.equal(calls.length, 0);
+});
+
+test('a settings change triggers one test search, then the schedule resumes', async () => {
+  let departments = ['Home', 'Toys'];
+  const db = new StoreScanDb(new PriceTracker().db);
+  db.setMeta('startedAt', Date.parse('2026-10-15T12:00:00Z'));
+  const calls = [];
+  const scanner = new StoreScanner({
+    client: { walmartSearch: async (q) => { calls.push(q); return { organic_results: [{ us_item_id: '1', seller_name: 'Walmart.com' }, { us_item_id: '2', seller_name: 'Rug Co', sponsored: true }] }; }, account: async () => ({ plan_searches_left: 200 }) },
+    db,
+    now: () => new Date('2026-11-01T11:00:00Z'), // 5am: nothing scheduled yet
+    loadConfig: () => ({ config: { stores: [{ id: '573' }], departments, filters: ['special_offers:Clearance'], searchTerms: [''], monthlySearchBudget: 250 }, errors: [] }),
+    departments: async () => [{ id: '4044', name: 'Home' }, { id: '4171', name: 'Toys' }],
+  });
+  assert.equal((await scanner.tick()).ran, true, 'first start');
+  assert.equal((await scanner.tick()).reason, 'waiting for schedule');
+  departments = ['Home'];
+  assert.equal((await scanner.tick()).ran, true, 'settings changed');
+  assert.equal((await scanner.tick()).reason, 'waiting for schedule');
+  assert.equal(calls.length, 2);
+  const summary = db.getMeta('lastRunSummary');
+  assert.equal(summary.soldByWalmart, 1);
+  assert.equal(summary.sponsored, 1);
 });
