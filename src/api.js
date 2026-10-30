@@ -36,7 +36,8 @@ function requireRetailerItem(adapter, product) {
 const analysisCache = new Map();
 
 async function analyzeCandidates(adapter, { category } = {}) {
-  const products = await adapter.getDealCandidates({ category });
+  // Don't hold requests while a freshly restarted server loads its deal pool.
+  const products = await adapter.getDealCandidates({ category, wait: false });
   const today = new Date().toISOString().slice(0, 10);
   const key = `${adapter.id}|${category ?? ''}|${adapter.dealPoolStamp ?? ''}|${today}`;
   if (adapter.dealPoolStamp != null && analysisCache.has(key)) return analysisCache.get(key);
@@ -183,6 +184,8 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
             deals = unseen(await localClearanceDeals(adapter, zip, { ...opts, limit: 100 }));
             if (!deals.length) note = 'No clearance found yet at scanned stores near this ZIP.';
           }
+        } else if (adapter.dealsLoading) {
+          note = 'Deals are loading after a site update. Check back in a few minutes.';
         } else {
           // Top goes first so nothing is hidden yet; later sections rank deeper to refill after repeats.
           // Keep the caps for the visible count even though later sections rank deeper.

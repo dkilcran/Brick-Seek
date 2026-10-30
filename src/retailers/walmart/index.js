@@ -158,6 +158,11 @@ export class WalmartAdapter extends RetailerAdapter {
     return this.source.rankStamp ?? this.source.poolStamp;
   }
 
+  /** True while the deal pool is still loading after a restart. */
+  get dealsLoading() {
+    return Boolean(this.source.poolLoading);
+  }
+
   dealPoolStats() {
     return this.source.poolStats();
   }
@@ -214,7 +219,7 @@ export class WalmartAdapter extends RetailerAdapter {
   /** Departments that have Walmart-sold items in the deal pool, most items first. */
   async getCategories() {
     const counts = new Map();
-    for (const p of await this.source.dealCandidates()) {
+    for (const p of await this.source.dealCandidates({ wait: false })) {
       if (!p.seller?.isRetailer || !p.category) continue;
       counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
     }

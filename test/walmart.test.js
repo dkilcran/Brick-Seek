@@ -451,3 +451,28 @@ test('store scan prices feed Clearance near you and the stock check', async () =
   assert.equal(raytown.price, 10.97, 'unscanned store keeps the online price');
   assert.equal(raytown.status, 'unknown');
 });
+
+test('right after a restart, deal requests return at once while the pool loads', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const ok = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => '' });
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes('/taxonomy')) return ok({ categories: [] });
+    if (u.includes('/trends')) { await gate; return ok({ items: [{ itemId: 1, name: 'A', salePrice: 5, msrp: 9, categoryPath: 'Home Page/Home' }] }); }
+    return ok({ items: [] });
+  };
+  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, retryPassDelayMs: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const adapter = new WalmartAdapter({ source, mode: 'live' });
+  assert.deepEqual(await adapter.getDealCandidates({ wait: false }), []);
+  assert.equal(adapter.dealsLoading, true);
+  assert.deepEqual(await adapter.getCategories(), [], 'category chips do not wait either');
+  const log = console.log;
+  console.log = () => {};
+  release();
+  const pool = await source.dealCandidates();
+  console.log = log;
+  assert.equal(pool.length, 1);
+  assert.equal(adapter.dealsLoading, false);
+});

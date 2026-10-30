@@ -516,13 +516,16 @@ export class WalmartLiveSource {
    * background; visitors get the previous pool while a refresh runs. The
    * very first load waits for the whole fetch (a couple of minutes).
    */
-  async dealCandidates({ category } = {}) {
+  /** @param {{ wait?: boolean }} opts  wait=false returns [] at once while the first pool loads */
+  async dealCandidates({ category, wait = true } = {}) {
     const startChecks = () =>
       this.checkPoolSellers().catch((err) => console.warn('walmart: seller checks failed', err.message));
     if (!this.pool) {
-      this.poolRefresh ??= this.fetchPool().finally(() => { this.poolRefresh = null; });
-      this.pool = await this.poolRefresh;
-      startChecks();
+      this.poolRefresh ??= this.fetchPool()
+        .then((pool) => { this.pool ??= pool; startChecks(); return pool; })
+        .finally(() => { this.poolRefresh = null; });
+      if (!wait) return [];
+      await this.poolRefresh;
     } else if (Date.now() - this.pool.fetchedAt >= this.poolRefreshMs && !this.poolRefresh) {
       this.poolRefresh = this.fetchPool()
         .then((pool) => { this.pool = pool; startChecks(); })
@@ -531,6 +534,11 @@ export class WalmartLiveSource {
     }
     const { products } = this.pool;
     return category ? products.filter((p) => p.category === category) : products;
+  }
+
+  /** True until the first pool has loaded (e.g. right after a restart). */
+  get poolLoading() {
+    return !this.pool;
   }
 
   /** Changes whenever the pool is refetched. */
