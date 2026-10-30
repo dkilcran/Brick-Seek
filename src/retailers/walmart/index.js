@@ -191,6 +191,7 @@ export class WalmartAdapter extends RetailerAdapter {
       storeId: r.store_id,
       storeLabel: labels.get(r.store_id) ?? `Walmart #${r.store_id}`,
       price: r.price,
+      wasPrice: r.was_price > r.price ? r.was_price : null,
       inStock: r.in_stock === null ? null : r.in_stock === 1,
       seenOn: r.date,
     }));
@@ -207,23 +208,22 @@ export class WalmartAdapter extends RetailerAdapter {
       .filter((r) => /^walmart(\.com)?$/i.test(r.seller ?? '') && r.price > 0 && r.in_stock !== 0)
       .filter((r) => !category || r.department === category)
       .map((r) => {
-        const online = r.online_price > 0 ? r.online_price : null;
-        const onlineByOthers = r.online_seller && !/^walmart(\.com)?$/i.test(r.online_seller) ? r.online_seller : null;
+        // Discounts use Walmart's own "was" price from the store search. The
+        // affiliate API's online price is often another seller's or out of date.
+        const was = r.was_price > r.price ? r.was_price : null;
         const product = {
           retailer: this.id, id: r.item_id, sku: r.item_id, upc: null, name: r.title ?? `Item ${r.item_id}`,
           brand: null, category: r.department, imageUrl: r.image_url, url: walmartProductUrl(r.item_id),
-          msrp: Math.max(online ?? 0, r.price), price: online ?? r.price,
+          msrp: was ?? r.price, price: r.price,
           seller: { name: 'Walmart.com', isRetailer: true },
           rating: null, reviewCount: null, specialOffer: 'clearance', inStockOnline: null,
-          // Set when the online listing belongs to a marketplace seller: the comparison price is theirs.
-          onlineSeller: onlineByOthers,
         };
         return {
           product,
           store: { ...storeById.get(r.store_id), seenOn: r.date },
           price: r.price,
           quantity: null,
-          discountPercent: online && online > r.price ? Math.round((1 - r.price / online) * 100) : 0,
+          discountPercent: was ? Math.round((1 - r.price / was) * 100) : 0,
         };
       });
   }

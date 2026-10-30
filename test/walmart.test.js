@@ -417,7 +417,7 @@ test('store scan prices feed Clearance near you and the stock check', async () =
   db.recordRun({
     retailer: 'walmart', storeId: '573', department: 'Home', term: '', month: '2026-10', ranAt: Date.now(),
     results: [
-      { itemId: '24016954', title: 'Cricut mat', price: 7.97, onlinePrice: 10.97, inStock: true, seller: 'Walmart.com' },
+      { itemId: '24016954', title: 'Cricut mat', price: 7.97, wasPrice: 10.97, onlinePrice: 10.97, inStock: true, seller: 'Walmart.com' },
       { itemId: '555', title: 'Sold elsewhere', price: 1, onlinePrice: 9, inStock: true, seller: 'Rug Co' },
       { itemId: '556', title: 'Out of stock', price: 2, onlinePrice: 9, inStock: false, seller: 'Walmart.com' },
     ],
@@ -439,7 +439,7 @@ test('store scan prices feed Clearance near you and the stock check', async () =
   const clearance = await adapter.getLocalClearance('64081');
   assert.deepEqual(clearance.map((c) => c.product.id), ['24016954'], 'Walmart-sold, in stock, at a scanned store');
   assert.equal(clearance[0].price, 7.97);
-  assert.equal(clearance[0].discountPercent, 27);
+  assert.equal(clearance[0].discountPercent, 27, 'measured against Walmart\'s was price');
   assert.equal(clearance[0].store.name, "Lee's Summit Supercenter");
 
   const inv = await adapter.checkInventory('24016954', '64081');
@@ -499,7 +499,8 @@ test('items Walmart sells in a scanned store are allowed even when a marketplace
   const call = (path) => { const m = matchRoute(routes, 'GET', path); return m.route.handler({ params: m.params, query: new URLSearchParams() }); };
 
   const { product } = await call('/api/walmart/products/673610207');
-  assert.equal(product.onlineSeller, 'JNR Sales');
+  assert.equal(product.price, 0.64, 'leads with Walmart\'s store offer, not the online seller\'s $5.20');
+  assert.deepEqual(product.seller, { name: 'Walmart', isRetailer: true });
   assert.deepEqual(product.storeOffers.map((o) => [o.storeLabel, o.price]), [["Lee's Summit, Sam Walton Ln", 0.64]]);
   await assert.rejects(call('/api/walmart/products/999'), /sold by Rug Co/, 'no store offer: still rejected');
 
@@ -512,5 +513,6 @@ test('items Walmart sells in a scanned store are allowed even when a marketplace
   assert.deepEqual(inv.results.map((r) => r.price), [0.64, null]);
 
   const [deal] = await adapter.getLocalClearance('64081');
-  assert.equal(deal.product.onlineSeller, 'JNR Sales');
+  assert.equal(deal.discountPercent, 0, 'no was price: no made-up discount against another seller');
+  assert.equal(deal.product.price, 0.64);
 });

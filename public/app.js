@@ -246,7 +246,7 @@ async function itemView(retailerId, id, query) {
           ${product.category ? `<span>${esc(product.category)}</span>` : ''}
         </div>
         <div class="price-row">
-          <span class="price">${money(product.price)}</span><span class="muted">online${product.onlineSeller ? ` from ${esc(product.onlineSeller)} (not Walmart)` : ''}</span>
+          <span class="price">${money(product.price)}</span><span class="muted">${product.storeOffers?.length ? 'at nearby stores' : 'online'}</span>
           ${product.inStockOnline === false ? '<span class="badge instore">In-store only</span>' : ''}
           ${off ? `<span class="was">${money(product.msrp)}</span><span class="badge off">${off}% off MSRP</span>` : ''}
         </div>
@@ -254,6 +254,7 @@ async function itemView(retailerId, id, query) {
           <strong>In store, sold by ${esc(r.name)}</strong>
           ${product.storeOffers.map((o) => `<div class="price-row" style="margin-top:6px">
             <span class="price">${money(o.price)}</span>
+            ${o.wasPrice ? `<span class="was">${money(o.wasPrice)}</span>` : ''}
             <span>${esc(o.storeLabel)}</span>
             <span class="badge clearance">Clearance</span>
             ${o.inStock === false ? '<span class="badge out_of_stock">Out of stock</span>' : ''}

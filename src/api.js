@@ -29,9 +29,20 @@ function requireZip(zip) {
 function requireRetailerItem(adapter, product) {
   if (!product) throw new HttpError(404, 'Product not found');
   const storeOffers = adapter.storeOffers?.(product.id) ?? [];
-  if (isSoldByRetailer(product)) return storeOffers.length ? { ...product, storeOffers } : product;
-  if (storeOffers.length) {
-    return { ...product, onlineSeller: product.seller?.name ?? null, seller: { name: adapter.name, isRetailer: true }, storeOffers };
+  if (!storeOffers.length) {
+    if (isSoldByRetailer(product)) return product;
+  } else {
+    // The store scan sees the retailer's own offer for nearby stores; the
+    // catalog lookup only knows the default online offer, which may be
+    // another seller's or out of date. Lead with the store offer.
+    const best = storeOffers[0];
+    return {
+      ...product,
+      price: best.price,
+      msrp: best.wasPrice ?? best.price,
+      seller: { name: adapter.name, isRetailer: true },
+      storeOffers,
+    };
   }
   throw new HttpError(404, `This item is sold by ${product.seller?.name ?? 'a marketplace seller'}, not ${adapter.name}`);
 }
