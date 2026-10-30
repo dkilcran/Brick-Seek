@@ -305,6 +305,29 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       return { params: passthrough, affiliate: await adapter.source.rawItem(params.id, { params: passthrough, batch: query.get('batch') === '1' }) };
     }],
 
+    // Diagnostics: one page of a Walmart bulk feed (department or special-offer
+    // list), optionally for a store, summarized.
+    ['GET', '/api/:retailer/debug/feed', async ({ params, query }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.source?.request) throw new HttpError(501, 'Live mode only');
+      const p = {};
+      for (const k of ['category', 'specialOffer', 'storeId', 'count', 'query']) {
+        const v = query.get(k);
+        if (v && /^[\w .:-]{1,40}$/.test(v)) p[k] = v;
+      }
+      const path = query.get('search') === '1' ? '/search' : '/paginated/items';
+      const data = await adapter.source.request(path, p, { cache: false });
+      const items = data?.items ?? [];
+      const count = (f) => items.reduce((m, i) => ({ ...m, [f(i)]: (m[f(i)] ?? 0) + 1 }), {});
+      return {
+        path, params: p, items: items.length, nextPage: Boolean(data?.nextPage), totalResults: data?.totalResults ?? null,
+        sellers: count((i) => (/^walmart/i.test(i.sellerInfo ?? '') ? 'Walmart' : i.sellerInfo ? 'other' : i.marketplace ? 'marketplace' : 'unnamed')),
+        stock: count((i) => i.stock ?? '?'),
+        clearanceFlag: count((i) => String(i.clearance)),
+        sample: items.slice(0, 5).map((i) => ({ itemId: i.itemId, name: i.name?.slice(0, 50), seller: i.sellerInfo ?? null, salePrice: i.salePrice, stock: i.stock })),
+      };
+    }],
+
     ['GET', '/api/:retailer/store-scan/inspect', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);
       if (!adapter.storeScanner) return { enabled: false };
