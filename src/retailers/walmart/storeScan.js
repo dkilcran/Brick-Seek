@@ -1,9 +1,12 @@
-// Store-level Walmart prices from SerpApi: searches one department at one
-// store (results come back priced for that store), on a schedule that spends
-// a monthly search budget. Settings come from config/store-scan.json.
+// Store-level Walmart prices. SerpApi searches find clearance items at
+// discovery stores (one department, one store, one results page per search)
+// on a schedule that spends a monthly search budget; the free Walmart item
+// lookup (storeChecker.js) then checks prices at every store. Both save into
+// StoreScanDb. Settings come from config/store-scan.json.
 import { allowanceSoFar, localParts, monthPlan } from '../../lib/scanSchedule.js';
 
 const SERPAPI_URL = 'https://serpapi.com';
+export const RESULTS_PER_PAGE = 40; // SerpApi Walmart search page size
 
 export class SerpApiClient {
   constructor({ apiKey, fetchImpl = fetch }) {
@@ -24,7 +27,7 @@ export class SerpApiClient {
   }
 
   /** Walmart search limited to one store; results are priced for that store. */
-  walmartSearch({ query, storeId, categoryId, facets = [], page = 1 }) {
+  walmartSearch({ query, storeId, categoryId, facets = [], page }) {
     return this.get('/search.json', {
       engine: 'walmart', query: query || undefined, store_id: storeId, cat_id: categoryId,
       facet: facets.length ? facets.join('||') : undefined, page,
@@ -96,16 +99,25 @@ export class StoreScanDb {
     if (!cols.includes('online_price')) db.exec('ALTER TABLE store_prices ADD COLUMN online_price REAL');
     // Who sells it online: often a marketplace seller once Walmart sells it only in stores.
     if (!cols.includes('online_seller')) db.exec('ALTER TABLE store_prices ADD COLUMN online_seller TEXT');
+    // Walmart's own Clearance flag for this store (1/0, null unknown), and where the row came from.
+    if (!cols.includes('clearance')) db.exec('ALTER TABLE store_prices ADD COLUMN clearance INTEGER');
+    if (!cols.includes('source')) db.exec('ALTER TABLE store_prices ADD COLUMN source TEXT');
+    const runCols = db.prepare('PRAGMA table_info(store_scan_runs)').all().map((c) => c.name);
+    if (!runCols.includes('page')) db.exec('ALTER TABLE store_scan_runs ADD COLUMN page INTEGER NOT NULL DEFAULT 1');
+    if (!runCols.includes('total_results')) db.exec('ALTER TABLE store_scan_runs ADD COLUMN total_results INTEGER');
     this.insertRun = db.prepare(`INSERT INTO store_scan_runs
-      (retailer, store_id, department, term, month, ran_at, result_count, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
+      (retailer, store_id, department, term, month, ran_at, result_count, error, page, total_results)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     this.upsertPrice = db.prepare(`INSERT INTO store_prices
-      (retailer, store_id, item_id, date, price, was_price, in_stock, seller, title, image_url, url, department, online_price, online_seller)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (retailer, store_id, item_id, date, price, was_price, in_stock, seller, title, image_url, url, department, online_price, online_seller, clearance, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (retailer, store_id, item_id, date) DO UPDATE SET
         price = excluded.price, was_price = excluded.was_price, in_stock = excluded.in_stock, seller = excluded.seller,
         title = excluded.title, image_url = excluded.image_url, url = excluded.url, department = excluded.department,
         online_price = COALESCE(excluded.online_price, store_prices.online_price),
-        online_seller = COALESCE(excluded.online_seller, store_prices.online_seller)`);
+        online_seller = COALESCE(excluded.online_seller, store_prices.online_seller),
+        clearance = COALESCE(excluded.clearance, store_prices.clearance),
+        source = excluded.source`);
   }
 
   /** Successful searches this month (SerpApi only counts successful ones). */
@@ -115,9 +127,18 @@ export class StoreScanDb {
   }
 
   lastRunTimes(retailer) {
-    const rows = this.db.prepare(`SELECT store_id, department, term, MAX(ran_at) last FROM store_scan_runs
-      WHERE retailer = ? GROUP BY store_id, department, term`).all(retailer);
-    return new Map(rows.map((r) => [`${r.store_id}|${r.department}|${r.term}`, r.last]));
+    const rows = this.db.prepare(`SELECT store_id, department, term, page, MAX(ran_at) last FROM store_scan_runs
+      WHERE retailer = ? GROUP BY store_id, department, term, page`).all(retailer);
+    return new Map(rows.map((r) => [`${r.store_id}|${r.department}|${r.term}|${r.page}`, r.last]));
+  }
+
+  /** Latest known total result count per store|department|term (from page-1 searches). */
+  lastTotals(retailer) {
+    const rows = this.db.prepare(`SELECT r.store_id, r.department, r.term, r.total_results FROM store_scan_runs r
+      JOIN (SELECT store_id, department, term, MAX(id) id FROM store_scan_runs
+            WHERE retailer = ? AND page = 1 AND error IS NULL AND total_results IS NOT NULL GROUP BY store_id, department, term) l
+        ON r.id = l.id`).all(retailer);
+    return new Map(rows.map((r) => [`${r.store_id}|${r.department}|${r.term}`, r.total_results]));
   }
 
   lastError(retailer) {
@@ -129,17 +150,17 @@ export class StoreScanDb {
       WHERE retailer = ? ORDER BY id DESC LIMIT ?`).all(retailer, limit);
   }
 
-  recordRun({ retailer, storeId, department, term, month, ranAt, results, error }) {
+  recordRun({ retailer, storeId, department, term, month, ranAt, results, error, page = 1, totalResults = null, clearance = null }) {
     this.db.exec('BEGIN');
     try {
-      this.insertRun.run(retailer, storeId, department, term, month, ranAt, results?.length ?? null, error ?? null);
+      this.insertRun.run(retailer, storeId, department, term, month, ranAt, results?.length ?? null, error ?? null, page, totalResults);
       const date = new Date(ranAt).toISOString().slice(0, 10);
       for (const r of results ?? []) {
         if (!r.itemId) continue;
         // SQLite can't store undefined, so missing fields become null.
         this.upsertPrice.run(retailer, storeId, r.itemId, date, r.price ?? null, r.wasPrice ?? null,
           r.inStock == null ? null : r.inStock ? 1 : 0, r.seller ?? null, r.title ?? null, r.imageUrl ?? null, r.url ?? null, department,
-          r.onlinePrice ?? null, r.onlineSeller ?? null);
+          r.onlinePrice ?? null, r.onlineSeller ?? null, clearance, 'serpapi');
       }
       this.db.exec('COMMIT');
     } catch (err) {
@@ -163,6 +184,32 @@ export class StoreScanDb {
             WHERE retailer = ? AND date >= ? AND store_id IN (${marks}) ${itemFilter} GROUP BY store_id, item_id) l
         ON p.store_id = l.store_id AND p.item_id = l.item_id AND p.date = l.d
       WHERE p.retailer = ?`).all(...args);
+  }
+
+  /**
+   * Save store prices from the free Walmart item lookup.
+   * @param {{ itemId, title, price, wasPrice, clearance, inStock, seller, imageUrl, url, category }[]} rows
+   */
+  recordStorePrices(retailer, storeId, rows, date = new Date().toISOString().slice(0, 10)) {
+    this.db.exec('BEGIN');
+    try {
+      for (const r of rows) {
+        this.upsertPrice.run(retailer, storeId, String(r.itemId), date, r.price ?? null, r.wasPrice ?? null,
+          r.inStock == null ? null : r.inStock ? 1 : 0, r.seller ?? null, r.title ?? null, r.imageUrl ?? null,
+          r.url ?? null, r.category ?? null, null, null, r.clearance == null ? null : r.clearance ? 1 : 0, 'walmart-api');
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  /** Items marked down at any store recently: Clearance-flagged or below their was-price. */
+  candidateItems(retailer, { days = 14, now = Date.now() } = {}) {
+    const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
+    return this.db.prepare(`SELECT DISTINCT item_id FROM store_prices
+      WHERE retailer = ? AND date >= ? AND (clearance = 1 OR was_price > price)`).all(retailer, since).map((r) => r.item_id);
   }
 
   /** Stores where the scan found Walmart itself selling an item (latest per store, last `days` days). */
@@ -215,8 +262,11 @@ export class StoreScanDb {
   }
 }
 
+// Same defaults as loadScanConfig, for configs built by hand.
+const discoveryStoresOf = (config) => config.discoveryStores ?? config.stores.map((s) => s.id);
+
 function settingsKeyOf(config) {
-  return JSON.stringify([config.stores.map((s) => s.id), config.departments, config.filters, config.searchTerms]);
+  return JSON.stringify([discoveryStoresOf(config), config.departments, config.filters, config.searchTerms]);
 }
 
 export class StoreScanner {
@@ -275,18 +325,28 @@ export class StoreScanner {
     return this.account.searchesLeft;
   }
 
-  /** Every store × department × term, oldest-scanned first. */
+  /**
+   * Every discovery store × department × term × results page, oldest-scanned
+   * first. Pages past the last known result count are left out; page 2+ waits
+   * until page 1 has reported a count.
+   */
   jobs(config) {
     const last = this.db.lastRunTimes(this.retailer);
+    const totals = this.db.lastTotals(this.retailer);
     const jobs = [];
-    for (const store of config.stores) {
+    for (const storeId of discoveryStoresOf(config)) {
       for (const department of config.departments) {
         for (const term of config.searchTerms) {
-          jobs.push({ storeId: store.id, department, term, last: last.get(`${store.id}|${department}|${term}`) ?? 0 });
+          const total = totals.get(`${storeId}|${department}|${term}`);
+          const pages = total == null ? 1 : Math.min(config.maxPages ?? 1, Math.max(1, Math.ceil(total / RESULTS_PER_PAGE)));
+          for (let page = 1; page <= pages; page++) {
+            jobs.push({ storeId, department, term, page, last: last.get(`${storeId}|${department}|${term}|${page}`) ?? 0 });
+          }
         }
       }
     }
-    return jobs.sort((a, b) => a.last - b.last);
+    // Oldest first; among equals, earlier pages first.
+    return jobs.sort((a, b) => a.last - b.last || a.page - b.page);
   }
 
   /** Run at most one search if the schedule allows one now (or a requested full sweep). */
@@ -400,7 +460,9 @@ export class StoreScanner {
     try {
       const data = await this.client.walmartSearch({
         query: job.term, storeId: job.storeId, categoryId: deptIds.get(job.department), facets: config.filters,
+        page: job.page > 1 ? job.page : undefined,
       });
+      const totalResults = Number(data.search_information?.total_results) || null;
       const raw = data.organic_results ?? [];
       const results = raw.map(parseSearchResult);
       if (this.onlinePrices && results.length) {
@@ -423,7 +485,11 @@ export class StoreScanner {
         sellers: Object.entries(results.reduce((m, r) => ({ ...m, [r.seller ?? '?']: (m[r.seller ?? '?'] ?? 0) + 1 }), {}))
           .sort((a, b) => b[1] - a[1]).slice(0, 5),
       });
-      this.db.recordRun({ retailer: this.retailer, ...job, month, ranAt, results });
+      this.db.recordRun({
+        retailer: this.retailer, ...job, month, ranAt, results, totalResults,
+        // Searches filtered to Walmart's Clearance listings: every result is clearance.
+        clearance: config.filters.includes('special_offers:Clearance') ? 1 : null,
+      });
       this.db.setMeta('testedSettings', settingsKeyOf(config));
       return { ran: true, ...job, results: results.length };
     } catch (err) {

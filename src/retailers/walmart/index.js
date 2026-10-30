@@ -3,11 +3,22 @@ import { PriceTracker } from '../../lib/priceTracker.js';
 import { ItemChecks } from '../../lib/itemChecks.js';
 import { DEFAULT_SCAN_CONFIG_PATH, loadScanConfig } from '../../lib/scanConfig.js';
 import { SerpApiClient, StoreScanDb, StoreScanner } from './storeScan.js';
+import { StoreChecker } from './storeChecker.js';
 import { walmartProductUrl } from './identifiers.js';
 import { STOCK_STATUS } from '../RetailerAdapter.js';
 import { WalmartDemoSource } from './demoSource.js';
 import { WalmartLiveSource } from './liveSource.js';
 import { parseWalmartInput } from './identifiers.js';
+
+/**
+ * A saved store price counts as marked down when Walmart flags it Clearance or
+ * shows a higher was-price. Rows from the first SerpApi searches predate the
+ * clearance column; those searches only returned Clearance listings.
+ */
+export function isMarkedDown(row) {
+  if (row.clearance === 1 || row.was_price > row.price) return true;
+  return row.clearance == null && row.source == null;
+}
 
 export class WalmartAdapter extends RetailerAdapter {
   constructor({ source, mode = 'demo', tracker = new PriceTracker() } = {}) {
@@ -38,12 +49,18 @@ export class WalmartAdapter extends RetailerAdapter {
         itemChecks: new ItemChecks(tracker.db),
       });
       const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
+      // Store-level prices for the stores in config/store-scan.json: free checks
+      // through Walmart's item lookup, plus SerpApi discovery when a key is set.
+      const loadConfig = () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH);
+      const storeDb = new StoreScanDb(tracker.db);
+      adapter.storeDb = storeDb;
+      adapter.loadStoreConfig = loadConfig;
+      adapter.storeChecker = new StoreChecker({ source, db: storeDb, loadConfig });
       if (env.SERPAPI_KEY) {
-        // Store-level prices for the stores in config/store-scan.json.
         adapter.storeScanner = new StoreScanner({
           client: new SerpApiClient({ apiKey: env.SERPAPI_KEY }),
-          db: new StoreScanDb(tracker.db),
-          loadConfig: () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH),
+          db: storeDb,
+          loadConfig,
           departments: () => source.taxonomy(),
           onlinePrices: (ids) => source.onlinePrices(ids),
         });
@@ -83,7 +100,7 @@ export class WalmartAdapter extends RetailerAdapter {
       priceHistory: true,
       // Walmart's public API has no per-store prices, so only demo data has this.
       // Store-level prices come from demo data, or from the store scan (SerpApi) when set up.
-      localClearance: this._mode === 'demo' || Boolean(this.storeScanner),
+      localClearance: this._mode === 'demo' || Boolean(this.storeData),
     };
   }
 
@@ -126,11 +143,20 @@ export class WalmartAdapter extends RetailerAdapter {
     return { product, results };
   }
 
-  /** Overlay store-scan prices onto stock-check rows for stores that were scanned. */
+  /** Saved store prices (free checks and SerpApi), when live. */
+  get storeData() {
+    return this.storeDb ?? this.storeScanner?.db ?? null;
+  }
+
+  storeConfig() {
+    return (this.loadStoreConfig ?? this.storeScanner?.loadConfig)?.()?.config ?? null;
+  }
+
+  /** Overlay saved store prices onto stock-check rows for stores that were checked. */
   applyScannedPrices(product, results) {
     // A marketplace seller's online price says nothing about Walmart's store price.
     if (product.seller?.isRetailer === false) for (const result of results) result.price = null;
-    const db = this.storeScanner?.db;
+    const db = this.storeData;
     if (!db || !results.length) return;
     const rows = db.latestPrices(this.id, results.map((r) => r.store.id), { itemId: product.id });
     const byStore = new Map(rows.map((r) => [r.store_id, r]));
@@ -139,8 +165,7 @@ export class WalmartAdapter extends RetailerAdapter {
       if (!row || typeof row.price !== 'number') continue;
       result.price = row.price;
       result.status = row.in_stock === 1 ? STOCK_STATUS.IN_STOCK : row.in_stock === 0 ? STOCK_STATUS.OUT_OF_STOCK : result.status;
-      // The scan only searches Walmart's Clearance listings.
-      result.clearance = true;
+      result.clearance = isMarkedDown(row);
       result.seenOn = row.date;
     }
   }
@@ -175,7 +200,7 @@ export class WalmartAdapter extends RetailerAdapter {
 
   async getLocalClearance(zip, opts = {}) {
     if (!this.features.localClearance) return super.getLocalClearance(zip, opts);
-    if (this.storeScanner) return this.scannedClearance(zip, opts);
+    if (this.storeData) return this.scannedClearance(zip, opts);
     return this.source.localClearance(zip, opts);
   }
 
@@ -184,32 +209,33 @@ export class WalmartAdapter extends RetailerAdapter {
    * item can be Walmart's in store while a marketplace seller has it online.
    */
   storeOffers(itemId) {
-    const scanner = this.storeScanner;
-    if (!scanner) return [];
-    const labels = new Map((scanner.loadConfig?.().config?.stores ?? []).map((s) => [s.id, s.label]));
-    return scanner.db.walmartStoreOffers(this.id, itemId).map((r) => ({
+    const db = this.storeData;
+    if (!db) return [];
+    const labels = new Map((this.storeConfig()?.stores ?? []).map((s) => [s.id, s.label]));
+    return db.walmartStoreOffers(this.id, itemId).map((r) => ({
       storeId: r.store_id,
       storeLabel: labels.get(r.store_id) ?? `Walmart #${r.store_id}`,
       price: r.price,
       wasPrice: r.was_price > r.price ? r.was_price : null,
       inStock: r.in_stock === null ? null : r.in_stock === 1,
       seenOn: r.date,
+      clearance: isMarkedDown(r),
     }));
   }
 
-  /** Clearance items found by the store scan at scanned stores near a ZIP. */
+  /** Marked-down items at checked stores near a ZIP. */
   async scannedClearance(zip, { category } = {}) {
-    const db = this.storeScanner.db;
+    const db = this.storeData;
     const scanned = new Set(db.scannedStores(this.id));
-    const stores = (await this.source.stores(zip, { limit: 25 })).filter((s) => scanned.has(s.id));
+    const stores = (await this.source.stores(zip, { limit: 50 })).filter((s) => scanned.has(s.id));
     const storeById = new Map(stores.map((s) => [s.id, s]));
     const rows = db.latestPrices(this.id, stores.map((s) => s.id));
     return rows
-      .filter((r) => /^walmart(\.com)?$/i.test(r.seller ?? '') && r.price > 0 && r.in_stock !== 0)
+      .filter((r) => /^walmart(\.com)?$/i.test(r.seller ?? '') && r.price > 0 && r.in_stock !== 0 && isMarkedDown(r))
       .filter((r) => !category || r.department === category)
       .map((r) => {
-        // Discounts use Walmart's own "was" price from the store search. The
-        // affiliate API's online price is often another seller's or out of date.
+        // Discounts use Walmart's own "was" price for that store (strike-through
+        // price). The default online offer is often another seller's or out of date.
         const was = r.was_price > r.price ? r.was_price : null;
         const product = {
           retailer: this.id, id: r.item_id, sku: r.item_id, upc: null, name: r.title ?? `Item ${r.item_id}`,

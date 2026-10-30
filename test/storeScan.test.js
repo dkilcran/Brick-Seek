@@ -67,7 +67,7 @@ test('scanner runs one search per tick within the allowance, oldest job first', 
   });
   const first = await scanner.tick();
   assert.equal(first.ran, true);
-  assert.deepEqual(calls[0], { query: '', storeId: '573', categoryId: '4044', facets: ['special_offers:Clearance'] });
+  assert.deepEqual(calls[0], { query: '', storeId: '573', categoryId: '4044', facets: ['special_offers:Clearance'], page: undefined });
   clock = new Date(clock.getTime() + 60000);
   await scanner.tick();
   clock = new Date(clock.getTime() + 60000);

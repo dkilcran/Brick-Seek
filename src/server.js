@@ -67,6 +67,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   for (const adapter of registry.list()) {
     if (adapter.features.deals) adapter.getDealCandidates().catch((err) => console.warn(`${adapter.id}: warm-up failed`, err.message));
     adapter.storeScanner?.start();
+    adapter.storeChecker?.start();
   }
   setInterval(() => registry.tracker.prune(), 24 * 60 * 60 * 1000).unref();
   createApp(registry).listen(port, () => {

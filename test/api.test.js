@@ -139,7 +139,7 @@ test('deal ranking is reused until the pool changes', async () => {
 test('scan-config shows the settings checked against departments', async () => {
   const { status, body } = await get('/api/walmart/scan-config');
   assert.equal(status, 200);
-  assert.deepEqual(body.config.stores.map((s) => s.id), ['573', '4590']);
+  assert.ok(body.config.stores.some((s) => s.id === '573'));
   assert.ok(body.availableDepartments.includes('Toys'));
   assert.equal(typeof body.daysBetweenScans, 'number');
 });

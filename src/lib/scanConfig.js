@@ -32,13 +32,24 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
   const terms = Array.isArray(raw.searchTerms) ? raw.searchTerms.map((t) => String(t).trim()).filter(Boolean) : [];
   const searchTerms = terms.length ? terms : [''];
   if (!terms.length && !filters.length) errors.push('Set "filters" or "searchTerms" (or both)');
+  const storeIds = new Set(stores.map((s) => String(s?.id)));
+  // SerpApi searches only these stores (discovery); the free item lookup checks every store.
+  const discoveryStores = Array.isArray(raw.discoveryStores) && raw.discoveryStores.length
+    ? raw.discoveryStores.map(String)
+    : [...storeIds];
+  for (const id of discoveryStores) if (!storeIds.has(id)) errors.push(`discoveryStores: ${id} isn't in "stores"`);
+  const maxPages = raw.maxPages == null ? 1 : Number(raw.maxPages);
+  if (!(Number.isInteger(maxPages) && maxPages >= 1 && maxPages <= 25)) errors.push('"maxPages" should be a whole number from 1 to 25');
   const monthlySearchBudget = Number(raw.monthlySearchBudget);
   if (!(monthlySearchBudget > 0)) errors.push('"monthlySearchBudget" should be a positive number');
 
   return {
     config: {
       zip: raw.zip ?? null,
+      zips: Array.isArray(raw.zips) ? raw.zips.map(String) : raw.zip ? [String(raw.zip)] : [],
       stores: stores.map((s) => ({ id: String(s.id), label: s.label ?? null })),
+      discoveryStores,
+      maxPages: Number.isInteger(maxPages) ? maxPages : 1,
       departments: [...new Set(departments)],
       filters,
       searchTerms,
@@ -66,7 +77,7 @@ export function describeScanConfig({ config, errors }, available = []) {
   if (!config) return { ok: false, errors };
   const known = new Set(available);
   const unknownDepartments = available.length ? config.departments.filter((d) => !known.has(d)) : [];
-  const searchesPerSweep = config.stores.length * config.departments.length * config.searchTerms.length;
+  const searchesPerSweep = config.discoveryStores.length * config.departments.length * config.searchTerms.length * config.maxPages;
   const sweepsPerMonth = searchesPerSweep ? config.monthlySearchBudget / searchesPerSweep : 0;
   return {
     ok: errors.length === 0 && unknownDepartments.length === 0,

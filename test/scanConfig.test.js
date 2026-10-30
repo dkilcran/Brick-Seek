@@ -14,7 +14,9 @@ const write = (obj) => {
 test('the shipped settings file is valid', () => {
   const loaded = loadScanConfig();
   assert.deepEqual(loaded.errors, []);
-  assert.deepEqual(loaded.config.stores.map((s) => s.id), ['573', '4590']);
+  assert.equal(loaded.config.stores.length, 23);
+  assert.ok(['573', '4590', '1599'].every((id) => loaded.config.stores.some((s) => s.id === id)));
+  assert.deepEqual(loaded.config.discoveryStores, ['573', '1599']);
   assert.ok(loaded.config.departments.includes('Home'));
 });
 

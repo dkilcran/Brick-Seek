@@ -1,14 +1,105 @@
 {
-  "zip": "64081",
+  "zips": [
+    "64081",
+    "66211"
+  ],
   "stores": [
+    {
+      "id": "1599",
+      "label": "Overland Park Supercenter, 11701 Metcalf Ave"
+    },
     {
       "id": "573",
       "label": "Lee's Summit Supercenter, 1000 NE Sam Walton Ln"
     },
     {
+      "id": "2955",
+      "label": "Kansas City Supercenter, 1701 W 133rd St"
+    },
+    {
+      "id": "5207",
+      "label": "Overland Park Neighborhood Market, 9000 Metcalf Ave"
+    },
+    {
       "id": "4590",
       "label": "Lee's Summit Supercenter, 3410 SW Market St"
+    },
+    {
+      "id": "1094",
+      "label": "Raytown Supercenter, 10300 E Hwy 350"
+    },
+    {
+      "id": "1691",
+      "label": "Overland Park Store, 7701 Frontage Rd"
+    },
+    {
+      "id": "3273",
+      "label": "Overland Park Supercenter, 15700 Metcalf Ave"
+    },
+    {
+      "id": "5308",
+      "label": "Shawnee Neighborhood Market, 11010 W 74th Ter"
+    },
+    {
+      "id": "577",
+      "label": "Olathe Supercenter, 13600 S Alden St"
+    },
+    {
+      "id": "2490",
+      "label": "Roeland Park Store, 5150 Roe Blvd"
+    },
+    {
+      "id": "998",
+      "label": "Westwood Neighborhood Market, 4701 Mission Rd"
+    },
+    {
+      "id": "319",
+      "label": "Raymore Supercenter, 2015 W Foxwood Dr"
+    },
+    {
+      "id": "4553",
+      "label": "Kansas City Supercenter, 11601 E US Hwy 40"
+    },
+    {
+      "id": "1014",
+      "label": "Independence Supercenter, 4000 S Bolger Rd"
+    },
+    {
+      "id": "2855",
+      "label": "Shawnee Supercenter, 16100 W 65th St"
+    },
+    {
+      "id": "6500",
+      "label": "Independence Neighborhood Market, 3411 S Noland Rd"
+    },
+    {
+      "id": "4198",
+      "label": "Olathe Neighborhood Market, 18555 W 151st St"
+    },
+    {
+      "id": "6172",
+      "label": "Kansas City KS Neighborhood Market, 2300 Metropolitan Ave"
+    },
+    {
+      "id": "184",
+      "label": "Blue Springs Supercenter, 600 NE Coronado Dr"
+    },
+    {
+      "id": "5149",
+      "label": "Blue Springs Neighborhood Market, 1700 N 7 Hwy"
+    },
+    {
+      "id": "4475",
+      "label": "Olathe Supercenter, 395 N K-7 Hwy"
+    },
+    {
+      "id": "4611",
+      "label": "Shawnee Supercenter, 5701 Silverheel St"
     }
+  ],
+  "discoveryStores": [
+    "573",
+    "1599"
   ],
   "departments": [
     "Home",
@@ -31,6 +122,7 @@
     "retailer_type:Walmart"
   ],
   "searchTerms": [],
+  "maxPages": 5,
   "monthlySearchBudget": 250,
   "fullSweep": "2026-10-30",
   "inspect": {

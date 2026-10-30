@@ -268,8 +268,8 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
     // for checking by hand against Walmart's own store view.
     ['GET', '/api/:retailer/store-scan/sample', async ({ params, query }) => {
       const adapter = requireRetailer(registry, params.retailer);
-      if (!adapter.storeScanner) return { enabled: false, reason: 'Needs live mode and SERPAPI_KEY' };
-      const rows = adapter.storeScanner.db.samplePrices(adapter.id, clampInt(query.get('n'), 15, 1, 40));
+      if (!adapter.storeData) return { enabled: false, reason: 'Live mode only' };
+      const rows = adapter.storeData.samplePrices(adapter.id, clampInt(query.get('n'), 15, 1, 40));
       const online = await adapter.onlinePrices([...new Set(rows.map((r) => r.item_id))]);
       const items = rows.map((r) => {
         const o = online.get(r.item_id) ?? null;
@@ -329,6 +329,13 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
         clearanceFlag: count((i) => String(i.clearance)),
         sample: items.slice(0, 5).map((i) => ({ itemId: i.itemId, name: i.name?.slice(0, 50), seller: i.sellerInfo ?? null, salePrice: i.salePrice, stock: i.stock })),
       };
+    }],
+
+    // Free store checks (Walmart item lookup per store): today's progress.
+    ['GET', '/api/:retailer/store-check', async ({ params }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.storeChecker) return { enabled: false, reason: 'Live mode only' };
+      return { enabled: true, ...adapter.storeChecker.status(), prices: adapter.storeData.priceCount(adapter.id) };
     }],
 
     ['GET', '/api/:retailer/store-scan/inspect', async ({ params }) => {

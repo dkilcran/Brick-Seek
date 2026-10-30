@@ -440,6 +440,41 @@ export class WalmartLiveSource {
    * Look items up (20 per call) to learn who sells them and whether they still
    * exist; save and apply the results.
    */
+  /**
+   * Walmart's offer for item ids at one store (one lookup of up to 20 ids):
+   * with a storeId the lookup returns that store's price, stock, Clearance
+   * flag and was-price (strikeThroughPrice) instead of the default online offer.
+   * @returns {Promise<{ found: object[], missing: string[] }>}
+   */
+  async storeLookup(ids, storeId) {
+    let data;
+    try {
+      data = await this.request('/items', { ids: ids.join(','), storeId }, { cache: false });
+    } catch (err) {
+      if (/\b400\b/.test(err.message) && /not found/i.test(err.message)) return { found: [], missing: ids.map(String) };
+      throw err;
+    }
+    const found = (data?.items ?? []).map((item) => {
+      const p = this.toProduct(item, { fromLookup: true });
+      const strike = Number(item.strikeThroughPrice);
+      return {
+        itemId: p.id,
+        title: p.name,
+        price: p.price,
+        wasPrice: strike > (p.price ?? 0) ? strike : null,
+        clearance: item.clearance === true,
+        inStock: p.inStockOnline, // with a storeId, "stock" describes that store
+        seller: p.seller.name,
+        isWalmart: p.seller.isRetailer === true,
+        imageUrl: p.imageUrl,
+        url: p.url,
+        category: p.category,
+      };
+    });
+    const seen = new Set(found.map((f) => f.itemId));
+    return { found, missing: ids.map(String).filter((id) => !seen.has(id)) };
+  }
+
   /** Online (walmart.com) price and seller for item ids, 20 per lookup. */
   async onlinePrices(ids) {
     const out = new Map();
