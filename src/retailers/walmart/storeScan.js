@@ -124,8 +124,9 @@ export class StoreScanDb {
       const date = new Date(ranAt).toISOString().slice(0, 10);
       for (const r of results ?? []) {
         if (!r.itemId) continue;
-        this.upsertPrice.run(retailer, storeId, r.itemId, date, r.price, r.wasPrice,
-          r.inStock === null ? null : r.inStock ? 1 : 0, r.seller, r.title, r.imageUrl, r.url, department);
+        // SQLite can't store undefined, so missing fields become null.
+        this.upsertPrice.run(retailer, storeId, r.itemId, date, r.price ?? null, r.wasPrice ?? null,
+          r.inStock == null ? null : r.inStock ? 1 : 0, r.seller ?? null, r.title ?? null, r.imageUrl ?? null, r.url ?? null, department);
       }
       this.db.exec('COMMIT');
     } catch (err) {
