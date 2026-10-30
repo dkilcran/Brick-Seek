@@ -156,7 +156,10 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
     ['GET', '/api/:retailer/stores', async ({ params, query }) => {
       const adapter = requireRetailer(registry, params.retailer);
       const zip = requireZip(query.get('zip'));
-      return { zip, stores: await adapter.findStores(zip, { radiusMiles: clampInt(query.get('radius'), 50, 5, 100) }) };
+      return {
+        zip,
+        stores: await adapter.findStores(zip, { radiusMiles: clampInt(query.get('radius'), 50, 5, 100), limit: clampInt(query.get('limit'), 15, 1, 50) }),
+      };
     }],
 
     // One section: top | drops | lowest | bigticket | clearance (needs zip)

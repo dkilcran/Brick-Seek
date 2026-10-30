@@ -316,6 +316,9 @@ export class WalmartLiveSource {
       state: s.stateProvCode ?? null,
       zip: s.zip ?? null,
       phone: s.phoneNumber ?? null,
+      // Walmart gives coordinates as [lon, lat].
+      lat: Array.isArray(s.coordinates) ? s.coordinates[1] : null,
+      lon: Array.isArray(s.coordinates) ? s.coordinates[0] : null,
       distanceMiles: null,
     }));
   }
