@@ -24,12 +24,16 @@ function requireZip(zip) {
 }
 
 // The site only covers items the retailer sells itself, not marketplace sellers.
+// An item a marketplace seller has online still counts when the store scan
+// found the retailer selling it in a store; both offers are returned.
 function requireRetailerItem(adapter, product) {
   if (!product) throw new HttpError(404, 'Product not found');
-  if (!isSoldByRetailer(product)) {
-    throw new HttpError(404, `This item is sold by ${product.seller?.name ?? 'a marketplace seller'}, not ${adapter.name}`);
+  const storeOffers = adapter.storeOffers?.(product.id) ?? [];
+  if (isSoldByRetailer(product)) return storeOffers.length ? { ...product, storeOffers } : product;
+  if (storeOffers.length) {
+    return { ...product, onlineSeller: product.seller?.name ?? null, seller: { name: adapter.name, isRetailer: true }, storeOffers };
   }
-  return product;
+  throw new HttpError(404, `This item is sold by ${product.seller?.name ?? 'a marketplace seller'}, not ${adapter.name}`);
 }
 
 // Ranking ~20k items takes a few hundred ms, so reuse it until the pool changes.
@@ -72,6 +76,7 @@ async function localClearanceDeals(adapter, zip, { category, minDiscount = 0, li
       lowestPrice: best.price,
       discountPercent: best.discountPercent,
       dollarsOff: Number((best.product.msrp - best.price).toFixed(2)),
+      onlineSeller: best.product.onlineSeller ?? null,
       store: best.store,
       quantity: best.quantity,
       storesWithDeal: stores,
@@ -113,7 +118,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const zip = requireZip(query.get('zip'));
       const radiusMiles = clampInt(query.get('radius'), 50, 5, 100);
       const result = await adapter.checkInventory(params.id, zip, { radiusMiles });
-      requireRetailerItem(adapter, result?.product);
+      const product = requireRetailerItem(adapter, result?.product);
       const sort = query.get('sort') ?? 'distance';
       const results = [...result.results].sort((a, b) =>
         sort === 'price'
@@ -121,7 +126,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
           : (a.store.distanceMiles ?? Infinity) - (b.store.distanceMiles ?? Infinity),
       );
       return {
-        product: result.product,
+        product,
         zip,
         radiusMiles,
         summary: summarizeAvailability(results),

@@ -197,7 +197,9 @@ function dealSection(r, sec, category) {
 function dealCard(d) {
   const badges = (d.reasons ?? []).map((reason) =>
     `<span class="badge ${reason === 'Clearance' ? 'clearance' : reason === 'Rollback' ? 'rollback' : reason === 'In-store only' ? 'instore' : 'signal'}">${esc(reason)}</span>`);
-  const savings = d.dollarsOff >= 1 ? `<span class="muted" style="font-size:13px">Save ${money(d.dollarsOff)}</span>` : '';
+  const savings = d.dollarsOff >= 1
+    ? `<span class="muted" style="font-size:13px">Save ${money(d.dollarsOff)}${d.onlineSeller ? ' vs other sellers online' : ''}</span>`
+    : '';
   const store = d.store
     ? `<div style="font-size:13px"><strong>${esc(d.store.name)}</strong>${d.store.distanceMiles != null ? ` · ${d.store.distanceMiles} mi` : ''}${d.quantity != null ? ` · ${d.quantity} left` : ''}${d.storesWithDeal > 1 ? ` · ${d.storesWithDeal} stores` : ''}${d.store.seenOn ? ` · scanned ${esc(d.store.seenOn)}` : ''}</div>`
     : '';
@@ -244,10 +246,20 @@ async function itemView(retailerId, id, query) {
           ${product.category ? `<span>${esc(product.category)}</span>` : ''}
         </div>
         <div class="price-row">
-          <span class="price">${money(product.price)}</span><span class="muted">online</span>
+          <span class="price">${money(product.price)}</span><span class="muted">online${product.onlineSeller ? ` from ${esc(product.onlineSeller)} (not Walmart)` : ''}</span>
           ${product.inStockOnline === false ? '<span class="badge instore">In-store only</span>' : ''}
           ${off ? `<span class="was">${money(product.msrp)}</span><span class="badge off">${off}% off MSRP</span>` : ''}
         </div>
+        ${product.storeOffers?.length ? `<div class="card" style="margin:12px 0">
+          <strong>In store, sold by ${esc(r.name)}</strong>
+          ${product.storeOffers.map((o) => `<div class="price-row" style="margin-top:6px">
+            <span class="price">${money(o.price)}</span>
+            <span>${esc(o.storeLabel)}</span>
+            <span class="badge clearance">Clearance</span>
+            ${o.inStock === false ? '<span class="badge out_of_stock">Out of stock</span>' : ''}
+            <span class="muted" style="font-size:13px">scanned ${esc(o.seenOn)}</span>
+          </div>`).join('')}
+        </div>` : ''}
         <p><a href="${esc(product.url)}" target="_blank" rel="noopener">View on ${esc(r.name)}.com ↗</a></p>
       </div>
     </div>

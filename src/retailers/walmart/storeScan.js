@@ -89,15 +89,18 @@ export class StoreScanDb {
     // walmart.com price at scan time, to measure store markdowns (added after launch).
     const cols = db.prepare('PRAGMA table_info(store_prices)').all().map((c) => c.name);
     if (!cols.includes('online_price')) db.exec('ALTER TABLE store_prices ADD COLUMN online_price REAL');
+    // Who sells it online: often a marketplace seller once Walmart sells it only in stores.
+    if (!cols.includes('online_seller')) db.exec('ALTER TABLE store_prices ADD COLUMN online_seller TEXT');
     this.insertRun = db.prepare(`INSERT INTO store_scan_runs
       (retailer, store_id, department, term, month, ran_at, result_count, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
     this.upsertPrice = db.prepare(`INSERT INTO store_prices
-      (retailer, store_id, item_id, date, price, was_price, in_stock, seller, title, image_url, url, department, online_price)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (retailer, store_id, item_id, date, price, was_price, in_stock, seller, title, image_url, url, department, online_price, online_seller)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (retailer, store_id, item_id, date) DO UPDATE SET
         price = excluded.price, was_price = excluded.was_price, in_stock = excluded.in_stock, seller = excluded.seller,
         title = excluded.title, image_url = excluded.image_url, url = excluded.url, department = excluded.department,
-        online_price = COALESCE(excluded.online_price, store_prices.online_price)`);
+        online_price = COALESCE(excluded.online_price, store_prices.online_price),
+        online_seller = COALESCE(excluded.online_seller, store_prices.online_seller)`);
   }
 
   /** Successful searches this month (SerpApi only counts successful ones). */
@@ -131,7 +134,7 @@ export class StoreScanDb {
         // SQLite can't store undefined, so missing fields become null.
         this.upsertPrice.run(retailer, storeId, r.itemId, date, r.price ?? null, r.wasPrice ?? null,
           r.inStock == null ? null : r.inStock ? 1 : 0, r.seller ?? null, r.title ?? null, r.imageUrl ?? null, r.url ?? null, department,
-          r.onlinePrice ?? null);
+          r.onlinePrice ?? null, r.onlineSeller ?? null);
       }
       this.db.exec('COMMIT');
     } catch (err) {
@@ -155,6 +158,28 @@ export class StoreScanDb {
             WHERE retailer = ? AND date >= ? AND store_id IN (${marks}) ${itemFilter} GROUP BY store_id, item_id) l
         ON p.store_id = l.store_id AND p.item_id = l.item_id AND p.date = l.d
       WHERE p.retailer = ?`).all(...args);
+  }
+
+  /** Stores where the scan found Walmart itself selling an item (latest per store, last `days` days). */
+  walmartStoreOffers(retailer, itemId, { days = 14, now = Date.now() } = {}) {
+    const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
+    return this.db.prepare(`SELECT p.* FROM store_prices p
+      JOIN (SELECT store_id, MAX(date) d FROM store_prices WHERE retailer = ? AND item_id = ? AND date >= ? GROUP BY store_id) l
+        ON p.store_id = l.store_id AND p.date = l.d
+      WHERE p.retailer = ? AND p.item_id = ? AND lower(p.seller) IN ('walmart', 'walmart.com')
+      ORDER BY p.price`).all(retailer, String(itemId), since, retailer, String(itemId));
+  }
+
+  /** Recent items whose online seller hasn't been recorded yet. */
+  itemsMissingOnlineSeller(retailer, { days = 14, now = Date.now() } = {}) {
+    const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
+    return this.db.prepare(`SELECT DISTINCT item_id FROM store_prices
+      WHERE retailer = ? AND date >= ? AND online_seller IS NULL`).all(retailer, since).map((r) => r.item_id);
+  }
+
+  setOnlineInfo(retailer, itemId, { price, seller }) {
+    this.db.prepare(`UPDATE store_prices SET online_seller = ?, online_price = COALESCE(online_price, ?)
+      WHERE retailer = ? AND item_id = ? AND online_seller IS NULL`).run(seller ?? null, price ?? null, retailer, String(itemId));
   }
 
   /** Store ids that have any scanned prices. */
@@ -335,7 +360,10 @@ export class StoreScanner {
       if (this.onlinePrices && results.length) {
         try {
           const online = await this.onlinePrices(results.map((r) => r.itemId).filter(Boolean));
-          for (const r of results) r.onlinePrice = online.get(r.itemId)?.price ?? null;
+          for (const r of results) {
+            r.onlinePrice = online.get(r.itemId)?.price ?? null;
+            r.onlineSeller = online.get(r.itemId)?.seller ?? null;
+          }
         } catch (err) {
           console.warn(`store scan: online prices failed: ${err.message}`);
         }
@@ -359,9 +387,26 @@ export class StoreScanner {
     }
   }
 
+  /** Record the online seller for items scanned before that was tracked. */
+  async backfillOnlineSellers() {
+    if (!this.onlinePrices) return 0;
+    const ids = this.db.itemsMissingOnlineSeller(this.retailer);
+    if (!ids.length) return 0;
+    const online = await this.onlinePrices(ids);
+    for (const id of ids) {
+      const o = online.get(id);
+      // Not found online at all: mark it so it isn't looked up again.
+      this.db.setOnlineInfo(this.retailer, id, o ? { price: o.price, seller: o.seller ?? 'Walmart.com' } : { seller: '(not sold online)' });
+    }
+    return ids.length;
+  }
+
   start(intervalMs = 5 * 60000) {
     const run = () => this.tick().catch((err) => console.warn('store scan tick failed', err.message));
-    run();
+    this.backfillOnlineSellers()
+      .then((n) => n && console.log(`store scan: recorded online sellers for ${n} items`))
+      .catch((err) => console.warn('store scan: online seller backfill failed', err.message))
+      .finally(run);
     this.timer = setInterval(run, intervalMs);
     this.timer.unref?.();
   }

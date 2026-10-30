@@ -177,6 +177,23 @@ export class WalmartAdapter extends RetailerAdapter {
     return this.source.localClearance(zip, opts);
   }
 
+  /**
+   * Scanned stores where Walmart itself sells this item, cheapest first. An
+   * item can be Walmart's in store while a marketplace seller has it online.
+   */
+  storeOffers(itemId) {
+    const scanner = this.storeScanner;
+    if (!scanner) return [];
+    const labels = new Map((scanner.loadConfig?.().config?.stores ?? []).map((s) => [s.id, s.label]));
+    return scanner.db.walmartStoreOffers(this.id, itemId).map((r) => ({
+      storeId: r.store_id,
+      storeLabel: labels.get(r.store_id) ?? `Walmart #${r.store_id}`,
+      price: r.price,
+      inStock: r.in_stock === null ? null : r.in_stock === 1,
+      seenOn: r.date,
+    }));
+  }
+
   /** Clearance items found by the store scan at scanned stores near a ZIP. */
   async scannedClearance(zip, { category } = {}) {
     const db = this.storeScanner.db;
@@ -189,12 +206,15 @@ export class WalmartAdapter extends RetailerAdapter {
       .filter((r) => !category || r.department === category)
       .map((r) => {
         const online = r.online_price > 0 ? r.online_price : null;
+        const onlineByOthers = r.online_seller && !/^walmart(\.com)?$/i.test(r.online_seller) ? r.online_seller : null;
         const product = {
           retailer: this.id, id: r.item_id, sku: r.item_id, upc: null, name: r.title ?? `Item ${r.item_id}`,
           brand: null, category: r.department, imageUrl: r.image_url, url: walmartProductUrl(r.item_id),
           msrp: Math.max(online ?? 0, r.price), price: online ?? r.price,
           seller: { name: 'Walmart.com', isRetailer: true },
           rating: null, reviewCount: null, specialOffer: 'clearance', inStockOnline: null,
+          // Set when the online listing belongs to a marketplace seller: the comparison price is theirs.
+          onlineSeller: onlineByOthers,
         };
         return {
           product,

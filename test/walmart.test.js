@@ -476,3 +476,33 @@ test('right after a restart, deal requests return at once while the pool loads',
   assert.equal(pool.length, 1);
   assert.equal(adapter.dealsLoading, false);
 });
+
+test('items Walmart sells in a scanned store are allowed even when a marketplace seller has them online', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const { createRoutes, matchRoute } = await import('../src/api.js');
+  const { RetailerRegistry } = await import('../src/retailers/registry.js');
+  const tracker = new PriceTracker();
+  const db = new StoreScanDb(tracker.db);
+  db.recordRun({
+    retailer: 'walmart', storeId: '573', department: 'Toys', term: '', month: '2026-10', ranAt: Date.now(),
+    results: [{ itemId: '673610207', title: 'Play-Doh', price: 0.64, onlinePrice: 5.2, onlineSeller: 'JNR Sales', inStock: true, seller: 'Walmart.com' }],
+  });
+  const online = { retailer: 'walmart', id: '673610207', name: 'Play-Doh', price: 5.2, msrp: 5.2, seller: { name: 'JNR Sales', isRetailer: false } };
+  const other = { ...online, id: '999', seller: { name: 'Rug Co', isRetailer: false } };
+  const source = {
+    getById: async (id) => (id === '673610207' ? online : other),
+    stores: async () => [{ retailer: 'walmart', id: '573', name: "Lee's Summit Supercenter" }],
+  };
+  const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
+  adapter.storeScanner = { db, loadConfig: () => ({ config: { stores: [{ id: '573', label: "Lee's Summit, Sam Walton Ln" }] } }) };
+  const routes = createRoutes(new RetailerRegistry().register(adapter));
+  const call = (path) => { const m = matchRoute(routes, 'GET', path); return m.route.handler({ params: m.params, query: new URLSearchParams() }); };
+
+  const { product } = await call('/api/walmart/products/673610207');
+  assert.equal(product.onlineSeller, 'JNR Sales');
+  assert.deepEqual(product.storeOffers.map((o) => [o.storeLabel, o.price]), [["Lee's Summit, Sam Walton Ln", 0.64]]);
+  await assert.rejects(call('/api/walmart/products/999'), /sold by Rug Co/, 'no store offer: still rejected');
+
+  const [deal] = await adapter.getLocalClearance('64081');
+  assert.equal(deal.product.onlineSeller, 'JNR Sales');
+});

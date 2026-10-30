@@ -197,3 +197,19 @@ test('a full sweep runs every job once, then the schedule resumes', async () => 
   clock = new Date('2026-11-01T11:30:00Z');
   assert.equal((await scanner.tick()).done, 4, 'a new value sweeps again');
 });
+
+test('online sellers are backfilled for items scanned before they were tracked', async () => {
+  const db = new StoreScanDb(new PriceTracker().db);
+  db.recordRun({ retailer: 'walmart', storeId: '573', department: 'Toys', term: '', month: '2026-10', ranAt: Date.now(),
+    results: [{ itemId: '1', price: 1, seller: 'Walmart.com' }, { itemId: '2', price: 2, seller: 'Walmart.com' }] });
+  const scanner = new StoreScanner({
+    client: {}, db, loadConfig: () => ({ config: null, errors: [] }), departments: async () => [],
+    onlinePrices: async () => new Map([['1', { price: 5, seller: 'JNR Sales' }]]),
+  });
+  assert.equal(await scanner.backfillOnlineSellers(), 2);
+  assert.deepEqual(db.itemsMissingOnlineSeller('walmart'), []);
+  const rows = db.latestPrices('walmart', ['573']).sort((a, b) => a.item_id.localeCompare(b.item_id));
+  assert.equal(rows[0].online_seller, 'JNR Sales');
+  assert.equal(rows[0].online_price, 5);
+  assert.equal(rows[1].online_seller, '(not sold online)');
+});
