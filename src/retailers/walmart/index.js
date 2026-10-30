@@ -128,6 +128,8 @@ export class WalmartAdapter extends RetailerAdapter {
 
   /** Overlay store-scan prices onto stock-check rows for stores that were scanned. */
   applyScannedPrices(product, results) {
+    // A marketplace seller's online price says nothing about Walmart's store price.
+    if (product.seller?.isRetailer === false) for (const result of results) result.price = null;
     const db = this.storeScanner?.db;
     if (!db || !results.length) return;
     const rows = db.latestPrices(this.id, results.map((r) => r.store.id), { itemId: product.id });

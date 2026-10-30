@@ -503,6 +503,14 @@ test('items Walmart sells in a scanned store are allowed even when a marketplace
   assert.deepEqual(product.storeOffers.map((o) => [o.storeLabel, o.price]), [["Lee's Summit, Sam Walton Ln", 0.64]]);
   await assert.rejects(call('/api/walmart/products/999'), /sold by Rug Co/, 'no store offer: still rejected');
 
+  // Stock check: unscanned stores don't show the marketplace seller's price as a store price.
+  source.inventory = async (p) => [
+    { store: { id: '573', name: 'Lee' }, price: p.price, status: 'unknown', clearance: false },
+    { store: { id: '1094', name: 'Raytown' }, price: p.price, status: 'unknown', clearance: false },
+  ];
+  const inv = await adapter.checkInventory('673610207', '64081');
+  assert.deepEqual(inv.results.map((r) => r.price), [0.64, null]);
+
   const [deal] = await adapter.getLocalClearance('64081');
   assert.equal(deal.product.onlineSeller, 'JNR Sales');
 });
