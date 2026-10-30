@@ -426,6 +426,24 @@ export class WalmartLiveSource {
    * Look items up (20 per call) to learn who sells them and whether they still
    * exist; save and apply the results.
    */
+  /** Online (walmart.com) price and seller for item ids, 20 per lookup. */
+  async onlinePrices(ids) {
+    const out = new Map();
+    for (let i = 0; i < ids.length; i += LOOKUP_BATCH) {
+      const batch = ids.slice(i, i + LOOKUP_BATCH);
+      try {
+        const data = await this.request('/items', { ids: batch.join(',') }, { cache: false });
+        for (const item of data?.items ?? []) {
+          const p = this.toProduct(item, { fromLookup: true });
+          out.set(p.id, { price: p.price, msrp: p.msrp, seller: p.seller.name, inStockOnline: p.inStockOnline });
+        }
+      } catch (err) {
+        if (!/not found/i.test(err.message)) throw err;
+      }
+    }
+    return out;
+  }
+
   async checkItems(products) {
     const results = [];
     for (let i = 0; i < products.length; i += LOOKUP_BATCH) {

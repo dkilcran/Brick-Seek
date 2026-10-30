@@ -134,6 +134,14 @@ export class StoreScanDb {
     }
   }
 
+  /** A random sample of saved store prices (most recent date per store and item). */
+  samplePrices(retailer, limit = 15) {
+    return this.db.prepare(`SELECT p.* FROM store_prices p
+      JOIN (SELECT store_id, item_id, MAX(date) d FROM store_prices WHERE retailer = ? GROUP BY store_id, item_id) l
+        ON p.store_id = l.store_id AND p.item_id = l.item_id AND p.date = l.d
+      WHERE p.retailer = ? ORDER BY RANDOM() LIMIT ?`).all(retailer, retailer, limit);
+  }
+
   priceCount(retailer) {
     return this.db.prepare('SELECT COUNT(*) n, COUNT(DISTINCT item_id) items FROM store_prices WHERE retailer = ?').get(retailer);
   }

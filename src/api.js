@@ -239,6 +239,36 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       return { enabled: true, ...(await adapter.storeScanner.status()) };
     }],
 
+    // A sample of scanned store prices next to the walmart.com price, with links
+    // for checking by hand against Walmart's own store view.
+    ['GET', '/api/:retailer/store-scan/sample', async ({ params, query }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.storeScanner) return { enabled: false, reason: 'Needs live mode and SERPAPI_KEY' };
+      const rows = adapter.storeScanner.db.samplePrices(adapter.id, clampInt(query.get('n'), 15, 1, 40));
+      const online = await adapter.onlinePrices([...new Set(rows.map((r) => r.item_id))]);
+      const items = rows.map((r) => {
+        const o = online.get(r.item_id) ?? null;
+        const diff = o?.price != null && r.price != null ? Number((r.price - o.price).toFixed(2)) : null;
+        return {
+          itemId: r.item_id, title: r.title, store: r.store_id, department: r.department, scannedOn: r.date,
+          storePrice: r.price, onlinePrice: o?.price ?? null, difference: diff,
+          storeInStock: r.in_stock === null ? null : r.in_stock === 1, onlineSeller: o?.seller ?? null,
+          link: `https://www.walmart.com/ip/${r.item_id}`,
+        };
+      });
+      const compared = items.filter((i) => i.difference !== null);
+      return {
+        summary: {
+          sampled: items.length,
+          compared: compared.length,
+          sameAsOnline: compared.filter((i) => i.difference === 0).length,
+          lowerInStore: compared.filter((i) => i.difference < 0).length,
+          higherInStore: compared.filter((i) => i.difference > 0).length,
+        },
+        items,
+      };
+    }],
+
     // Store scan settings as loaded, checked against the retailer's departments.
     ['GET', '/api/:retailer/scan-config', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);

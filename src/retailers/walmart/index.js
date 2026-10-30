@@ -149,6 +149,11 @@ export class WalmartAdapter extends RetailerAdapter {
     return this.source.localClearance(zip, opts);
   }
 
+  /** walmart.com prices for item ids (live mode only). */
+  async onlinePrices(ids) {
+    return this.source.onlinePrices ? this.source.onlinePrices(ids) : new Map();
+  }
+
   /** Every product department the retailer has, for settings like the store scan. */
   async getDepartments() {
     return this.source.departments();

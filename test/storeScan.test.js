@@ -151,3 +151,17 @@ test('a settings change triggers one test search, then the schedule resumes', as
   assert.equal(summary.soldByWalmart, 1);
   assert.equal(summary.sponsored, 1);
 });
+
+test('samplePrices returns the latest price per store and item', () => {
+  const db = new StoreScanDb(new PriceTracker().db);
+  const run = (ranAt, price) => db.recordRun({
+    retailer: 'walmart', storeId: '573', department: 'Home', term: '', month: '2026-11', ranAt,
+    results: [{ itemId: '1', title: 'Lamp', price, wasPrice: null, inStock: true, seller: 'Walmart.com' }],
+  });
+  run(Date.parse('2026-11-04T15:00:00Z'), 10);
+  run(Date.parse('2026-11-05T15:00:00Z'), 8);
+  const rows = db.samplePrices('walmart', 10);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].price, 8);
+  assert.equal(rows[0].date, '2026-11-05');
+});
