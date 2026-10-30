@@ -267,9 +267,15 @@ export class WalmartLiveSource {
     return products;
   }
 
-  /** Walmart's raw item lookup, for diagnostics. */
-  async rawItem(itemId) {
-    return this.request(`/items/${encodeURIComponent(itemId)}`, {}, { cache: false });
+  /**
+   * Walmart's raw item lookup, for diagnostics. `params` passes optional
+   * lookup parameters through (e.g. a store or ZIP), to see what they change.
+   * `batch` uses the /items?ids= form instead of /items/{id}.
+   */
+  async rawItem(itemId, { params = {}, batch = false } = {}) {
+    return batch
+      ? this.request('/items', { ids: itemId, ...params }, { cache: false })
+      : this.request(`/items/${encodeURIComponent(itemId)}`, params, { cache: false });
   }
 
   async getById(itemId) {

@@ -292,11 +292,17 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
     }],
 
     // Diagnostics: raw Walmart affiliate lookup for one item, and saved SerpApi inspections.
-    ['GET', '/api/:retailer/debug/item/:id', async ({ params }) => {
+    ['GET', '/api/:retailer/debug/item/:id', async ({ params, query }) => {
       const adapter = requireRetailer(registry, params.retailer);
       if (!adapter.source?.rawItem) throw new HttpError(501, 'Live mode only');
       if (!/^\d{1,15}$/.test(params.id)) throw new HttpError(400, 'Item id should be a number');
-      return { affiliate: await adapter.source.rawItem(params.id) };
+      // Only these optional lookup parameters are passed through to Walmart.
+      const passthrough = {};
+      for (const k of ['storeId', 'zipCode', 'zip', 'store', 'lat', 'lon']) {
+        const v = query.get(k);
+        if (v && /^[\d.-]{1,12}$/.test(v)) passthrough[k] = v;
+      }
+      return { params: passthrough, affiliate: await adapter.source.rawItem(params.id, { params: passthrough, batch: query.get('batch') === '1' }) };
     }],
 
     ['GET', '/api/:retailer/store-scan/inspect', async ({ params }) => {
