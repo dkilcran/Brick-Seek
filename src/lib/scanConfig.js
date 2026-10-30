@@ -43,6 +43,8 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
       filters,
       searchTerms,
       monthlySearchBudget: monthlySearchBudget > 0 ? Math.floor(monthlySearchBudget) : 0,
+      // Change this value (e.g. to today's date) to scan everything once, right away.
+      fullSweep: raw.fullSweep ? String(raw.fullSweep) : null,
     },
     errors,
   };

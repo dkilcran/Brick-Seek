@@ -199,7 +199,7 @@ function dealCard(d) {
     `<span class="badge ${reason === 'Clearance' ? 'clearance' : reason === 'Rollback' ? 'rollback' : reason === 'In-store only' ? 'instore' : 'signal'}">${esc(reason)}</span>`);
   const savings = d.dollarsOff >= 1 ? `<span class="muted" style="font-size:13px">Save ${money(d.dollarsOff)}</span>` : '';
   const store = d.store
-    ? `<div style="font-size:13px"><strong>${esc(d.store.name)}</strong>${d.store.distanceMiles != null ? ` · ${d.store.distanceMiles} mi` : ''} · ${d.quantity} left${d.storesWithDeal > 1 ? ` · ${d.storesWithDeal} stores` : ''}</div>`
+    ? `<div style="font-size:13px"><strong>${esc(d.store.name)}</strong>${d.store.distanceMiles != null ? ` · ${d.store.distanceMiles} mi` : ''}${d.quantity != null ? ` · ${d.quantity} left` : ''}${d.storesWithDeal > 1 ? ` · ${d.storesWithDeal} stores` : ''}${d.store.seenOn ? ` · scanned ${esc(d.store.seenOn)}` : ''}</div>`
     : '';
   return productCard(d.product, {
     zip: state.zip,
@@ -307,7 +307,7 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
         <td class="hide-sm">${esc([x.store.address, x.store.city, x.store.state, x.store.zip].filter(Boolean).join(', '))}</td>
         <td class="num">${x.store.distanceMiles != null ? `${x.store.distanceMiles} mi` : '—'}</td>
         <td class="num"><strong>${money(x.price)}</strong>${x.clearance ? ' <span class="badge clearance">Clearance</span>' : ''}${x.price != null && x.price < product.price - 0.01 && !x.clearance ? ' <span class="badge off">Below online</span>' : ''}</td>
-        <td><span class="badge ${esc(x.status)}">${STATUS_LABEL[x.status] ?? esc(x.status)}${showQty && x.quantity ? ` · ${x.quantity}` : ''}</span></td>
+        <td><span class="badge ${esc(x.status)}">${STATUS_LABEL[x.status] ?? esc(x.status)}${showQty && x.quantity ? ` · ${x.quantity}` : ''}</span>${x.seenOn ? `<div class="muted" style="font-size:12px">Store price scanned ${esc(x.seenOn)}</div>` : ''}</td>
         ${showQty ? `<td class="hide-sm">${esc(x.aisle ?? '—')}</td>` : ''}
       </tr>`).join('')}</tbody></table></div>` : '<div class="empty card">No stores match. Try a wider radius.</div>';
   };

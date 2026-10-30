@@ -409,3 +409,45 @@ test('item checks expire after their max age', () => {
   assert.equal(checks.get('walmart', '9', 6 * 86400000).isRetailer, true);
   assert.equal(checks.get('walmart', '9', 8 * 86400000), null);
 });
+
+test('store scan prices feed Clearance near you and the stock check', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const tracker = new PriceTracker();
+  const db = new StoreScanDb(tracker.db);
+  db.recordRun({
+    retailer: 'walmart', storeId: '573', department: 'Home', term: '', month: '2026-10', ranAt: Date.now(),
+    results: [
+      { itemId: '24016954', title: 'Cricut mat', price: 7.97, onlinePrice: 10.97, inStock: true, seller: 'Walmart.com' },
+      { itemId: '555', title: 'Sold elsewhere', price: 1, onlinePrice: 9, inStock: true, seller: 'Rug Co' },
+      { itemId: '556', title: 'Out of stock', price: 2, onlinePrice: 9, inStock: false, seller: 'Walmart.com' },
+    ],
+  });
+  const stores = [
+    { retailer: 'walmart', id: '573', name: "Lee's Summit Supercenter", city: "Lee's Summit", state: 'MO', distanceMiles: null },
+    { retailer: 'walmart', id: '1094', name: 'Raytown Supercenter', city: 'Raytown', state: 'MO', distanceMiles: null },
+  ];
+  const product = { retailer: 'walmart', id: '24016954', name: 'Cricut mat', price: 10.97, msrp: 10.97, seller: { name: 'Walmart.com', isRetailer: true } };
+  const source = {
+    stores: async () => stores,
+    getById: async () => product,
+    inventory: async (p) => stores.map((store) => ({ store, price: p.price, quantity: null, status: 'unknown', aisle: null, clearance: false })),
+  };
+  const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
+  adapter.storeScanner = { db };
+  assert.equal(adapter.features.localClearance, true);
+
+  const clearance = await adapter.getLocalClearance('64081');
+  assert.deepEqual(clearance.map((c) => c.product.id), ['24016954'], 'Walmart-sold, in stock, at a scanned store');
+  assert.equal(clearance[0].price, 7.97);
+  assert.equal(clearance[0].discountPercent, 27);
+  assert.equal(clearance[0].store.name, "Lee's Summit Supercenter");
+
+  const inv = await adapter.checkInventory('24016954', '64081');
+  const [lees, raytown] = inv.results;
+  assert.equal(lees.price, 7.97);
+  assert.equal(lees.status, 'in_stock');
+  assert.equal(lees.clearance, true);
+  assert.ok(lees.seenOn);
+  assert.equal(raytown.price, 10.97, 'unscanned store keeps the online price');
+  assert.equal(raytown.status, 'unknown');
+});

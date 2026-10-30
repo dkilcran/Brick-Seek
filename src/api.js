@@ -179,7 +179,10 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
           note = !adapter.features.localClearance
             ? `${adapter.name} doesn't publish store-level prices, so this needs another data source.`
             : !zip ? 'Enter your ZIP code to see shelf markdowns at nearby stores.' : null;
-          if (!note) deals = unseen(await localClearanceDeals(adapter, zip, { ...opts, limit: 100 }));
+          if (!note) {
+            deals = unseen(await localClearanceDeals(adapter, zip, { ...opts, limit: 100 }));
+            if (!deals.length) note = 'No clearance found yet at scanned stores near this ZIP.';
+          }
         } else {
           // Top goes first so nothing is hidden yet; later sections rank deeper to refill after repeats.
           // Keep the caps for the visible count even though later sections rank deeper.

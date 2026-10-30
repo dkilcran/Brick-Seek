@@ -86,14 +86,18 @@ export class StoreScanDb {
       ) WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS store_scan_meta (key TEXT PRIMARY KEY, value TEXT);
     `);
+    // walmart.com price at scan time, to measure store markdowns (added after launch).
+    const cols = db.prepare('PRAGMA table_info(store_prices)').all().map((c) => c.name);
+    if (!cols.includes('online_price')) db.exec('ALTER TABLE store_prices ADD COLUMN online_price REAL');
     this.insertRun = db.prepare(`INSERT INTO store_scan_runs
       (retailer, store_id, department, term, month, ran_at, result_count, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
     this.upsertPrice = db.prepare(`INSERT INTO store_prices
-      (retailer, store_id, item_id, date, price, was_price, in_stock, seller, title, image_url, url, department)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (retailer, store_id, item_id, date, price, was_price, in_stock, seller, title, image_url, url, department, online_price)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (retailer, store_id, item_id, date) DO UPDATE SET
         price = excluded.price, was_price = excluded.was_price, in_stock = excluded.in_stock, seller = excluded.seller,
-        title = excluded.title, image_url = excluded.image_url, url = excluded.url, department = excluded.department`);
+        title = excluded.title, image_url = excluded.image_url, url = excluded.url, department = excluded.department,
+        online_price = COALESCE(excluded.online_price, store_prices.online_price)`);
   }
 
   /** Successful searches this month (SerpApi only counts successful ones). */
@@ -126,13 +130,36 @@ export class StoreScanDb {
         if (!r.itemId) continue;
         // SQLite can't store undefined, so missing fields become null.
         this.upsertPrice.run(retailer, storeId, r.itemId, date, r.price ?? null, r.wasPrice ?? null,
-          r.inStock == null ? null : r.inStock ? 1 : 0, r.seller ?? null, r.title ?? null, r.imageUrl ?? null, r.url ?? null, department);
+          r.inStock == null ? null : r.inStock ? 1 : 0, r.seller ?? null, r.title ?? null, r.imageUrl ?? null, r.url ?? null, department,
+          r.onlinePrice ?? null);
       }
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
     }
+  }
+
+  /**
+   * Latest scanned price per item at the given stores, from the last `days` days.
+   * @returns rows of store_prices
+   */
+  latestPrices(retailer, storeIds, { days = 14, itemId = null, now = Date.now() } = {}) {
+    if (!storeIds.length) return [];
+    const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
+    const marks = storeIds.map(() => '?').join(',');
+    const itemFilter = itemId ? 'AND item_id = ?' : '';
+    const args = [retailer, since, ...storeIds, ...(itemId ? [String(itemId)] : []), retailer];
+    return this.db.prepare(`SELECT p.* FROM store_prices p
+      JOIN (SELECT store_id, item_id, MAX(date) d FROM store_prices
+            WHERE retailer = ? AND date >= ? AND store_id IN (${marks}) ${itemFilter} GROUP BY store_id, item_id) l
+        ON p.store_id = l.store_id AND p.item_id = l.item_id AND p.date = l.d
+      WHERE p.retailer = ?`).all(...args);
+  }
+
+  /** Store ids that have any scanned prices. */
+  scannedStores(retailer) {
+    return this.db.prepare('SELECT DISTINCT store_id FROM store_prices WHERE retailer = ?').all(retailer).map((r) => r.store_id);
   }
 
   /** A random sample of saved store prices (most recent date per store and item). */
@@ -158,6 +185,10 @@ export class StoreScanDb {
   }
 }
 
+function settingsKeyOf(config) {
+  return JSON.stringify([config.stores.map((s) => s.id), config.departments, config.filters, config.searchTerms]);
+}
+
 export class StoreScanner {
   /**
    * @param {object} opts
@@ -168,7 +199,7 @@ export class StoreScanner {
    */
   constructor({
     client, db, loadConfig, departments, retailer = 'walmart', now = () => new Date(),
-    errorPauseMs = 30 * 60000, accountCheckMs = 60 * 60000,
+    errorPauseMs = 30 * 60000, accountCheckMs = 60 * 60000, sweepPauseMs = 3000, onlinePrices = null,
   }) {
     this.client = client;
     this.db = db;
@@ -178,6 +209,9 @@ export class StoreScanner {
     this.now = now;
     this.errorPauseMs = errorPauseMs;
     this.accountCheckMs = accountCheckMs;
+    this.sweepPauseMs = sweepPauseMs;
+    /** @type {null | ((ids: string[]) => Promise<Map<string, {price}>>)} walmart.com prices, to measure markdowns */
+    this.onlinePrices = onlinePrices;
     this.busy = false;
     this.account = null; // { searchesLeft, checkedAt }
   }
@@ -225,53 +259,103 @@ export class StoreScanner {
     return jobs.sort((a, b) => a.last - b.last);
   }
 
-  /** Run at most one search if the schedule allows one now. Returns what happened. */
+  /** Run at most one search if the schedule allows one now (or a requested full sweep). */
   async tick() {
     if (this.busy) return { ran: false, reason: 'busy' };
     const { config, errors } = this.loadConfig();
     if (!config || errors.length) return { ran: false, reason: `settings: ${errors.join('; ')}` };
     const now = this.now();
+    const lastErr = this.db.lastError(this.retailer);
+    if (lastErr?.error && now.getTime() - lastErr.ran_at < this.errorPauseMs) return { ran: false, reason: 'pausing after an error' };
+    if (config.fullSweep && this.db.getMeta('sweepDone') !== config.fullSweep) return this.sweep(config);
+
     const { monthKey } = localParts(now);
     const used = this.db.searchesUsed(this.retailer, monthKey);
     // After the settings change (or on first start), one search runs right away to confirm they work.
-    const settingsKey = JSON.stringify([config.stores.map((s) => s.id), config.departments, config.filters, config.searchTerms]);
-    const testSearch = this.db.getMeta('testedSettings') !== settingsKey;
+    const testSearch = this.db.getMeta('testedSettings') !== settingsKeyOf(config);
     const scheduled = this.allowance(now, config.monthlySearchBudget);
     const allowed = testSearch ? Math.max(scheduled, used + 1) : scheduled;
     if (used >= allowed) return { ran: false, reason: 'waiting for schedule', used, allowed };
     if ((await this.searchesLeft(now)) === 0) return { ran: false, reason: 'SerpApi plan has no searches left' };
-    const lastErr = this.db.lastError(this.retailer);
-    if (lastErr?.error && now.getTime() - lastErr.ran_at < this.errorPauseMs) return { ran: false, reason: 'pausing after an error' };
 
     const deptIds = new Map((await this.departments()).map((d) => [d.name, d.id]));
     const job = this.jobs(config).find((j) => deptIds.has(j.department));
     if (!job) return { ran: false, reason: 'no departments match Walmart\'s names' };
-
     this.busy = true;
+    try {
+      return await this.runJob(job, config, deptIds);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /**
+   * Run every store x department x term not searched since the sweep was
+   * requested (config.fullSweep changed), a few seconds apart.
+   */
+  async sweep(config) {
+    const key = config.fullSweep;
+    let requestedAt = this.db.getMeta(`sweepRequested:${key}`);
+    if (!requestedAt) {
+      requestedAt = this.now().getTime();
+      this.db.setMeta(`sweepRequested:${key}`, requestedAt);
+    }
+    const deptIds = new Map((await this.departments()).map((d) => [d.name, d.id]));
+    const todo = this.jobs(config).filter((j) => deptIds.has(j.department) && j.last < requestedAt);
+    this.busy = true;
+    let ran = 0;
+    try {
+      for (const job of todo) {
+        if ((await this.searchesLeft(this.now())) === 0) return { ran: ran > 0, reason: 'SerpApi plan has no searches left', sweep: key, done: ran };
+        const result = await this.runJob(job, config, deptIds);
+        if (!result.ran) return { ran: ran > 0, reason: `sweep paused: ${result.reason}`, sweep: key, done: ran };
+        ran += 1;
+        if (this.account?.searchesLeft > 0) this.account.searchesLeft -= 1;
+        if (this.sweepPauseMs) await new Promise((r) => setTimeout(r, this.sweepPauseMs));
+      }
+      this.db.setMeta('sweepDone', key);
+      console.log(`store scan: full sweep "${key}" finished, ${ran} searches`);
+      return { ran: ran > 0, sweep: key, done: ran, finished: true };
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** One search: save results (with walmart.com prices when available) or the error. */
+  async runJob(job, config, deptIds) {
+    const now = this.now();
     const ranAt = now.getTime();
+    const month = localParts(now).monthKey;
     try {
       const data = await this.client.walmartSearch({
         query: job.term, storeId: job.storeId, categoryId: deptIds.get(job.department), facets: config.filters,
       });
       const raw = data.organic_results ?? [];
       const results = raw.map(parseSearchResult);
+      if (this.onlinePrices && results.length) {
+        try {
+          const online = await this.onlinePrices(results.map((r) => r.itemId).filter(Boolean));
+          for (const r of results) r.onlinePrice = online.get(r.itemId)?.price ?? null;
+        } catch (err) {
+          console.warn(`store scan: online prices failed: ${err.message}`);
+        }
+      }
       if (raw.length) this.db.setMeta('sampleResult', { ...job, ranAt, result: raw[0] });
       this.db.setMeta('lastRunSummary', {
         ...job, ranAt, filters: config.filters, results: results.length,
         soldByWalmart: results.filter((r) => /^walmart(\.com)?$/i.test(r.seller ?? '')).length,
         sponsored: results.filter((r) => r.sponsored).length,
+        belowOnline: results.filter((r) => r.onlinePrice > r.price).length,
         sellers: Object.entries(results.reduce((m, r) => ({ ...m, [r.seller ?? '?']: (m[r.seller ?? '?'] ?? 0) + 1 }), {}))
           .sort((a, b) => b[1] - a[1]).slice(0, 5),
       });
-      this.db.recordRun({ retailer: this.retailer, ...job, month: monthKey, ranAt, results });
-      this.db.setMeta('testedSettings', settingsKey);
+      this.db.recordRun({ retailer: this.retailer, ...job, month, ranAt, results });
+      this.db.setMeta('testedSettings', settingsKeyOf(config));
       return { ran: true, ...job, results: results.length };
     } catch (err) {
-      this.db.recordRun({ retailer: this.retailer, ...job, month: monthKey, ranAt, results: null, error: err.message.slice(0, 300) });
+      this.db.recordRun({ retailer: this.retailer, ...job, month, ranAt, results: null, error: err.message.slice(0, 300) });
       console.warn(`store scan: ${job.storeId} ${job.department} failed: ${err.message}`);
       return { ran: false, reason: err.message, ...job };
-    } finally {
-      this.busy = false;
     }
   }
 
@@ -306,6 +390,9 @@ export class StoreScanner {
       serpapiAccount: account,
       prices: this.db.priceCount(this.retailer),
       recentRuns: this.db.recentRuns(this.retailer),
+      fullSweep: config?.fullSweep
+        ? { requested: config.fullSweep, done: this.db.getMeta('sweepDone') === config.fullSweep }
+        : null,
       lastRunSummary: this.db.getMeta('lastRunSummary'),
       sampleResult: this.db.getMeta('sampleResult'),
     };

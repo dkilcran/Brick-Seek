@@ -3,6 +3,8 @@ import { PriceTracker } from '../../lib/priceTracker.js';
 import { ItemChecks } from '../../lib/itemChecks.js';
 import { DEFAULT_SCAN_CONFIG_PATH, loadScanConfig } from '../../lib/scanConfig.js';
 import { SerpApiClient, StoreScanDb, StoreScanner } from './storeScan.js';
+import { walmartProductUrl } from './identifiers.js';
+import { STOCK_STATUS } from '../RetailerAdapter.js';
 import { WalmartDemoSource } from './demoSource.js';
 import { WalmartLiveSource } from './liveSource.js';
 import { parseWalmartInput } from './identifiers.js';
@@ -43,6 +45,7 @@ export class WalmartAdapter extends RetailerAdapter {
           db: new StoreScanDb(tracker.db),
           loadConfig: () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH),
           departments: () => source.taxonomy(),
+          onlinePrices: (ids) => source.onlinePrices(ids),
         });
       }
       return adapter;
@@ -79,7 +82,8 @@ export class WalmartAdapter extends RetailerAdapter {
       deals: true,
       priceHistory: true,
       // Walmart's public API has no per-store prices, so only demo data has this.
-      localClearance: this._mode === 'demo',
+      // Store-level prices come from demo data, or from the store scan (SerpApi) when set up.
+      localClearance: this._mode === 'demo' || Boolean(this.storeScanner),
     };
   }
 
@@ -118,7 +122,25 @@ export class WalmartAdapter extends RetailerAdapter {
     const product = await this.getProduct(productId);
     if (!product) return null;
     const results = await this.source.inventory(product, zip, opts);
+    this.applyScannedPrices(product, results);
     return { product, results };
+  }
+
+  /** Overlay store-scan prices onto stock-check rows for stores that were scanned. */
+  applyScannedPrices(product, results) {
+    const db = this.storeScanner?.db;
+    if (!db || !results.length) return;
+    const rows = db.latestPrices(this.id, results.map((r) => r.store.id), { itemId: product.id });
+    const byStore = new Map(rows.map((r) => [r.store_id, r]));
+    for (const result of results) {
+      const row = byStore.get(result.store.id);
+      if (!row || typeof row.price !== 'number') continue;
+      result.price = row.price;
+      result.status = row.in_stock === 1 ? STOCK_STATUS.IN_STOCK : row.in_stock === 0 ? STOCK_STATUS.OUT_OF_STOCK : result.status;
+      // The scan only searches Walmart's Clearance listings.
+      result.clearance = true;
+      result.seenOn = row.date;
+    }
   }
 
   async getDealCandidates(opts = {}) {
@@ -146,7 +168,37 @@ export class WalmartAdapter extends RetailerAdapter {
 
   async getLocalClearance(zip, opts = {}) {
     if (!this.features.localClearance) return super.getLocalClearance(zip, opts);
+    if (this.storeScanner) return this.scannedClearance(zip, opts);
     return this.source.localClearance(zip, opts);
+  }
+
+  /** Clearance items found by the store scan at scanned stores near a ZIP. */
+  async scannedClearance(zip, { category } = {}) {
+    const db = this.storeScanner.db;
+    const scanned = new Set(db.scannedStores(this.id));
+    const stores = (await this.source.stores(zip, { limit: 25 })).filter((s) => scanned.has(s.id));
+    const storeById = new Map(stores.map((s) => [s.id, s]));
+    const rows = db.latestPrices(this.id, stores.map((s) => s.id));
+    return rows
+      .filter((r) => /^walmart(\.com)?$/i.test(r.seller ?? '') && r.price > 0 && r.in_stock !== 0)
+      .filter((r) => !category || r.department === category)
+      .map((r) => {
+        const online = r.online_price > 0 ? r.online_price : null;
+        const product = {
+          retailer: this.id, id: r.item_id, sku: r.item_id, upc: null, name: r.title ?? `Item ${r.item_id}`,
+          brand: null, category: r.department, imageUrl: r.image_url, url: walmartProductUrl(r.item_id),
+          msrp: Math.max(online ?? 0, r.price), price: online ?? r.price,
+          seller: { name: 'Walmart.com', isRetailer: true },
+          rating: null, reviewCount: null, specialOffer: 'clearance', inStockOnline: null,
+        };
+        return {
+          product,
+          store: { ...storeById.get(r.store_id), seenOn: r.date },
+          price: r.price,
+          quantity: null,
+          discountPercent: online && online > r.price ? Math.round((1 - r.price / online) * 100) : 0,
+        };
+      });
   }
 
   /** walmart.com prices for item ids (live mode only). */

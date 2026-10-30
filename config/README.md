@@ -13,6 +13,7 @@ doesn't recognize and how often each department gets scanned.
 | `departments` | Departments to search at each store. Names must match the list below exactly. |
 | `filters` | Walmart's own search filters. `special_offers:Clearance` = items Walmart marks Clearance; `retailer_type:Walmart` = sold by Walmart (no marketplace sellers). Other examples: `special_offers:Rollback`, `special_offers:Reduced Price`. |
 | `searchTerms` | Optional keywords searched within each department, on top of the filters. Leave empty (`[]`) to list everything the filters match. Each term multiplies the searches per sweep. |
+| `fullSweep` | Change this to any new value (today's date works) to scan every store and department once, right away, instead of waiting for the schedule. Each sweep uses one search per store × department (28 now). |
 | `monthlySearchBudget` | Searches allowed per calendar month. Match your SerpApi plan (the free plan is 100–250). The scan spreads this evenly over the month and stops at the limit. |
 
 Each search covers one department at one store (and one term, if any) and

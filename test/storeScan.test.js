@@ -165,3 +165,35 @@ test('samplePrices returns the latest price per store and item', () => {
   assert.equal(rows[0].price, 8);
   assert.equal(rows[0].date, '2026-11-05');
 });
+
+test('a full sweep runs every job once, then the schedule resumes', async () => {
+  const db = new StoreScanDb(new PriceTracker().db);
+  db.setMeta('startedAt', Date.parse('2026-10-15T12:00:00Z'));
+  const calls = [];
+  let sweepValue = '2026-10-30';
+  let clock = new Date('2026-11-01T11:00:00Z'); // 5am: the schedule alone would wait
+  const config = () => ({
+    stores: [{ id: '573' }, { id: '4590' }], departments: ['Home', 'Toys'], filters: ['special_offers:Clearance'],
+    searchTerms: [''], monthlySearchBudget: 250, fullSweep: sweepValue,
+  });
+  const scanner = new StoreScanner({
+    client: {
+      walmartSearch: async (q) => { calls.push(`${q.storeId}|${q.categoryId}`); return { organic_results: [{ us_item_id: `${q.storeId}-${q.categoryId}`, seller_name: 'Walmart.com', primary_offer: { offer_price: 5 } }] }; },
+      account: async () => ({ plan_searches_left: 100 }),
+    },
+    db, sweepPauseMs: 0,
+    now: () => clock,
+    loadConfig: () => ({ config: config(), errors: [] }),
+    departments: async () => [{ id: '4044', name: 'Home' }, { id: '4171', name: 'Toys' }],
+    onlinePrices: async (ids) => new Map(ids.map((id) => [id, { price: 8 }])),
+  });
+  const result = await scanner.tick();
+  assert.equal(result.finished, true);
+  assert.equal(result.done, 4);
+  assert.deepEqual(calls.sort(), ['4590|4044', '4590|4171', '573|4044', '573|4171']);
+  assert.equal(db.latestPrices('walmart', ['573'], { itemId: '573-4044', now: Date.parse('2026-11-01T12:00:00Z') })[0].online_price, 8);
+  assert.equal((await scanner.tick()).reason, 'waiting for schedule', 'sweep done; back to the schedule');
+  sweepValue = '2026-11-01';
+  clock = new Date('2026-11-01T11:30:00Z');
+  assert.equal((await scanner.tick()).done, 4, 'a new value sweeps again');
+});

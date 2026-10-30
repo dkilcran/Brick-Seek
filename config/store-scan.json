@@ -31,5 +31,6 @@
     "retailer_type:Walmart"
   ],
   "searchTerms": [],
-  "monthlySearchBudget": 250
+  "monthlySearchBudget": 250,
+  "fullSweep": "2026-10-30"
 }
