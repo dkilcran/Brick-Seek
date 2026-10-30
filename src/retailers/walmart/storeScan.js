@@ -31,6 +31,11 @@ export class SerpApiClient {
     });
   }
 
+  /** A product page, optionally as seen from one store. */
+  walmartProduct({ productId, storeId }) {
+    return this.get('/search.json', { engine: 'walmart_product', product_id: productId, store_id: storeId });
+  }
+
   /** Plan and usage; doesn't count as a search. */
   account() {
     return this.get('/account.json', {});
@@ -293,6 +298,7 @@ export class StoreScanner {
     const lastErr = this.db.lastError(this.retailer);
     if (lastErr?.error && now.getTime() - lastErr.ran_at < this.errorPauseMs) return { ran: false, reason: 'pausing after an error' };
     if (config.fullSweep && this.db.getMeta('sweepDone') !== config.fullSweep) return this.sweep(config);
+    if (config.inspect?.run && this.db.getMeta('inspectDone') !== config.inspect.run) return this.inspect(config);
 
     const { monthKey } = localParts(now);
     const used = this.db.searchesUsed(this.retailer, monthKey);
@@ -341,6 +347,46 @@ export class StoreScanner {
       this.db.setMeta('sweepDone', key);
       console.log(`store scan: full sweep "${key}" finished, ${ran} searches`);
       return { ran: ran > 0, sweep: key, done: ran, finished: true };
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /**
+   * Diagnostics, run once per config.inspect.run value: raw SerpApi product
+   * pages for chosen items (per store, and without a store), plus one full
+   * raw search response. Saved for /api/:retailer/store-scan/inspect.
+   */
+  async inspect(config) {
+    const { items = [], stores = [], searchDepartment } = config.inspect;
+    const month = localParts(this.now()).monthKey;
+    const results = {};
+    this.busy = true;
+    try {
+      const record = async (key, fn, job) => {
+        const ranAt = this.now().getTime();
+        try {
+          results[key] = await fn();
+          this.db.recordRun({ retailer: this.retailer, storeId: job.storeId ?? '-', department: `inspect:${job.what}`, term: '', month, ranAt, results: [] });
+        } catch (err) {
+          results[key] = { error: err.message };
+        }
+      };
+      for (const productId of items) {
+        await record(`product:${productId}:no-store`, () => this.client.walmartProduct({ productId }), { what: productId });
+        for (const storeId of stores) {
+          await record(`product:${productId}:store:${storeId}`, () => this.client.walmartProduct({ productId, storeId }), { what: productId, storeId });
+        }
+      }
+      if (searchDepartment && stores[0]) {
+        const deptIds = new Map((await this.departments()).map((d) => [d.name, d.id]));
+        await record(`search:${searchDepartment}:store:${stores[0]}`, () => this.client.walmartSearch({
+          storeId: stores[0], categoryId: deptIds.get(searchDepartment), facets: config.filters,
+        }), { what: `search ${searchDepartment}`, storeId: stores[0] });
+      }
+      this.db.setMeta('inspectResults', { run: config.inspect.run, at: new Date().toISOString(), results });
+      this.db.setMeta('inspectDone', config.inspect.run);
+      return { ran: true, inspected: Object.keys(results).length };
     } finally {
       this.busy = false;
     }

@@ -280,6 +280,20 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       };
     }],
 
+    // Diagnostics: raw Walmart affiliate lookup for one item, and saved SerpApi inspections.
+    ['GET', '/api/:retailer/debug/item/:id', async ({ params }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.source?.rawItem) throw new HttpError(501, 'Live mode only');
+      if (!/^\d{1,15}$/.test(params.id)) throw new HttpError(400, 'Item id should be a number');
+      return { affiliate: await adapter.source.rawItem(params.id) };
+    }],
+
+    ['GET', '/api/:retailer/store-scan/inspect', async ({ params }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.storeScanner) return { enabled: false };
+      return adapter.storeScanner.db.getMeta('inspectResults') ?? { pending: true };
+    }],
+
     // Store scan settings as loaded, checked against the retailer's departments.
     ['GET', '/api/:retailer/scan-config', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);

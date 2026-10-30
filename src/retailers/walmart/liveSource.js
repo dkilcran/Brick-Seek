@@ -267,6 +267,11 @@ export class WalmartLiveSource {
     return products;
   }
 
+  /** Walmart's raw item lookup, for diagnostics. */
+  async rawItem(itemId) {
+    return this.request(`/items/${encodeURIComponent(itemId)}`, {}, { cache: false });
+  }
+
   async getById(itemId) {
     const data = await this.request(`/items/${encodeURIComponent(itemId)}`);
     const item = data?.items?.[0] ?? (data?.itemId ? data : null);

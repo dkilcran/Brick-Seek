@@ -45,6 +45,13 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
       monthlySearchBudget: monthlySearchBudget > 0 ? Math.floor(monthlySearchBudget) : 0,
       // Change this value (e.g. to today's date) to scan everything once, right away.
       fullSweep: raw.fullSweep ? String(raw.fullSweep) : null,
+      // Diagnostics: { run, items: [itemIds], stores: [storeIds], searchDepartment }; change run to repeat.
+      inspect: raw.inspect?.run ? {
+        run: String(raw.inspect.run),
+        items: (raw.inspect.items ?? []).map(String).slice(0, 10),
+        stores: (raw.inspect.stores ?? []).map(String).slice(0, 2),
+        searchDepartment: raw.inspect.searchDepartment ?? null,
+      } : null,
     },
     errors,
   };

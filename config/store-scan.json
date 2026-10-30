@@ -32,5 +32,18 @@
   ],
   "searchTerms": [],
   "monthlySearchBudget": 250,
-  "fullSweep": "2026-10-30"
+  "fullSweep": "2026-10-30",
+  "inspect": {
+    "run": "2026-10-30a",
+    "items": [
+      "673610207",
+      "24016954",
+      "39908952",
+      "46091553"
+    ],
+    "stores": [
+      "573"
+    ],
+    "searchDepartment": "Toys"
+  }
 }
