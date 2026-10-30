@@ -79,6 +79,10 @@ export class WalmartDemoSource {
     return CATEGORIES;
   }
 
+  async departments() {
+    return CATEGORIES;
+  }
+
   async stores(zip, { radiusMiles = 50, limit = 15 } = {}) {
     const rng = seeded('stores', zip);
     const state = stateForZip(zip) ?? 'US';

@@ -3,6 +3,7 @@
 import { isValidZip } from './lib/geo.js';
 import { summarizeAvailability, isSoldByRetailer } from './retailers/RetailerAdapter.js';
 import { analyzeDeal, isEligible, rankSection, SECTIONS } from './lib/deals.js';
+import { DEFAULT_SCAN_CONFIG_PATH, describeScanConfig, loadScanConfig } from './lib/scanConfig.js';
 
 export class HttpError extends Error {
   constructor(status, message) {
@@ -86,7 +87,7 @@ function clampInt(value, fallback, min, max) {
   return Math.min(max, Math.max(min, n));
 }
 
-export function createRoutes(registry) {
+export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH } = {}) {
   return [
     ['GET', '/api/health', () => ({ ok: true })],
 
@@ -229,6 +230,13 @@ export function createRoutes(registry) {
       const adapter = requireRetailer(registry, params.retailer);
       await adapter.getDealCandidates();
       return adapter.fieldSurvey?.() ?? { error: 'not available for this retailer' };
+    }],
+
+    // Store scan settings as loaded, checked against the retailer's departments.
+    ['GET', '/api/:retailer/scan-config', async ({ params }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      const departments = (await adapter.getDepartments?.().catch(() => [])) ?? [];
+      return describeScanConfig(loadScanConfig(scanConfigPath), departments);
     }],
 
     ['GET', '/api/:retailer/categories', async ({ params }) => {

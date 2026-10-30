@@ -288,6 +288,11 @@ export class WalmartLiveSource {
     return (await this.taxonomy()).map((c) => c.name).sort();
   }
 
+  /** Top-level product departments (site sections like Help left out). */
+  async departments() {
+    return (await this.taxonomy()).map((c) => c.name).filter((n) => !NON_PRODUCT_SECTIONS.test(n)).sort();
+  }
+
   async stores(zip, { limit = 15 } = {}) {
     const data = await this.request('/stores', { zip });
     const list = Array.isArray(data) ? data : [];

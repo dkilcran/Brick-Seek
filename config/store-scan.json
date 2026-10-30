@@ -1,0 +1,31 @@
+{
+  "zip": "64081",
+  "stores": [
+    { "id": "573", "label": "Lee's Summit Supercenter, 1000 NE Sam Walton Ln" },
+    { "id": "4590", "label": "Lee's Summit Supercenter, 3410 SW Market St" }
+  ],
+  "departments": [
+    "Home",
+    "Home Improvement",
+    "Patio & Garden",
+    "Clothing",
+    "Toys",
+    "Electronics",
+    "Video Games",
+    "Sports & Outdoors",
+    "Baby",
+    "Beauty",
+    "Personal Care",
+    "Health and Medicine",
+    "Household Essentials",
+    "Pets",
+    "Auto & Tires",
+    "Office Supplies",
+    "Arts Crafts & Sewing",
+    "Seasonal",
+    "Party & Occasions",
+    "Food"
+  ],
+  "searchTerms": ["clearance"],
+  "monthlySearchBudget": 100
+}

@@ -137,6 +137,11 @@ export class WalmartAdapter extends RetailerAdapter {
     return this.source.localClearance(zip, opts);
   }
 
+  /** Every product department the retailer has, for settings like the store scan. */
+  async getDepartments() {
+    return this.source.departments();
+  }
+
   /** Departments that have Walmart-sold items in the deal pool, most items first. */
   async getCategories() {
     const counts = new Map();
