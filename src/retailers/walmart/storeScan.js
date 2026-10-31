@@ -7,6 +7,12 @@ import { allowanceSoFar, localParts, monthPlan } from '../../lib/scanSchedule.js
 
 const SERPAPI_URL = 'https://serpapi.com';
 export const RESULTS_PER_PAGE = 40; // SerpApi Walmart search page size
+const PRICE_DAYS = 14; // store prices older than this aren't shown, and history is pruned
+// Price columns with title/image/department from store_items when the row has none.
+const PRICE_COLUMNS = `p.retailer, p.store_id, p.item_id, p.date, p.price, p.was_price, p.in_stock, p.seller,
+  p.online_price, p.online_seller, p.clearance, p.source, p.url,
+  COALESCE(p.title, i.title) title, COALESCE(p.image_url, i.image_url) image_url, COALESCE(p.department, i.department) department`;
+const ITEM_JOIN = 'LEFT JOIN store_items i ON i.retailer = p.retailer AND i.item_id = p.item_id';
 
 export class SerpApiClient {
   constructor({ apiKey, fetchImpl = fetch }) {
@@ -117,20 +123,62 @@ export class StoreScanDb {
         PRIMARY KEY (retailer, day, item_id)
       ) WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS store_prices_by_item_date ON store_prices (retailer, item_id, date);
+      CREATE INDEX IF NOT EXISTS store_prices_by_date ON store_prices (retailer, date);
+      -- Title, image and department once per item, instead of on every store-price row.
+      CREATE TABLE IF NOT EXISTS store_items (
+        retailer   TEXT NOT NULL,
+        item_id    TEXT NOT NULL,
+        title      TEXT,
+        image_url  TEXT,
+        department TEXT,
+        PRIMARY KEY (retailer, item_id)
+      ) WITHOUT ROWID;
     `);
+    this.upsertItem = db.prepare(`INSERT INTO store_items (retailer, item_id, title, image_url, department) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (retailer, item_id) DO UPDATE SET title = COALESCE(excluded.title, store_items.title),
+        image_url = COALESCE(excluded.image_url, store_items.image_url), department = COALESCE(excluded.department, store_items.department)`);
     this.insertRun = db.prepare(`INSERT INTO store_scan_runs
       (retailer, store_id, department, term, month, ran_at, result_count, error, page, total_results)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    this.upsertPrice = db.prepare(`INSERT INTO store_prices
-      (retailer, store_id, item_id, date, price, was_price, in_stock, seller, title, image_url, url, department, online_price, online_seller, clearance, source)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (retailer, store_id, item_id, date) DO UPDATE SET
-        price = excluded.price, was_price = excluded.was_price, in_stock = excluded.in_stock, seller = excluded.seller,
+    const columns = `(retailer, store_id, item_id, date, price, was_price, in_stock, seller, title, image_url, url, department,
+      online_price, online_seller, clearance, source)`;
+    const updates = `price = excluded.price, was_price = excluded.was_price, in_stock = excluded.in_stock, seller = excluded.seller,
         title = excluded.title, image_url = excluded.image_url, url = excluded.url, department = excluded.department,
-        online_price = COALESCE(excluded.online_price, store_prices.online_price),
-        online_seller = COALESCE(excluded.online_seller, store_prices.online_seller),
-        clearance = COALESCE(excluded.clearance, store_prices.clearance),
-        source = excluded.source`);
+        online_price = COALESCE(excluded.online_price, %T.online_price),
+        online_seller = COALESCE(excluded.online_seller, %T.online_seller),
+        clearance = COALESCE(excluded.clearance, %T.clearance),
+        source = excluded.source`;
+    // Daily history: one row per store, item and day (kept PRICE_DAYS days).
+    this.upsertPrice = db.prepare(`INSERT INTO store_prices ${columns}
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (retailer, store_id, item_id, date) DO UPDATE SET ${updates.replaceAll('%T', 'store_prices')}`);
+    // Latest price per store and item: what pages read. Its size doesn't grow with days.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS store_latest (
+        retailer TEXT NOT NULL, store_id TEXT NOT NULL, item_id TEXT NOT NULL, date TEXT NOT NULL,
+        price REAL, was_price REAL, in_stock INTEGER, seller TEXT, title TEXT, image_url TEXT, url TEXT, department TEXT,
+        online_price REAL, online_seller TEXT, clearance INTEGER, source TEXT,
+        PRIMARY KEY (retailer, store_id, item_id)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS store_latest_by_item ON store_latest (retailer, item_id);
+    `);
+    this.upsertLatest = db.prepare(`INSERT INTO store_latest ${columns}
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (retailer, store_id, item_id) DO UPDATE SET date = excluded.date, ${updates.replaceAll('%T', 'store_latest')}
+      WHERE excluded.date >= store_latest.date`);
+    // One-time fill from history saved before store_latest existed.
+    if (!db.prepare('SELECT 1 FROM store_latest LIMIT 1').get() && db.prepare('SELECT 1 FROM store_prices LIMIT 1').get()) {
+      db.exec(`INSERT INTO store_latest SELECT p.retailer, p.store_id, p.item_id, p.date, p.price, p.was_price, p.in_stock,
+          p.seller, p.title, p.image_url, p.url, p.department, p.online_price, p.online_seller, p.clearance, p.source
+        FROM store_prices p JOIN (SELECT retailer, store_id, item_id, MAX(date) d FROM store_prices GROUP BY retailer, store_id, item_id) l
+          ON p.retailer = l.retailer AND p.store_id = l.store_id AND p.item_id = l.item_id AND p.date = l.d`);
+    }
+  }
+
+  /** Save one price row to the daily history and the latest-price table. */
+  savePrice(...values) {
+    this.upsertPrice.run(...values);
+    this.upsertLatest.run(...values);
   }
 
   /** Successful searches this month (SerpApi only counts successful ones). */
@@ -171,7 +219,7 @@ export class StoreScanDb {
       for (const r of results ?? []) {
         if (!r.itemId) continue;
         // SQLite can't store undefined, so missing fields become null.
-        this.upsertPrice.run(retailer, storeId, r.itemId, date, r.price ?? null, r.wasPrice ?? null,
+        this.savePrice(retailer, storeId, r.itemId, date, r.price ?? null, r.wasPrice ?? null,
           r.inStock == null ? null : r.inStock ? 1 : 0, r.seller ?? null, r.title ?? null, r.imageUrl ?? null, r.url ?? null, department,
           r.onlinePrice ?? null, r.onlineSeller ?? null, clearance, 'serpapi');
       }
@@ -186,17 +234,14 @@ export class StoreScanDb {
    * Latest scanned price per item at the given stores, from the last `days` days.
    * @returns rows of store_prices
    */
-  latestPrices(retailer, storeIds, { days = 14, itemId = null, now = Date.now() } = {}) {
+  latestPrices(retailer, storeIds, { days = PRICE_DAYS, itemId = null, now = Date.now() } = {}) {
     if (!storeIds.length) return [];
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
     const marks = storeIds.map(() => '?').join(',');
-    const itemFilter = itemId ? 'AND item_id = ?' : '';
-    const args = [retailer, since, ...storeIds, ...(itemId ? [String(itemId)] : []), retailer];
-    return this.db.prepare(`SELECT p.* FROM store_prices p
-      JOIN (SELECT store_id, item_id, MAX(date) d FROM store_prices
-            WHERE retailer = ? AND date >= ? AND store_id IN (${marks}) ${itemFilter} GROUP BY store_id, item_id) l
-        ON p.store_id = l.store_id AND p.item_id = l.item_id AND p.date = l.d
-      WHERE p.retailer = ?`).all(...args);
+    const itemFilter = itemId ? 'AND p.item_id = ?' : '';
+    return this.db.prepare(`SELECT ${PRICE_COLUMNS} FROM store_latest p ${ITEM_JOIN}
+      WHERE p.retailer = ? AND p.date >= ? AND p.store_id IN (${marks}) ${itemFilter}`)
+      .all(retailer, since, ...storeIds, ...(itemId ? [String(itemId)] : []));
   }
 
   /**
@@ -207,9 +252,11 @@ export class StoreScanDb {
     this.db.exec('BEGIN');
     try {
       for (const r of rows) {
-        this.upsertPrice.run(retailer, storeId, String(r.itemId), date, r.price ?? null, r.wasPrice ?? null,
-          r.inStock == null ? null : r.inStock ? 1 : 0, r.seller ?? null, r.title ?? null, r.imageUrl ?? null,
-          r.url ?? null, r.category ?? null, null, null, r.clearance == null ? null : r.clearance ? 1 : 0, 'walmart-api');
+        this.upsertItem.run(retailer, String(r.itemId), r.title ?? null, r.imageUrl ?? null, r.category ?? null);
+        // Lean rows: title/image/department live in store_items; the URL comes from the item id.
+        this.savePrice(retailer, storeId, String(r.itemId), date, r.price ?? null, r.wasPrice ?? null,
+          r.inStock == null ? null : r.inStock ? 1 : 0, r.seller ?? null, null, null,
+          null, null, null, null, r.clearance == null ? null : r.clearance ? 1 : 0, 'walmart-api');
       }
       this.db.exec('COMMIT');
     } catch (err) {
@@ -233,20 +280,21 @@ export class StoreScanDb {
    * a higher was-price).
    */
   discoveryYield(retailer, sinceDay) {
-    const markedDown = `EXISTS (SELECT 1 FROM store_prices p WHERE p.retailer = f.retailer AND p.item_id = f.item_id
-      AND p.date = f.day AND (p.clearance = 1 OR p.was_price > p.price) AND lower(p.seller) IN ('walmart', 'walmart.com'))`;
+    // Only look up the found items themselves (indexed by item and date); a
+    // query that scanned every store price took ~30s at 135k rows.
+    const markedCte = `WITH md AS (
+      SELECT DISTINCT f.item_id, f.day FROM discovery_finds f
+      JOIN store_prices p ON p.retailer = f.retailer AND p.item_id = f.item_id AND p.date = f.day
+      WHERE f.retailer = ? AND f.day >= ? AND (p.clearance = 1 OR p.was_price > p.price)
+        AND lower(p.seller) IN ('walmart', 'walmart.com'))`;
     const counts = `COUNT(*) found, SUM(f.in_pool = 0) new_items,
-      SUM(CASE WHEN ${markedDown} THEN 1 ELSE 0 END) marked_down,
-      SUM(CASE WHEN f.in_pool = 0 AND ${markedDown} THEN 1 ELSE 0 END) marked_down_new`;
-    const days = this.db.prepare(`SELECT f.day, ${counts} FROM discovery_finds f
-      WHERE f.retailer = ? AND f.day >= ? GROUP BY f.day ORDER BY f.day`).all(retailer, sinceDay);
-    // All items marked down at any store each day, to compare discovery's share against.
-    const allMarked = this.db.prepare(`SELECT date day, COUNT(DISTINCT item_id) n FROM store_prices
-      WHERE retailer = ? AND date >= ? AND (clearance = 1 OR was_price > price) AND lower(seller) IN ('walmart', 'walmart.com')
-      GROUP BY date`).all(retailer, sinceDay);
-    const markedByDay = new Map(allMarked.map((r) => [r.day, r.n]));
-    const pages = this.db.prepare(`SELECT f.department, f.page, ${counts} FROM discovery_finds f
-      WHERE f.retailer = ? AND f.day >= ? GROUP BY f.department, f.page ORDER BY f.department, f.page`).all(retailer, sinceDay);
+      SUM(md.item_id IS NOT NULL) marked_down, SUM(f.in_pool = 0 AND md.item_id IS NOT NULL) marked_down_new`;
+    const from = `FROM discovery_finds f LEFT JOIN md ON md.item_id = f.item_id AND md.day = f.day
+      WHERE f.retailer = ? AND f.day >= ?`;
+    const args = [retailer, sinceDay, retailer, sinceDay];
+    const days = this.db.prepare(`${markedCte} SELECT f.day, ${counts} ${from} GROUP BY f.day ORDER BY f.day`).all(...args);
+    const pages = this.db.prepare(`${markedCte} SELECT f.department, f.page, ${counts} ${from}
+      GROUP BY f.department, f.page ORDER BY f.department, f.page`).all(...args);
     const byDepartment = new Map();
     for (const r of pages) {
       const d = byDepartment.get(r.department) ?? { department: r.department, found: 0, new: 0, markedDown: 0, markedDownNew: 0, pages: [] };
@@ -257,55 +305,78 @@ export class StoreScanDb {
     return {
       days: days.map((r) => ({
         day: r.day, found: r.found, new: r.new_items, markedDown: r.marked_down, markedDownNew: r.marked_down_new,
-        markedDownAllSources: markedByDay.get(r.day) ?? 0,
+        // All items marked down that day from any source, counted when the day's checks finished.
+        markedDownAllSources: this.getMeta(`markedDown:${retailer}:${r.day}`),
       })),
       byDepartment: [...byDepartment.values()],
     };
   }
 
-  candidateItems(retailer, { days = 14, now = Date.now() } = {}) {
+  /** Distinct Walmart-sold items marked down at any store on a day (one indexed pass over that day). */
+  markedDownCount(retailer, day) {
+    return this.db.prepare(`SELECT COUNT(DISTINCT item_id) n FROM store_prices
+      WHERE retailer = ? AND date = ? AND (clearance = 1 OR was_price > price) AND lower(seller) IN ('walmart', 'walmart.com')`)
+      .get(retailer, day).n;
+  }
+
+  /** Drop history older than PRICE_DAYS (and discovery records older than 60 days). */
+  prune(now = Date.now()) {
+    const day = (n) => new Date(now - n * 86400000).toISOString().slice(0, 10);
+    this.db.prepare('DELETE FROM store_prices WHERE date < ?').run(day(PRICE_DAYS));
+    this.db.prepare('DELETE FROM store_latest WHERE date < ?').run(day(PRICE_DAYS));
+    this.db.prepare('DELETE FROM discovery_finds WHERE day < ?').run(day(60));
+  }
+
+  /** Database file size in MB. */
+  sizeMb() {
+    const { page_count: pages } = this.db.prepare('PRAGMA page_count').get();
+    const { page_size: size } = this.db.prepare('PRAGMA page_size').get();
+    return Math.round((pages * size) / 1048576);
+  }
+
+  candidateItems(retailer, { days = PRICE_DAYS, now = Date.now() } = {}) {
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
-    return this.db.prepare(`SELECT DISTINCT item_id FROM store_prices
+    return this.db.prepare(`SELECT DISTINCT item_id FROM store_latest
       WHERE retailer = ? AND date >= ? AND (clearance = 1 OR was_price > price)`).all(retailer, since).map((r) => r.item_id);
   }
 
   /** Stores where the scan found Walmart itself selling an item (latest per store, last `days` days). */
-  walmartStoreOffers(retailer, itemId, { days = 14, now = Date.now() } = {}) {
+  walmartStoreOffers(retailer, itemId, { days = PRICE_DAYS, now = Date.now() } = {}) {
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
-    return this.db.prepare(`SELECT p.* FROM store_prices p
-      JOIN (SELECT store_id, MAX(date) d FROM store_prices WHERE retailer = ? AND item_id = ? AND date >= ? GROUP BY store_id) l
-        ON p.store_id = l.store_id AND p.date = l.d
-      WHERE p.retailer = ? AND p.item_id = ? AND lower(p.seller) IN ('walmart', 'walmart.com')
-      ORDER BY p.price`).all(retailer, String(itemId), since, retailer, String(itemId));
+    return this.db.prepare(`SELECT ${PRICE_COLUMNS} FROM store_latest p ${ITEM_JOIN}
+      WHERE p.retailer = ? AND p.item_id = ? AND p.date >= ? AND lower(p.seller) IN ('walmart', 'walmart.com')
+      ORDER BY p.price`).all(retailer, String(itemId), since);
   }
 
   /** Recent items whose online seller hasn't been recorded yet. */
-  itemsMissingOnlineSeller(retailer, { days = 14, now = Date.now() } = {}) {
+  itemsMissingOnlineSeller(retailer, { days = PRICE_DAYS, now = Date.now() } = {}) {
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
-    return this.db.prepare(`SELECT DISTINCT item_id FROM store_prices
-      WHERE retailer = ? AND date >= ? AND online_seller IS NULL`).all(retailer, since).map((r) => r.item_id);
+    // Only SerpApi rows carry an online seller; the free lookup's rows don't need one.
+    return this.db.prepare(`SELECT DISTINCT item_id FROM store_latest
+      WHERE retailer = ? AND date >= ? AND online_seller IS NULL AND source = 'serpapi'`).all(retailer, since).map((r) => r.item_id);
   }
 
   setOnlineInfo(retailer, itemId, { price, seller }) {
-    this.db.prepare(`UPDATE store_prices SET online_seller = ?, online_price = COALESCE(online_price, ?)
-      WHERE retailer = ? AND item_id = ? AND online_seller IS NULL`).run(seller ?? null, price ?? null, retailer, String(itemId));
+    for (const table of ['store_prices', 'store_latest']) {
+      this.db.prepare(`UPDATE ${table} SET online_seller = ?, online_price = COALESCE(online_price, ?)
+        WHERE retailer = ? AND item_id = ? AND online_seller IS NULL`).run(seller ?? null, price ?? null, retailer, String(itemId));
+    }
   }
 
-  /** Store ids that have any scanned prices. */
+  /** Store ids that have any recent prices. */
   scannedStores(retailer) {
-    return this.db.prepare('SELECT DISTINCT store_id FROM store_prices WHERE retailer = ?').all(retailer).map((r) => r.store_id);
+    return this.db.prepare('SELECT DISTINCT store_id FROM store_latest WHERE retailer = ?').all(retailer).map((r) => r.store_id);
   }
 
-  /** A random sample of saved store prices (most recent date per store and item). */
+  /** A random sample of current store prices. */
   samplePrices(retailer, limit = 15) {
-    return this.db.prepare(`SELECT p.* FROM store_prices p
-      JOIN (SELECT store_id, item_id, MAX(date) d FROM store_prices WHERE retailer = ? GROUP BY store_id, item_id) l
-        ON p.store_id = l.store_id AND p.item_id = l.item_id AND p.date = l.d
-      WHERE p.retailer = ? ORDER BY RANDOM() LIMIT ?`).all(retailer, retailer, limit);
+    return this.db.prepare(`SELECT ${PRICE_COLUMNS} FROM store_latest p ${ITEM_JOIN}
+      WHERE p.retailer = ? ORDER BY RANDOM() LIMIT ?`).all(retailer, limit);
   }
 
+  /** n = current store prices (one per store and item), items = distinct items. */
   priceCount(retailer) {
-    return this.db.prepare('SELECT COUNT(*) n, COUNT(DISTINCT item_id) items FROM store_prices WHERE retailer = ?').get(retailer);
+    return this.db.prepare('SELECT COUNT(*) n, COUNT(DISTINCT item_id) items FROM store_latest WHERE retailer = ?').get(retailer);
   }
 
   setMeta(key, value) {

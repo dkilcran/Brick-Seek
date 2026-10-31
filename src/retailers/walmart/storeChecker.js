@@ -163,6 +163,8 @@ export class StoreChecker {
     const total = batches * state.stores.length;
     if (state.offset >= total) {
       this.state = { ...state, phase: 'done', finishedAt: this.now().toISOString() };
+      // Count the day's markdowns once, for /api/walmart/discovery-stats.
+      this.db.setMeta(`markedDown:${this.retailer}:${date}`, this.db.markedDownCount(this.retailer, date));
       console.log(`store check ${date}: ${candidates.length} candidates at ${state.stores.length} stores done`);
       return false;
     }

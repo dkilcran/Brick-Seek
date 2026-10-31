@@ -62,7 +62,6 @@ export function createApp(registry = createDefaultRegistry()) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT ?? 3000);
   const registry = createDefaultRegistry();
-  registry.tracker.prune();
   // Start loading deal pools now; a live pool takes a couple of minutes to fetch.
   for (const adapter of registry.list()) {
     if (adapter.features.deals) adapter.getDealCandidates().catch((err) => console.warn(`${adapter.id}: warm-up failed`, err.message));
@@ -75,7 +74,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       if (adapter.features.deals) adapter.getDealCandidates({ wait: false }).catch(() => {});
     }
   }, 5 * 60 * 1000).unref();
-  setInterval(() => registry.tracker.prune(), 24 * 60 * 60 * 1000).unref();
+  const pruneAll = () => {
+    registry.tracker.prune();
+    for (const adapter of registry.list()) adapter.storeData?.prune();
+  };
+  pruneAll();
+  setInterval(pruneAll, 24 * 60 * 60 * 1000).unref();
   createApp(registry).listen(port, () => {
     const modes = registry.list().map((r) => `${r.name} (${r.mode})`).join(', ');
     console.log(`Clearance Tracker running at http://localhost:${port} — retailers: ${modes}`);

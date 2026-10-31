@@ -358,7 +358,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
     ['GET', '/api/:retailer/store-check', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);
       if (!adapter.storeChecker) return { enabled: false, reason: 'Live mode only' };
-      return { enabled: true, ...adapter.storeChecker.status(), prices: adapter.storeData.priceCount(adapter.id) };
+      return { enabled: true, ...adapter.storeChecker.status(), prices: adapter.storeData.priceCount(adapter.id), databaseMb: adapter.storeData.sizeMb() };
     }],
 
     ['GET', '/api/:retailer/store-scan/inspect', async ({ params }) => {
