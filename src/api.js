@@ -321,9 +321,10 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const adapter = requireRetailer(registry, params.retailer);
       if (!adapter.source?.request) throw new HttpError(501, 'Live mode only');
       const p = {};
-      for (const k of ['category', 'specialOffer', 'storeId', 'count', 'query']) {
+      for (const k of ['category', 'specialOffer', 'storeId', 'count', 'query', 'categoryId', 'start', 'numItems',
+        'facet', 'facet.filter', 'responseGroup', 'sort', 'order']) {
         const v = query.get(k);
-        if (v && /^[\w .:-]{1,40}$/.test(v)) p[k] = v;
+        if (v && /^[\w .:&'-]{1,60}$/.test(v)) p[k] = v;
       }
       const path = query.get('search') === '1' ? '/search' : '/paginated/items';
       const data = await adapter.source.request(path, p, { cache: false });
@@ -334,7 +335,12 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
         sellers: count((i) => (/^walmart/i.test(i.sellerInfo ?? '') ? 'Walmart' : i.sellerInfo ? 'other' : i.marketplace ? 'marketplace' : 'unnamed')),
         stock: count((i) => i.stock ?? '?'),
         clearanceFlag: count((i) => String(i.clearance)),
-        sample: items.slice(0, 5).map((i) => ({ itemId: i.itemId, name: i.name?.slice(0, 50), seller: i.sellerInfo ?? null, salePrice: i.salePrice, stock: i.stock })),
+        sample: items.slice(0, 5).map((i) => ({ itemId: i.itemId, name: i.name?.slice(0, 50), seller: i.sellerInfo ?? null, salePrice: i.salePrice, stock: i.stock, clearance: i.clearance, strikeThroughPrice: i.strikeThroughPrice ?? null })),
+        // Search facets (when facet=on): name and its top values with counts.
+        facets: (data?.facets ?? []).map((f) => ({
+          name: f.name, displayName: f.displayName,
+          values: (f.facetValues ?? []).slice(0, 12).map((v) => `${v.name} (${v.count})`),
+        })),
       };
     }],
 
