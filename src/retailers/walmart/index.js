@@ -1,6 +1,7 @@
 import { RetailerAdapter } from '../RetailerAdapter.js';
 import { PriceTracker } from '../../lib/priceTracker.js';
 import { ItemChecks } from '../../lib/itemChecks.js';
+import { PoolStore } from '../../lib/poolStore.js';
 import { DEFAULT_SCAN_CONFIG_PATH, loadScanConfig } from '../../lib/scanConfig.js';
 import { SerpApiClient, StoreScanDb, StoreScanner } from './storeScan.js';
 import { StoreChecker } from './storeChecker.js';
@@ -47,6 +48,7 @@ export class WalmartAdapter extends RetailerAdapter {
         poolPages: Number(env.WALMART_POOL_PAGES) || undefined,
         poolRefreshMs: Number(env.WALMART_POOL_REFRESH_MINUTES) * 60000 || undefined,
         itemChecks: new ItemChecks(tracker.db),
+        poolStore: new PoolStore(tracker.db),
       });
       const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
       // Store-level prices for the stores in config/store-scan.json: free checks

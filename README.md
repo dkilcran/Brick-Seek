@@ -71,9 +71,9 @@ deploy or restart.
 
 In live mode the deal pool is Walmart's Trending list plus the first 3 pages
 (`WALMART_POOL_PAGES`) of the Clearance and Rollback feeds and of every product
-department. It refreshes in the background every 60 minutes
-(`WALMART_POOL_REFRESH_MINUTES`); visitors keep seeing the previous pool while
-it does. `GET /api/walmart/stats` shows the pool size, each feed's page and
+department. It is saved in the database and refreshes in the background once a day
+(`WALMART_POOL_REFRESH_MINUTES`); restarts reuse the saved copy, and visitors
+keep seeing the previous pool while a refresh runs. `GET /api/walmart/stats` shows the pool size, each feed's page and
 item counts and errors, and how long ranking takes.
 
 ## Architecture

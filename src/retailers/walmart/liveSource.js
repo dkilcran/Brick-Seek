@@ -103,7 +103,7 @@ export function signWalmartRequest({ consumerId, keyVersion, privateKey, timesta
 export class WalmartLiveSource {
   constructor({
     consumerId, keyVersion = '1', privateKey, privateKeyPath, publisherId, fetchImpl = fetch,
-    poolPages = 3, poolRefreshMs = 60 * 60 * 1000, poolMaxItems = 20000,
+    poolPages = 3, poolRefreshMs = 24 * 60 * 60 * 1000, poolMaxItems = 20000, poolStore = null,
     minIntervalMs = 2000, maxRetries = 3, retryPassDelayMs = 30000,
     itemChecks = null,
   } = {}) {
@@ -118,6 +118,9 @@ export class WalmartLiveSource {
     this.poolRefreshMs = poolRefreshMs;
     this.poolMaxItems = poolMaxItems;
     this.pool = null; // { products, fetchedAt, stats }
+    /** @type {import('../../lib/poolStore.js').PoolStore|null} saved copy, so restarts don't refetch */
+    this.poolStore = poolStore;
+    this.triedSavedPool = false;
     this.poolRefresh = null;
     // Walmart rate-limits the affiliate API, so requests are spaced out.
     this.minIntervalMs = minIntervalMs;
@@ -417,7 +420,13 @@ export class WalmartLiveSource {
     console.log(`walmart: deal pool ${stats.uniqueItems} items, ${stats.failedFeeds} failed feeds, ${stats.requests} requests in ${stats.durationMs}ms`);
     const products = [...byId.values()];
     this.applySavedChecks(products);
-    return { products, byId, feedIds, fetchedAt: Date.now(), stats };
+    const pool = { products, byId, feedIds, fetchedAt: Date.now(), stats };
+    try {
+      this.poolStore?.save('walmart', pool);
+    } catch (err) {
+      console.warn('walmart: could not save the deal pool', err.message);
+    }
+    return pool;
   }
 
   // ---- seller / existence checks -------------------------------------------
@@ -570,6 +579,21 @@ export class WalmartLiveSource {
   async dealCandidates({ category, wait = true } = {}) {
     const startChecks = () =>
       this.checkPoolSellers().catch((err) => console.warn('walmart: seller checks failed', err.message));
+    // After a restart, start from the saved pool; a stale one is refreshed below, in the background.
+    if (!this.pool && !this.triedSavedPool) {
+      this.triedSavedPool = true;
+      try {
+        const saved = this.poolStore?.load('walmart');
+        if (saved) {
+          this.pool = saved;
+          this.applySavedChecks(saved.products);
+          console.log(`walmart: loaded saved deal pool (${saved.products.length} items from ${new Date(saved.fetchedAt).toISOString()})`);
+          startChecks();
+        }
+      } catch (err) {
+        console.warn('walmart: could not load the saved deal pool', err.message);
+      }
+    }
     if (!this.pool) {
       this.poolRefresh ??= this.fetchPool()
         .then((pool) => { this.pool ??= pool; startChecks(); return pool; })

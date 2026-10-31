@@ -634,3 +634,40 @@ test('changing restartChecks restarts today\'s cycle once', async () => {
   while (await checker.step());
   assert.deepEqual(looked, ['A', 'A'], 'only once per value');
 });
+
+test('the deal pool is saved, so a restart reuses it instead of refetching', async () => {
+  const { PoolStore } = await import('../src/lib/poolStore.js');
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  let fetches = 0;
+  const ok = (body) => ({ ok: true, status: 200, json: async () => body, text: async () => '' });
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes('/taxonomy')) return ok({ categories: [] });
+    if (u.includes('/trends')) { fetches += 1; return ok({ items: [{ itemId: 1, name: 'A', salePrice: 5, msrp: 9, categoryPath: 'Home Page/Home' }] }); }
+    return ok({ items: [] });
+  };
+  const db = new PriceTracker().db;
+  const make = (poolRefreshMs) => new WalmartLiveSource({
+    consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, retryPassDelayMs: 0, poolRefreshMs,
+    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl, poolStore: new PoolStore(db),
+  });
+  const log = console.log;
+  console.log = () => {};
+  await make(86400000).dealCandidates();
+  assert.equal(fetches, 1);
+
+  // "Restart": a new source with the same database answers at once from the saved pool.
+  const restarted = make(86400000);
+  assert.equal(restarted.poolLoading, true);
+  const pool = await restarted.dealCandidates({ wait: false });
+  assert.deepEqual(pool.map((p) => p.id), ['1']);
+  assert.equal(restarted.poolLoading, false);
+  assert.equal(fetches, 1, 'no refetch while the saved pool is fresh');
+
+  // A stale saved pool is still served at once, and refreshed in the background.
+  const stale = make(0);
+  assert.equal((await stale.dealCandidates({ wait: false })).length, 1);
+  await stale.poolRefresh;
+  console.log = log;
+  assert.equal(fetches, 2);
+});
