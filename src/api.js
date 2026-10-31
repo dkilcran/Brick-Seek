@@ -322,8 +322,9 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       if (!adapter.source?.request) throw new HttpError(501, 'Live mode only');
       const p = {};
       for (const k of ['category', 'specialOffer', 'storeId', 'count', 'query', 'categoryId', 'start', 'numItems',
-        'facet', 'facet.filter', 'responseGroup', 'sort', 'order']) {
-        const values = query.getAll(k).filter((v) => /^[\w .:&'-]{1,60}$/.test(v));
+        'facet', 'facet.filter', 'facet.range', 'responseGroup', 'sort', 'order']) {
+        // Allows facet.range values like "price:[0 TO 5]".
+        const values = query.getAll(k).filter((v) => /^[\w .:&'\[\]-]{1,60}$/.test(v));
         if (values.length) p[k] = values.length === 1 ? values[0] : values;
       }
       const path = query.get('search') === '1' ? '/search' : '/paginated/items';
