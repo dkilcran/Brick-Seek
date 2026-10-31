@@ -454,6 +454,44 @@ export class WalmartLiveSource {
    * exist; save and apply the results.
    */
   /**
+   * One page of Walmart's search for building tier lists: filters, an optional
+   * whole-dollar price band (lo..hi) and an optional price sort. Returns
+   * Walmart-sold products and the total result count.
+   */
+  async searchPage({ query, filters, lo = null, hi = null, start = 1, sort = null }) {
+    const params = { query, facet: 'on', 'facet.filter': filters, start, numItems: 25 };
+    if (lo != null && hi != null) params['facet.range'] = `price:[${lo} TO ${hi}]`;
+    if (sort) Object.assign(params, { sort: 'price', order: sort });
+    const data = await this.request('/search', params, { cache: false });
+    const products = (data?.items ?? [])
+      .filter((item) => item?.itemId && isWalmartSeller(item, { fromLookup: true }))
+      .map((item) => this.toProduct(item, { fromLookup: true }));
+    return { products, total: Number(data?.totalResults) || 0 };
+  }
+
+  /**
+   * Replace the deal pool with products from the tier lists (Walmart-sold
+   * Clearance, Rollback and Reduced Price items) and save it for restarts.
+   */
+  setPool(products) {
+    const byId = new Map(products.map((p) => [p.id, p]));
+    this.pool = {
+      products: [...byId.values()], byId, feedIds: {}, fetchedAt: Date.now(),
+      stats: { source: 'tier lists', uniqueItems: byId.size, fetchedAt: new Date().toISOString() },
+    };
+    try {
+      this.poolStore?.save('walmart', this.pool);
+    } catch (err) {
+      console.warn('walmart: could not save the deal pool', err.message);
+    }
+  }
+
+  /** True when the deal pool comes from the tier lists (so the old bulk refresh isn't needed). */
+  get poolFromTiers() {
+    return this.pool?.stats?.source === 'tier lists';
+  }
+
+  /**
    * One page of Walmart's catalog search with facet filters (e.g.
    * special_offers:Clearance, retailer_type:Walmart). Search isn't store
    * specific; it finds candidates for the store lookup to check.

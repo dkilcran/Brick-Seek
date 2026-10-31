@@ -5,7 +5,9 @@
   ],
   "schedule": {
     "productListAt": "04:00",
-    "storeChecksAt": "05:00"
+    "storeChecksAt": "05:00",
+    "endAt": "20:00",
+    "tier3RebuildDay": "Monday"
   },
   "stores": [
     {
@@ -123,13 +125,39 @@
     "Party & Occasions",
     "Food"
   ],
+  "departmentQueries": {
+    "Auto & Tires": [
+      "auto",
+      "car care",
+      "tires",
+      "motor oil"
+    ],
+    "Video Games": [
+      "video games",
+      "nintendo switch",
+      "playstation",
+      "xbox"
+    ]
+  },
+  "baseFilters": [
+    "retailer_type:Walmart",
+    "fulfillment_method:In-store"
+  ],
+  "tiers": {
+    "1": [
+      "special_offers:Clearance"
+    ],
+    "2": [
+      "special_offers:Rollback",
+      "special_offers:Reduced Price"
+    ]
+  },
+  "restartChecks": "2026-10-30 20:10",
   "filters": [
     "special_offers:Clearance",
     "retailer_type:Walmart"
   ],
   "searchTerms": [],
-  "discoveryMaxPages": 20,
-  "restartChecks": "2026-10-30 20:10",
   "useSerpApi": false,
   "discoveryStores": [
     "573",

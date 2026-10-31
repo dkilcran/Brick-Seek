@@ -6,36 +6,55 @@ site redeploys and picks up the change. Check the result at
 `/api/walmart/scan-config` on the live site, and daily progress at
 `/api/walmart/store-check`.
 
-Everything runs on Walmart's free affiliate API: its item lookup with a store
-number returns that store's price, stock, Clearance flag and was-price.
+Everything runs on Walmart's free affiliate API: its search builds the item
+lists, and its item lookup with a store number returns that store's price,
+stock, Clearance flag and was-price.
 
 ## Daily schedule (Chicago time)
 
-1. `schedule.productListAt` (04:00): refresh the product list (~20,000 items
-   from Walmart's department, Clearance and Rollback lists, ~15 minutes). It is
-   saved, so restarts don't redo it.
-2. `schedule.storeChecksAt` (05:00): the store checks start, in order:
-   - **discovery:** Walmart's search for each department with the `filters`
-     (Clearance, sold by Walmart), up to `discoveryMaxPages` pages of 25;
-   - **full checks:** every product-list and discovered item at the
-     `dailyStores` plus `rotatingStoresPerDay` other stores;
-   - **all stores:** everything found marked down is checked at every store.
+Every step is one free call to Walmart (a search page, or a 20-item store
+lookup), paced by Walmart's rate limit (~28 calls a minute).
+
+1. `schedule.productListAt` (04:00): build the **tier 1** (Clearance) and
+   **tier 2** (Rollback, Reduced Price) lists with Walmart's search, for every
+   department, limited by `baseFilters` (sold by Walmart, carried in stores).
+   These also become the home page deals.
+2. `schedule.storeChecksAt` (05:00), in order:
+   1. tier 1 items at the full-check stores (`dailyStores` + rotating stores)
+   2. tier 2 items at the full-check stores
+   3. recent markdowns not in tiers 1-2 (e.g. found through tier 3) at the
+      full-check stores
+   4. tier 1 + store-level markdowns (Walmart's Clearance flag at a store, or
+      **calculated clearance**: at least 2% cheaper than the item's highest
+      price at another store) at all other stores
+3. On `schedule.tier3RebuildDay` (Monday): rebuild the **tier 3** list
+   (everything sold by Walmart in stores, ~200,000 items); if it isn't done by
+   `endAt` it continues the next day.
+4. Until `schedule.endAt` (20:00): the next tier 3 items at the `dailyStores`,
+   continuing where the previous day stopped, so the whole list keeps cycling.
+
+Steps 1-2 always finish, even past `endAt`. Walmart's search returns at most
+1,000 results, so big searches are split into price bands ($1 minimum), and a
+crowded $1 band is read sorted both ways.
 
 ## Settings
 
 | Setting | Meaning |
 | --- | --- |
 | `zips` | ZIP codes the stores were chosen for (informational). |
-| `schedule` | `productListAt` and `storeChecksAt`, as "HH:MM" in Chicago time. Store checks wait for the product-list refresh if it is still running. |
+| `schedule` | `productListAt`, `storeChecksAt`, `endAt` ("HH:MM", Chicago time) and `tier3RebuildDay` (a weekday). |
 | `stores` | Walmart stores to track. `label` is just for you. Find store numbers at `/api/walmart/stores?zip=XXXXX&limit=50`. |
-| `dailyStores` | Stores that get a full check of every item every day (home and work stores). |
-| `rotatingStoresPerDay` | How many of the other stores also get a full check each day, taking turns (2 of the other 20 = each every 10 days). Each full check is about 1,000–1,400 free lookups (~35–50 minutes). |
-| `departments` | Departments searched during discovery. Names must match the list below exactly. |
-| `filters` | Walmart search filters for discovery. `special_offers:Clearance` = items Walmart marks Clearance; `retailer_type:Walmart` = sold by Walmart. Others: `special_offers:Rollback`, `special_offers:Reduced Price`. |
-| `searchTerms` | Not used by the free discovery (each department's name is the search text). |
-| `discoveryMaxPages` | Most search pages (25 items) per department. Busy departments like Home have hundreds of pages; this caps the daily work. |
-| `restartChecks` | Change this to any new value to restart today's store checks right away with the current plan. |
-| `useSerpApi` | `false`: SerpApi isn't used. `true` turns the old paid SerpApi store searches back on (needs `SERPAPI_KEY`), using `discoveryStores`, `maxPages`, `monthlySearchBudget`, `fullSweep` and `inspect`. |
+| `dailyStores` | Full checks every day, and tier 3 slices (home and work stores). |
+| `rotatingStoresPerDay` | How many of the other stores also get the full checks each day, taking turns. |
+| `departments` | Departments searched for the tier lists. Names must match the list below. |
+| `departmentQueries` | Search words per department (Walmart's search needs text). Departments not listed use their own name. |
+| `baseFilters` | Filters on every search: `retailer_type:Walmart` (sold by Walmart), `fulfillment_method:In-store` (carried in stores). |
+| `tiers` | The deal filters for tier 1 and tier 2; each is its own search pass. |
+| `restartChecks` | Change this to any new value to restart today's cycle right away. |
+| `useSerpApi` | `false`: SerpApi isn't used. `true` turns the old paid SerpApi searches back on (needs `SERPAPI_KEY`), with `filters`, `searchTerms`, `discoveryStores`, `maxPages`, `monthlySearchBudget`, `fullSweep` and `inspect`. |
+
+Progress: `/api/walmart/store-check`. Markdowns per tier and department:
+`/api/walmart/discovery-stats`.
 
 ## Departments
 

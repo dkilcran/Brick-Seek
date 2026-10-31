@@ -1,29 +1,41 @@
-// Free store-level checks through Walmart's affiliate API (rate-limited).
-// The item lookup with a storeId returns that store's price, stock, Clearance
-// flag and was-price, but the bulk feeds and search ignore storeId, so each
-// day's cycle (starting at config.schedule.storeChecksAt) works in phases:
-//   1. discovery: Walmart's search with the configured filters (Clearance,
-//      sold by Walmart) for each department, a page at a time, to find items
-//      the deal pool may not have;
-//   2. probe: every deal-pool and discovered item at the daily stores plus a
-//      few rotating ones, to see what's marked down there;
-//   3. candidates: every recently marked-down item at every configured store.
-// Progress is saved, so a restart resumes where it left off.
-import { scheduleDayKey } from '../../lib/scanSchedule.js';
+// The daily store-check cycle (Chicago time, settings in config/store-scan.json).
+// Every step is one Walmart call: a search page or a 20-item store lookup.
+//
+//   lists      (schedule.productListAt, 4:00): build the tier 1 (Clearance) and
+//              tier 2 (Rollback, Reduced Price) lists from Walmart's search;
+//              they also become the home page deal pool
+//   checks     (from schedule.storeChecksAt, 5:00), in this order:
+//                1. tier 1 at the full-check stores (daily + rotating)
+//                2. tier 2 at the full-check stores
+//                3. recent markdowns not in tiers 1-2 (e.g. found via tier 3)
+//                   at the full-check stores
+//                4. tier 1 + store-level markdowns (Clearance flag at a store,
+//                   or calculated clearance) at all other stores
+//   tier3build (schedule.tier3RebuildDay, after checks): rebuild the tier 3
+//              list (everything sold in stores); continues the next day if needed
+//   tier3      until schedule.endAt (20:00): the next tier 3 items at the
+//              daily stores, continuing from where the previous day stopped
+//
+// "lists" and "checks" always finish, even past endAt.
+// Progress is saved after every step, so a restart resumes where it left off.
+import { localParts, scheduleDayKey } from '../../lib/scanSchedule.js';
 
-const BATCH = 20; // most item ids per lookup
-const SEARCH_PAGE = 25; // most results per search request
+const BATCH = 20; // most item ids per store lookup
+const REQUIRED = new Set(['lists', 'checks']);
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 export class StoreChecker {
   /**
    * @param {object} opts
-   * @param {{ storeLookup, searchClearance?, dealCandidates, poolLoading, poolRefreshing? }} opts.source  WalmartLiveSource
+   * @param {{ storeLookup, searchPage, setPool? }} opts.source  WalmartLiveSource
    * @param {import('./storeScan.js').StoreScanDb} opts.db
+   * @param {import('./tierLists.js').TierStore} opts.tiers
    * @param {() => {config, errors}} opts.loadConfig
    */
-  constructor({ source, db, loadConfig, retailer = 'walmart', now = () => new Date(), idleMs = 10 * 60000, errorPauseMs = 60000 }) {
+  constructor({ source, db, tiers, loadConfig, retailer = 'walmart', now = () => new Date(), idleMs = 5 * 60000, errorPauseMs = 60000 }) {
     this.source = source;
     this.db = db;
+    this.tiers = tiers;
     this.loadConfig = loadConfig;
     this.retailer = retailer;
     this.now = now;
@@ -32,8 +44,8 @@ export class StoreChecker {
     this.lastError = null;
   }
 
-  // Small progress record, saved after every step; the item lists are saved
-  // under their own keys.
+  // Small progress record, saved after every step; item lists are saved
+  // under their own keys when a check segment starts.
   get state() {
     return this.db.getMeta('check:state');
   }
@@ -53,7 +65,7 @@ export class StoreChecker {
   }
 
   /**
-   * Stores that get the full probe on a day: config.dailyStores every day, plus
+   * Stores that get the full checks on a day: config.dailyStores every day, plus
    * config.rotatingStoresPerDay of the others, taking turns.
    */
   static probeStoresFor(day, config) {
@@ -67,114 +79,215 @@ export class StoreChecker {
     return [...daily, ...rotating];
   }
 
-  /** Discovery runs when the source can search and there's something to search for. */
-  discoveryEnabled(config) {
-    return Boolean(this.source.searchClearance) && (config.departments?.length ?? 0) > 0 && (config.filters?.length ?? 0) > 0;
+  static weekdayOf(day) {
+    return WEEKDAYS[new Date(`${day}T12:00:00Z`).getUTCDay()];
   }
 
-  /** Start today's cycle if it's time. Returns the state, or null if it can't start yet. */
-  async ensureCycle(config) {
-    const day = scheduleDayKey(this.now(), config.schedule?.storeChecksHour ?? 0);
+  hourNow() {
+    return localParts(this.now()).hour;
+  }
+
+  /** Past the end time: from endAt until the next day's lists start. */
+  pastEnd(config) {
+    const h = this.hourNow();
+    return h >= config.schedule.endHour || h < config.schedule.productListHour;
+  }
+
+  /** Start today's cycle if it's time. Returns the state, or null if there's nothing to start. */
+  ensureCycle(config) {
+    const day = scheduleDayKey(this.now(), config.schedule.productListHour);
     const current = this.state;
-    // Changing config.restartChecks starts today's cycle over with the current plan.
+    // Changing config.restartChecks starts today's cycle over.
     const restart = config.restartChecks && this.db.getMeta('check:restartDone') !== config.restartChecks;
-    if (current?.day === day && !restart) return current;
-    // Wait for the deal pool: loading after a restart, or the morning refresh still running.
-    if (this.source.poolLoading || this.source.poolRefreshing) return null;
+    if (current?.day === day && !restart && current.version === 2) return current;
+    // Yesterday's lists and checks always finish before a new day starts.
+    if (current?.version === 2 && current.day !== day && REQUIRED.has(current.phase) && !restart) return current;
     if (restart) this.db.setMeta('check:restartDone', config.restartChecks);
-    this.saveList('discovered', []);
-    this.saveList('probeIds', []);
-    this.saveList('candidates', []);
-    const probeStores = StoreChecker.probeStoresFor(day, config);
-    const state = {
-      day, phase: 'discovery', probeStores, probeIndex: 0, probeStore: probeStores[0],
-      dept: 0, page: 0, searches: 0,
-      probeTotal: 0, offset: 0, candidateTotal: 0, stores: config.stores.map((s) => s.id),
-      startedAt: this.now().toISOString(), probeFound: 0, candidateRows: 0,
+
+    const listRun = `${day}:t12`;
+    this.tiers.dropQueue(listRun);
+    this.tiers.startRun(listRun, {
+      tiers: [
+        { tier: 1, filterSets: config.tierFilters[1].map((f) => [f]) },
+        { tier: 2, filterSets: config.tierFilters[2].map((f) => [f]) },
+      ],
+      departments: config.departments,
+      queriesFor: (d) => config.departmentQueries[d] ?? [d.toLowerCase()],
+      baseFilters: config.baseFilters,
+    });
+    this.state = {
+      version: 2, day, phase: 'lists', listRun, searches: 0,
+      probeStores: StoreChecker.probeStoresFor(day, config), segment: 0, offset: 0, segmentTotal: null,
+      lookups: 0, rows: 0, tier3Lookups: 0,
+      startedAt: this.now().toISOString(), listsDoneAt: null, checksDoneAt: null, finishedAt: null,
     };
-    this.state = this.discoveryEnabled(config) ? state : await this.startProbe(state);
     return this.state;
   }
 
-  /** Probe list = deal pool + discovered items, checked at each probe store. */
-  async startProbe(state) {
-    const pool = await this.source.dealCandidates({ wait: false });
-    const probeIds = [...new Set([...pool.filter((p) => p.price > 0).map((p) => p.id), ...this.list('discovered')])];
-    this.saveList('probeIds', probeIds);
-    return { ...state, phase: 'probe', offset: 0, probeTotal: probeIds.length, discovered: this.list('discovered').length };
+  /** The four check segments, in order. Lists are computed when a segment starts. */
+  segments(state, config) {
+    const all = config.stores.map((s) => s.id);
+    const full = state.probeStores;
+    const others = all.filter((id) => !full.includes(id));
+    // Lists are only read when a segment starts (ids()), not on every step.
+    const t1 = () => this.tiers.itemIds(1);
+    const t2 = () => this.tiers.itemIds(2);
+    return [
+      { name: 'tier 1 at full-check stores', stores: full, ids: t1 },
+      { name: 'tier 2 at full-check stores', stores: full, ids: () => { const s = new Set(t1()); return t2().filter((id) => !s.has(id)); } },
+      { name: 'recent markdowns at full-check stores', stores: full, ids: () => {
+        const s = new Set([...t1(), ...t2()]);
+        return this.db.candidateItems(this.retailer).filter((id) => !s.has(id));
+      } },
+      { name: 'clearance and calculated clearance at other stores', stores: others, ids: () => [
+        ...new Set([...t1(), ...this.db.storeLevelItems(this.retailer)]),
+      ] },
+    ];
   }
 
-  /** Do one step (one search page or one lookup of up to 20 items). Returns false when there's nothing to do now. */
+  /** Do one step. Returns false when there's nothing to do right now. */
   async step() {
     const { config, errors } = this.loadConfig();
     if (!config || errors.length || !config.stores.length) return false;
-    const state = await this.ensureCycle(config);
+    const state = this.ensureCycle(config);
     if (!state || state.phase === 'done') return false;
-    const date = state.day;
 
-    if (state.phase === 'discovery') {
-      const dept = config.departments[state.dept];
-      if (dept === undefined || !this.discoveryEnabled(config)) {
-        this.state = await this.startProbe(state);
+    if (state.phase === 'lists') {
+      const job = this.tiers.nextJob(state.listRun);
+      if (job) {
+        await this.tiers.runJob(state.listRun, job, this.source);
+        this.state = { ...state, searches: state.searches + 1 };
         return true;
       }
-      const { ids, total } = await this.source.searchClearance({
-        query: dept.toLowerCase(), filters: config.filters, start: state.page * SEARCH_PAGE + 1, numItems: SEARCH_PAGE,
-      });
-      const discovered = this.list('discovered');
-      const fresh = ids.filter((id) => !discovered.includes(id));
-      if (fresh.length) this.saveList('discovered', [...discovered, ...fresh]);
-      // Measure: where each find turned up, and whether the product list already had it.
-      if (this.poolDay !== date) {
-        this.poolIds = new Set((await this.source.dealCandidates({ wait: false })).map((p) => p.id));
-        this.poolDay = date;
-      }
-      this.db.recordDiscovery(this.retailer, date, dept, state.page + 1, ids.map((id) => ({ itemId: id, inPool: this.poolIds.has(id) })));
-      const nextPage = state.page + 1;
-      const more = ids.length > 0 && nextPage < (config.discoveryMaxPages ?? 20) && nextPage * SEARCH_PAGE < (total ?? 0);
-      this.state = { ...state, searches: state.searches + 1, ...(more ? { page: nextPage } : { dept: state.dept + 1, page: 0 }) };
+      this.tiers.markBuilt(1, state.listRun);
+      this.tiers.markBuilt(2, state.listRun);
+      // The tier 1/2 products become the home page deal pool.
+      const products = this.tiers.products(state.listRun);
+      if (products.length) this.source.setPool?.(products);
+      this.state = { ...state, phase: 'checks', listsDoneAt: this.now().toISOString(), tier1: this.tiers.count(1), tier2: this.tiers.count(2) };
       return true;
     }
 
-    if (state.phase === 'probe') {
-      const ids = this.list('probeIds').slice(state.offset, state.offset + BATCH);
-      if (!ids.length) {
-        // This store is done; move to the next probe store, or on to candidates.
-        const next = state.probeIndex + 1;
-        if (next < state.probeStores.length) {
-          this.state = { ...state, probeIndex: next, probeStore: state.probeStores[next], offset: 0 };
-          return true;
+    if (state.phase === 'checks') {
+      // Store checks start at storeChecksAt (unless this is yesterday's cycle catching up).
+      const today = scheduleDayKey(this.now(), config.schedule.productListHour);
+      if (state.day === today && this.hourNow() < config.schedule.storeChecksHour && this.hourNow() >= config.schedule.productListHour) return false;
+      const segs = this.segments(state, config);
+      const seg = segs[state.segment];
+      if (!seg) {
+        this.state = { ...state, phase: this.tier3Phase(state, config), checksDoneAt: this.now().toISOString() };
+        return true;
+      }
+      if (state.segmentTotal === null) {
+        // Fresh markdowns first: the later segments' lists come from them.
+        this.db.refreshMarkdowns(this.retailer);
+        const ids = seg.ids();
+        this.saveList('segment', ids);
+        this.state = { ...state, segmentTotal: ids.length, offset: 0 };
+        return true;
+      }
+      const ids = this.list('segment');
+      const batches = Math.ceil(ids.length / BATCH);
+      if (state.offset >= batches * seg.stores.length) {
+        this.state = { ...state, segment: state.segment + 1, segmentTotal: null, offset: 0 };
+        return true;
+      }
+      const storeId = seg.stores[Math.floor(state.offset / batches)];
+      const b = state.offset % batches;
+      const { found } = await this.source.storeLookup(ids.slice(b * BATCH, b * BATCH + BATCH), storeId);
+      this.db.recordStorePrices(this.retailer, storeId, found, state.day);
+      this.state = { ...state, offset: state.offset + 1, lookups: state.lookups + 1, rows: state.rows + found.length };
+      return true;
+    }
+
+    if (state.phase === 'tier3build') {
+      const run = this.db.getMeta(`tier3:building:${this.retailer}`);
+      if (!run) {
+        this.state = { ...state, phase: 'tier3' };
+        return true;
+      }
+      if (this.pastEnd(config)) {
+        this.finish(state);
+        return false;
+      }
+      const job = this.tiers.nextJob(run);
+      if (job) {
+        await this.tiers.runJob(run, job, this.source);
+        this.state = { ...state, searches: state.searches + 1 };
+        return true;
+      }
+      this.tiers.markBuilt(3, run);
+      this.db.setMeta(`tier3:building:${this.retailer}`, null);
+      this.db.setMeta(`tier3:cursor:${this.retailer}`, '');
+      this.state = { ...state, phase: 'tier3', tier3: this.tiers.count(3) };
+      return true;
+    }
+
+    if (state.phase === 'tier3') {
+      if (this.pastEnd(config)) {
+        this.finish(state);
+        return false;
+      }
+      const daily = (config.dailyStores ?? []).filter((id) => config.stores.some((s) => s.id === id));
+      if (!daily.length) {
+        this.finish(state);
+        return false;
+      }
+      // One lookup per step: the current 20 items at each daily store in turn.
+      let slice = state.tier3Slice;
+      if (!slice || slice.storeIndex >= daily.length) {
+        const cursor = this.db.getMeta(`tier3:cursor:${this.retailer}`) ?? '';
+        let ids = this.tiers.tier3Batch(cursor, BATCH);
+        if (!ids.length && cursor) ids = this.tiers.tier3Batch('', BATCH); // wrap around
+        if (!ids.length) {
+          this.finish(state);
+          return false;
         }
-        const candidates = this.db.candidateItems(this.retailer);
-        this.saveList('candidates', candidates);
-        this.saveList('probeIds', []);
-        this.state = { ...state, phase: 'candidates', offset: 0, candidateTotal: candidates.length };
-        return true;
+        this.db.setMeta(`tier3:cursor:${this.retailer}`, ids.at(-1));
+        slice = { ids, storeIndex: 0 };
       }
-      const { found } = await this.source.storeLookup(ids, state.probeStore);
-      this.db.recordStorePrices(this.retailer, state.probeStore, found, date);
-      this.state = { ...state, offset: state.offset + ids.length, probeFound: state.probeFound + found.length };
+      const storeId = daily[slice.storeIndex];
+      const { found } = await this.source.storeLookup(slice.ids, storeId);
+      this.db.recordStorePrices(this.retailer, storeId, found, state.day);
+      this.state = {
+        ...state, tier3Slice: { ...slice, storeIndex: slice.storeIndex + 1 },
+        tier3Lookups: state.tier3Lookups + 1, rows: state.rows + found.length,
+      };
+      // Keep "Clearance near you" current while tier 3 runs (~every 7 minutes).
+      if ((state.tier3Lookups + 1) % 200 === 0) this.db.refreshMarkdowns(this.retailer);
       return true;
     }
+    return false;
+  }
 
-    // phase 'candidates': walk store by store through the candidate batches
-    const candidates = this.list('candidates');
-    const batches = Math.ceil(candidates.length / BATCH);
-    const total = batches * state.stores.length;
-    if (state.offset >= total) {
-      this.state = { ...state, phase: 'done', finishedAt: this.now().toISOString() };
-      // Count the day's markdowns once, for /api/walmart/discovery-stats.
-      this.db.setMeta(`markedDown:${this.retailer}:${date}`, this.db.markedDownCount(this.retailer, date));
-      console.log(`store check ${date}: ${candidates.length} candidates at ${state.stores.length} stores done`);
-      return false;
+  /** After checks: rebuild tier 3 on its day (or continue a rebuild), else go straight to tier 3 slices. */
+  tier3Phase(state, config) {
+    const key = `tier3:building:${this.retailer}`;
+    const building = this.db.getMeta(key);
+    const lastStarted = this.db.getMeta(`tier3:lastStarted:${this.retailer}`);
+    const due = StoreChecker.weekdayOf(state.day) === config.schedule.tier3RebuildDay && lastStarted !== state.day;
+    const neverBuilt = !this.tiers.builtRun(3) && !building;
+    if (!building && (due || neverBuilt)) {
+      const run = `${state.day}:t3`;
+      this.tiers.dropQueue(run);
+      this.tiers.startRun(run, {
+        tiers: [{ tier: 3, filterSets: [[]] }],
+        departments: config.departments,
+        queriesFor: (d) => config.departmentQueries[d] ?? [d.toLowerCase()],
+        baseFilters: config.baseFilters,
+      });
+      this.db.setMeta(key, run);
+      this.db.setMeta(`tier3:lastStarted:${this.retailer}`, state.day);
     }
-    const storeId = state.stores[Math.floor(state.offset / batches)];
-    const b = state.offset % batches;
-    const ids = candidates.slice(b * BATCH, b * BATCH + BATCH);
-    const { found } = await this.source.storeLookup(ids, storeId);
-    this.db.recordStorePrices(this.retailer, storeId, found, date);
-    this.state = { ...state, offset: state.offset + 1, candidateRows: state.candidateRows + found.length };
-    return true;
+    return this.db.getMeta(key) ? 'tier3build' : 'tier3';
+  }
+
+  finish(state) {
+    this.state = { ...state, phase: 'done', finishedAt: this.now().toISOString() };
+    this.db.refreshMarkdowns(this.retailer);
+    // Count the day's markdowns once, for /api/walmart/discovery-stats.
+    this.db.setMeta(`markedDown:${this.retailer}:${state.day}`, this.db.markedDownCount(this.retailer, state.day));
+    console.log(`store check ${state.day}: done (${state.lookups} check lookups, ${state.tier3Lookups} tier 3 lookups)`);
   }
 
   start() {
@@ -190,7 +303,7 @@ export class StoreChecker {
           await new Promise((r) => setTimeout(r, this.errorPauseMs));
           continue;
         }
-        // Calls are paced by the Walmart client's throttle; idle between cycles.
+        // Calls are paced by the Walmart client's throttle; idle when waiting.
         if (!worked) await new Promise((r) => setTimeout(r, this.idleMs));
       }
     };
@@ -199,24 +312,32 @@ export class StoreChecker {
 
   status() {
     const s = this.state;
-    if (!s) return { state: 'not started' };
-    const probeStores = s.probeStores ?? [s.probeStore];
-    const batches = Math.ceil((s.candidateTotal ?? 0) / BATCH);
+    if (!s || s.version !== 2) return { state: 'not started on the tier schedule yet' };
+    const { config } = this.loadConfig();
+    const segs = config ? this.segments(s, config).map((x) => x.name) : [];
+    const building = this.db.getMeta(`tier3:building:${this.retailer}`);
     return {
       day: s.day,
       phase: s.phase,
-      discovery: { searches: s.searches ?? 0, department: s.phase === 'discovery' ? s.dept + 1 : null, found: s.discovered ?? this.list('discovered').length },
-      probeStore: s.probeStore,
-      probeStores,
-      probe: s.phase === 'probe'
-        ? { store: (s.probeIndex ?? 0) + 1, ofStores: probeStores.length, checked: s.offset, of: s.probeTotal }
-        : { stores: probeStores.length, itemsPerStore: s.probeTotal, found: s.probeFound },
-      candidates: s.candidateTotal ?? 0,
-      candidateLookups: s.phase === 'candidates' ? { done: s.offset, of: batches * s.stores.length } : null,
-      candidateRows: s.candidateRows,
-      stores: s.stores?.length ?? 0,
+      lists: {
+        searches: s.searches, queued: this.tiers.queueSize(s.listRun),
+        tier1: s.tier1 ?? this.tiers.count(1), tier2: s.tier2 ?? this.tiers.count(2), doneAt: s.listsDoneAt,
+      },
+      checks: {
+        fullCheckStores: s.probeStores,
+        segment: s.phase === 'checks' ? `${s.segment + 1} of ${segs.length}: ${segs[s.segment] ?? '-'}` : null,
+        segmentItems: s.segmentTotal,
+        segmentLookupsDone: s.phase === 'checks' ? s.offset : null,
+        lookups: s.lookups, doneAt: s.checksDoneAt,
+      },
+      tier3: {
+        listItems: this.tiers.count(3),
+        rebuilding: building ? { run: building, queued: this.tiers.queueSize(building), found: this.tiers.count(3, building) } : null,
+        cursor: this.db.getMeta(`tier3:cursor:${this.retailer}`), lookupsToday: s.tier3Lookups,
+      },
+      storePricesSaved: s.rows,
       startedAt: s.startedAt,
-      finishedAt: s.finishedAt ?? null,
+      finishedAt: s.finishedAt,
       lastError: this.lastError,
     };
   }

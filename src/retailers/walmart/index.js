@@ -5,6 +5,7 @@ import { PoolStore } from '../../lib/poolStore.js';
 import { DEFAULT_SCAN_CONFIG_PATH, loadScanConfig } from '../../lib/scanConfig.js';
 import { SerpApiClient, StoreScanDb, StoreScanner } from './storeScan.js';
 import { StoreChecker } from './storeChecker.js';
+import { TierStore } from './tierLists.js';
 import { scheduleDayKey } from '../../lib/scanSchedule.js';
 import { walmartProductUrl } from './identifiers.js';
 import { STOCK_STATUS } from '../RetailerAdapter.js';
@@ -41,7 +42,9 @@ export class WalmartAdapter extends RetailerAdapter {
       }
       const loadConfig = () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH);
       // Refresh the product list once a day at schedule.productListAt (Chicago time).
+      // The daily tier lists replace the old bulk download once they've built a pool.
       const poolRefreshDue = (fetchedAt, now) => {
+        if (source.poolFromTiers) return false;
         const hour = loadConfig().config?.schedule?.productListHour ?? 4;
         return scheduleDayKey(new Date(fetchedAt), hour) !== scheduleDayKey(now, hour);
       };
@@ -63,9 +66,11 @@ export class WalmartAdapter extends RetailerAdapter {
       // Store-level prices for the stores in config/store-scan.json: free checks
       // through Walmart's item lookup, plus SerpApi discovery when a key is set.
       const storeDb = new StoreScanDb(tracker.db);
+      storeDb.ensureMarkdowns('walmart');
       adapter.storeDb = storeDb;
       adapter.loadStoreConfig = loadConfig;
-      adapter.storeChecker = new StoreChecker({ source, db: storeDb, loadConfig });
+      adapter.tierStore = new TierStore(storeDb);
+      adapter.storeChecker = new StoreChecker({ source, db: storeDb, tiers: adapter.tierStore, loadConfig });
       // SerpApi store searches only when turned on in the settings (useSerpApi).
       if (env.SERPAPI_KEY && loadConfig().config?.useSerpApi) {
         adapter.storeScanner = new StoreScanner({
@@ -240,14 +245,16 @@ export class WalmartAdapter extends RetailerAdapter {
     const scanned = new Set(db.scannedStores(this.id));
     const stores = (await this.source.stores(zip, { limit: 50 })).filter((s) => scanned.has(s.id));
     const storeById = new Map(stores.map((s) => [s.id, s]));
-    const rows = db.latestPrices(this.id, stores.map((s) => s.id));
-    return rows
-      .filter((r) => /^walmart(\.com)?$/i.test(r.seller ?? '') && r.price > 0 && r.in_stock !== 0 && isMarkedDown(r))
+    // Precomputed markdowns (Walmart Clearance flag, below was-price, or calculated
+    // clearance: cheaper than the item's highest price at another store).
+    return db.markdownRows(this.id, stores.map((s) => s.id))
+      .filter((r) => r.in_stock !== 0)
       .filter((r) => !category || r.department === category)
       .map((r) => {
         // Discounts use Walmart's own "was" price for that store (strike-through
-        // price). The default online offer is often another seller's or out of date.
-        const was = r.was_price > r.price ? r.was_price : null;
+        // price), else the highest price at another store. The default online
+        // offer is often another seller's or out of date.
+        const was = r.ref_price > r.price ? r.ref_price : null;
         const product = {
           retailer: this.id, id: r.item_id, sku: r.item_id, upc: null, name: r.title ?? `Item ${r.item_id}`,
           brand: null, category: r.department, imageUrl: r.image_url, url: walmartProductUrl(r.item_id),

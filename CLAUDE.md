@@ -22,9 +22,15 @@
   (`strikeThroughPrice`), matching SerpApi item for item. Up to 20 ids per call.
   `zipCode` alone does nothing. The bulk feeds ignore `storeId`.
 - **Walmart `/search`** (free) takes `facet=on` and repeated `facet.filter`
-  (e.g. `special_offers:Clearance` and `retailer_type:Walmart`), 25 per page,
-  paged with `start`. It ignores `storeId` and `categoryId`; the query text
-  drives results. Used for daily discovery; the store lookup confirms each item.
+  (`special_offers:Clearance|Rollback|Reduced Price`, `retailer_type:Walmart`,
+  `fulfillment_method:In-store`), 25 per page, paged with `start`, which must be
+  under 1,000 (so at most 1,000 results per search). `facet.range=price:[lo TO hi]`
+  works with whole dollars only. It ignores `storeId` and `categoryId`; the query
+  text drives results (department names fail for e.g. "auto & tires"). Builds
+  the daily tier lists; the store lookup confirms each item.
+- Synchronous SQLite blocks the whole server: anything a page calls must stay
+  fast at production size (800k+ current prices). Time new queries on a
+  realistic test database before pushing; a 28s query got the site restarted.
 - `storeId` on `/items` is undocumented (docs list only `ids`, `upc`,
   `publisherId`), so it could change without notice.
 - **SerpApi** (paid, now off via `useSerpApi`): `engine=walmart` with `store_id`

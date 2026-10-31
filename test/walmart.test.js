@@ -432,6 +432,7 @@ test('store scan prices feed Clearance near you and the stock check', async () =
     getById: async () => product,
     inventory: async (p) => stores.map((store) => ({ store, price: p.price, quantity: null, status: 'unknown', aisle: null, clearance: false })),
   };
+  db.refreshMarkdowns('walmart');
   const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
   adapter.storeScanner = { db };
   assert.equal(adapter.features.localClearance, true);
@@ -493,6 +494,7 @@ test('items Walmart sells in a scanned store are allowed even when a marketplace
     getById: async (id) => (id === '673610207' ? online : other),
     stores: async () => [{ retailer: 'walmart', id: '573', name: "Lee's Summit Supercenter" }],
   };
+  db.refreshMarkdowns('walmart');
   const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
   adapter.storeScanner = { db, loadConfig: () => ({ config: { stores: [{ id: '573', label: "Lee's Summit, Sam Walton Ln" }] } }) };
   const routes = createRoutes(new RetailerRegistry().register(adapter));
@@ -515,63 +517,6 @@ test('items Walmart sells in a scanned store are allowed even when a marketplace
   const [deal] = await adapter.getLocalClearance('64081');
   assert.equal(deal.discountPercent, 0, 'no was price: no made-up discount against another seller');
   assert.equal(deal.product.price, 0.64);
-});
-
-test('store checker: probes the pool at one store, then checks candidates at every store', async () => {
-  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
-  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
-  const db = new StoreScanDb(new PriceTracker().db);
-  const pool = Array.from({ length: 45 }, (_, i) => ({ id: String(i + 1), price: 10 }));
-  const calls = [];
-  // Item 7 is on clearance at every store; item 30 only shows a was-price at store B.
-  const source = {
-    poolLoading: false,
-    dealCandidates: async () => pool,
-    storeLookup: async (ids, storeId) => {
-      calls.push(`${storeId}:${ids.length}`);
-      return {
-        found: ids.map((id) => ({
-          itemId: id, title: `Item ${id}`, price: id === '7' ? 3 : 10, seller: 'Walmart.com', inStock: true,
-          clearance: id === '7', wasPrice: id === '30' && storeId === 'B' ? 15 : id === '7' ? 12 : null,
-        })),
-        missing: [],
-      };
-    },
-  };
-  let clock = new Date('2026-11-04T15:00:00Z');
-  const config = { stores: [{ id: 'A' }, { id: 'B' }, { id: 'C' }] };
-  const checker = new StoreChecker({ source, db, now: () => clock, loadConfig: () => ({ config, errors: [] }) });
-  while (await checker.step());
-  const status = checker.status();
-  assert.equal(status.phase, 'done');
-  const probe = status.probeStore;
-  // probe: 45 items in batches of 20 at the probe store
-  assert.deepEqual(calls.slice(0, 3), [`${probe}:20`, `${probe}:20`, `${probe}:5`]);
-  // candidates = what the probe found marked down (item 7, plus 30 if B was probed): one lookup per store
-  const candidateCalls = calls.slice(3);
-  assert.equal(candidateCalls.length, 3);
-  assert.deepEqual(db.candidateItems('walmart').sort(), probe === 'B' ? ['30', '7'] : ['7']);
-  const atC = db.latestPrices('walmart', ['C'], { itemId: '7' })[0];
-  assert.equal(atC.clearance, 1);
-  assert.equal(atC.was_price, 12);
-  assert.equal(atC.source, 'walmart-api');
-  // Same day: nothing more to do. Next day: a new cycle at the next store.
-  assert.equal(await checker.step(), false);
-  clock = new Date('2026-11-05T15:00:00Z');
-  assert.equal(await checker.step(), true);
-  assert.notEqual(checker.status().probeStore, probe);
-});
-
-test('store checker waits for the deal pool after a restart', async () => {
-  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
-  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
-  const db = new StoreScanDb(new PriceTracker().db);
-  const checker = new StoreChecker({
-    source: { poolLoading: true, dealCandidates: async () => [], storeLookup: async () => ({ found: [], missing: [] }) },
-    db, loadConfig: () => ({ config: { stores: [{ id: 'A' }] }, errors: [] }),
-  });
-  assert.equal(await checker.step(), false);
-  assert.equal(checker.status().state, 'not started');
 });
 
 test('isMarkedDown: Clearance flag, was-price, or an early clearance-only SerpApi row', async () => {
@@ -597,26 +542,6 @@ test('daily stores every day, plus rotating stores taking turns', async () => {
   // over consecutive days the rotation covers every other store
   const rotated = new Set(plans.flatMap((p) => p.slice(3)));
   assert.equal(rotated.size, 5);
-});
-
-test('changing restartChecks restarts today\'s cycle once', async () => {
-  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
-  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
-  const db = new StoreScanDb(new PriceTracker().db);
-  const looked = [];
-  let restartChecks = null;
-  const checker = new StoreChecker({
-    db, now: () => new Date('2026-11-04T15:00:00Z'),
-    source: { poolLoading: false, dealCandidates: async () => [{ id: '1', price: 5 }], storeLookup: async (ids, store) => { looked.push(store); return { found: [], missing: [] }; } },
-    loadConfig: () => ({ config: { stores: [{ id: 'A' }, { id: 'B' }], dailyStores: ['A'], rotatingStoresPerDay: 0, restartChecks }, errors: [] }),
-  });
-  while (await checker.step());
-  assert.deepEqual(looked, ['A']);
-  restartChecks = 'now';
-  while (await checker.step());
-  assert.deepEqual(looked, ['A', 'A'], 'probed again after the restart');
-  while (await checker.step());
-  assert.deepEqual(looked, ['A', 'A'], 'only once per value');
 });
 
 test('the deal pool is saved, so a restart reuses it instead of refetching', async () => {
@@ -656,60 +581,6 @@ test('the deal pool is saved, so a restart reuses it instead of refetching', asy
   assert.equal(fetches, 2);
 });
 
-test('discovery searches each department, then its finds join the store probes', async () => {
-  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
-  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
-  const db = new StoreScanDb(new PriceTracker().db);
-  const searches = [];
-  const probed = new Set();
-  const source = {
-    poolLoading: false, poolRefreshing: false,
-    dealCandidates: async () => [{ id: 'pool1', price: 5 }],
-    // "toys" has 2 pages of results, "home" 1
-    searchClearance: async ({ query, start, filters }) => {
-      searches.push(`${query}@${start}`);
-      assert.deepEqual(filters, ['special_offers:Clearance', 'retailer_type:Walmart']);
-      if (query === 'toys') return start === 1 ? { ids: ['t1', 't2'], total: 30 } : { ids: ['t3', 't1'], total: 30 };
-      return { ids: ['h1'], total: 1 };
-    },
-    storeLookup: async (ids, store) => { ids.forEach((id) => probed.add(id)); return { found: [], missing: [] }; },
-  };
-  const checker = new StoreChecker({
-    source, db, now: () => new Date('2026-11-04T12:00:00Z'), // 6am Chicago
-    loadConfig: () => ({ config: {
-      stores: [{ id: 'A' }], dailyStores: ['A'], rotatingStoresPerDay: 0,
-      departments: ['Toys', 'Home'], filters: ['special_offers:Clearance', 'retailer_type:Walmart'],
-      discoveryMaxPages: 5, schedule: { storeChecksHour: 5 },
-    }, errors: [] }),
-  });
-  while (await checker.step());
-  assert.deepEqual(searches, ['toys@1', 'toys@26', 'home@1']);
-  assert.deepEqual([...probed].sort(), ['h1', 'pool1', 't1', 't2', 't3']);
-  const status = checker.status();
-  assert.equal(status.discovery.searches, 3);
-  assert.equal(status.discovery.found, 4);
-});
-
-test('the store-check day starts at 5am and waits for the morning product-list refresh', async () => {
-  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
-  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
-  const { scheduleDayKey } = await import('../src/lib/scanSchedule.js');
-  // 4:30am Chicago on Nov 5 still belongs to the Nov 4 cycle; 5:30am starts Nov 5.
-  assert.equal(scheduleDayKey(new Date('2026-11-05T10:30:00Z'), 5), '2026-11-04');
-  assert.equal(scheduleDayKey(new Date('2026-11-05T11:30:00Z'), 5), '2026-11-05');
-
-  const db = new StoreScanDb(new PriceTracker().db);
-  const source = { poolLoading: false, poolRefreshing: true, dealCandidates: async () => [{ id: '1', price: 5 }], storeLookup: async () => ({ found: [], missing: [] }) };
-  const checker = new StoreChecker({
-    source, db, now: () => new Date('2026-11-05T11:30:00Z'),
-    loadConfig: () => ({ config: { stores: [{ id: 'A' }], schedule: { storeChecksHour: 5 } }, errors: [] }),
-  });
-  assert.equal(await checker.step(), false, 'refresh still running: wait');
-  source.poolRefreshing = false;
-  assert.equal(await checker.step(), true);
-  assert.equal(checker.status().day, '2026-11-05');
-});
-
 test('the product list refreshes once a day at the scheduled time', async () => {
   const { scheduleDayKey } = await import('../src/lib/scanSchedule.js');
   const due = (fetchedAt, now) => scheduleDayKey(new Date(fetchedAt), 4) !== scheduleDayKey(now, 4);
@@ -737,32 +608,22 @@ test('searchClearance keeps only Walmart-sold results and passes repeated filter
   assert.equal(seen.searchParams.get('facet'), 'on');
 });
 
-test('discovery yield: new vs already listed, and marked down at a store', async () => {
+
+test('Clearance near you includes calculated clearance: cheaper at one store than another', async () => {
   const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
-  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
-  const db = new StoreScanDb(new PriceTracker().db);
-  // Toys page 1: t1 (already listed), t2 (new); page 2: t3 (new). t2 and t1 are marked down at the store.
-  const source = {
-    poolLoading: false, poolRefreshing: false,
-    dealCandidates: async () => [{ id: 't1', price: 5 }],
-    searchClearance: async ({ start }) => (start === 1 ? { ids: ['t1', 't2'], total: 30 } : { ids: ['t3'], total: 30 }),
-    storeLookup: async (ids) => ({
-      found: ids.map((id) => ({ itemId: id, price: 4, seller: 'Walmart.com', clearance: id !== 't3', wasPrice: null, inStock: true })),
-      missing: [],
-    }),
-  };
-  const checker = new StoreChecker({
-    source, db, now: () => new Date('2026-11-04T12:00:00Z'),
-    loadConfig: () => ({ config: {
-      stores: [{ id: 'A' }], dailyStores: ['A'], rotatingStoresPerDay: 0, departments: ['Toys'],
-      filters: ['special_offers:Clearance'], discoveryMaxPages: 5, schedule: { storeChecksHour: 5 },
-    }, errors: [] }),
-  });
-  while (await checker.step());
-  const y = db.discoveryYield('walmart', '2026-11-01');
-  assert.deepEqual(y.days, [{ day: '2026-11-04', found: 3, new: 2, markedDown: 2, markedDownNew: 1, markedDownAllSources: 2 }]);
-  assert.deepEqual(y.byDepartment[0].pages, [
-    { page: 1, found: 2, new: 1, markedDown: 2, markedDownNew: 1 },
-    { page: 2, found: 1, new: 1, markedDown: 0, markedDownNew: 0 },
-  ]);
+  const tracker = new PriceTracker();
+  const db = new StoreScanDb(tracker.db);
+  const today = new Date().toISOString().slice(0, 10);
+  // No Clearance flag or was-price anywhere: $22.98 at 4590 vs $28.98 at 573.
+  db.recordStorePrices('walmart', '573', [{ itemId: '577366430', price: 28.98, seller: 'Walmart.com', clearance: false, inStock: true }], today);
+  db.recordStorePrices('walmart', '4590', [{ itemId: '577366430', price: 22.98, seller: 'Walmart.com', clearance: false, inStock: true }], today);
+  db.refreshMarkdowns('walmart');
+  const source = { stores: async () => [{ id: '573', name: 'Lee' }, { id: '4590', name: 'Lee SW' }] };
+  const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
+  adapter.storeDb = db;
+  const deals = await adapter.getLocalClearance('64081');
+  assert.equal(deals.length, 1);
+  assert.equal(deals[0].store.id, '4590');
+  assert.equal(deals[0].product.msrp, 28.98);
+  assert.equal(deals[0].discountPercent, 21);
 });

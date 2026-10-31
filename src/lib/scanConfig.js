@@ -49,10 +49,27 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
     productListAt: raw.schedule?.productListAt ?? '04:00',
     storeChecksAt: raw.schedule?.storeChecksAt ?? '05:00',
   };
+  schedule.endAt = raw.schedule?.endAt ?? '20:00';
+  schedule.tier3RebuildDay = raw.schedule?.tier3RebuildDay ?? 'Monday';
   const productListHour = parseClock(schedule.productListAt, null);
   const storeChecksHour = parseClock(schedule.storeChecksAt, null);
+  const endHour = parseClock(schedule.endAt, null);
   if (productListHour === null) errors.push('"schedule.productListAt" should be a time like "04:00"');
   if (storeChecksHour === null) errors.push('"schedule.storeChecksAt" should be a time like "05:00"');
+  if (endHour === null) errors.push('"schedule.endAt" should be a time like "20:00"');
+  const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  if (!WEEKDAYS.includes(schedule.tier3RebuildDay)) errors.push('"schedule.tier3RebuildDay" should be a weekday like "Monday"');
+  // Tier lists from Walmart's search: every search gets baseFilters, plus one filter set per tier entry.
+  const baseFilters = Array.isArray(raw.baseFilters) ? raw.baseFilters.map(String) : ['retailer_type:Walmart', 'fulfillment_method:In-store'];
+  const tierFilters = {
+    1: raw.tiers?.['1'] ?? ['special_offers:Clearance'],
+    2: raw.tiers?.['2'] ?? ['special_offers:Rollback', 'special_offers:Reduced Price'],
+  };
+  for (const f of [...baseFilters, ...tierFilters[1], ...tierFilters[2]]) {
+    if (!/^[a-z_]+:.+$/.test(f)) errors.push(`Filter ${JSON.stringify(f)} should look like "special_offers:Clearance"`);
+  }
+  // Search words per department (Walmart's search needs text); default: the department name.
+  const departmentQueries = raw.departmentQueries && typeof raw.departmentQueries === 'object' ? raw.departmentQueries : {};
   const discoveryMaxPages = raw.discoveryMaxPages == null ? 20 : Number(raw.discoveryMaxPages);
   if (!(Number.isInteger(discoveryMaxPages) && discoveryMaxPages >= 0)) errors.push('"discoveryMaxPages" should be a whole number, 0 or more');
   const maxPages = raw.maxPages == null ? 1 : Number(raw.maxPages);
@@ -66,7 +83,13 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
       zips: Array.isArray(raw.zips) ? raw.zips.map(String) : raw.zip ? [String(raw.zip)] : [],
       stores: stores.map((s) => ({ id: String(s.id), label: s.label ?? null })),
       discoveryStores,
-      schedule: { ...schedule, productListHour: productListHour ?? 4, storeChecksHour: storeChecksHour ?? 5 },
+      schedule: {
+        ...schedule, productListHour: productListHour ?? 4, storeChecksHour: storeChecksHour ?? 5, endHour: endHour ?? 20,
+        tier3RebuildDay: WEEKDAYS.includes(schedule.tier3RebuildDay) ? schedule.tier3RebuildDay : 'Monday',
+      },
+      baseFilters,
+      tierFilters,
+      departmentQueries,
       discoveryMaxPages: Number.isInteger(discoveryMaxPages) && discoveryMaxPages >= 0 ? discoveryMaxPages : 20,
       // SerpApi store searches (paid); off now that Walmart's free search does discovery.
       useSerpApi: raw.useSerpApi === true,

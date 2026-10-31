@@ -8,6 +8,8 @@ import { allowanceSoFar, localParts, monthPlan } from '../../lib/scanSchedule.js
 const SERPAPI_URL = 'https://serpapi.com';
 export const RESULTS_PER_PAGE = 40; // SerpApi Walmart search page size
 const PRICE_DAYS = 14; // store prices older than this aren't shown, and history is pruned
+// "Calculated clearance": a store at least this much below the item's highest price at other stores.
+export const CALC_CLEARANCE_GAP = 0.02;
 // Price columns with title/image/department from store_items when the row has none.
 const PRICE_COLUMNS = `p.retailer, p.store_id, p.item_id, p.date, p.price, p.was_price, p.in_stock, p.seller,
   p.online_price, p.online_seller, p.clearance, p.source, p.url,
@@ -166,6 +168,18 @@ export class StoreScanDb {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (retailer, store_id, item_id) DO UPDATE SET date = excluded.date, ${updates.replaceAll('%T', 'store_latest')}
       WHERE excluded.date >= store_latest.date`);
+    // Only the marked-down current prices, rebuilt by refreshMarkdowns(): what
+    // "Clearance near you" and the daily candidate lists read, instead of
+    // scanning every current price (11s at 800k rows).
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS store_markdowns (
+        retailer TEXT NOT NULL, store_id TEXT NOT NULL, item_id TEXT NOT NULL, date TEXT NOT NULL,
+        price REAL NOT NULL, ref_price REAL, in_stock INTEGER,
+        kind TEXT NOT NULL, -- 'flag' (Walmart Clearance), 'was' (below was-price), 'calc' (cheaper than another store)
+        PRIMARY KEY (retailer, store_id, item_id)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS store_markdowns_by_item ON store_markdowns (retailer, item_id);
+    `);
     // One-time fill from history saved before store_latest existed.
     if (!db.prepare('SELECT 1 FROM store_latest LIMIT 1').get() && db.prepare('SELECT 1 FROM store_prices LIMIT 1').get()) {
       db.exec(`INSERT INTO store_latest SELECT p.retailer, p.store_id, p.item_id, p.date, p.price, p.was_price, p.in_stock,
@@ -173,6 +187,13 @@ export class StoreScanDb {
         FROM store_prices p JOIN (SELECT retailer, store_id, item_id, MAX(date) d FROM store_prices GROUP BY retailer, store_id, item_id) l
           ON p.retailer = l.retailer AND p.store_id = l.store_id AND p.item_id = l.item_id AND p.date = l.d`);
     }
+  }
+
+  /** Fill store_markdowns at startup if it's empty but prices exist (e.g. right after this table was added). */
+  ensureMarkdowns(retailer) {
+    const has = this.db.prepare('SELECT 1 FROM store_markdowns WHERE retailer = ? LIMIT 1').get(retailer);
+    const prices = this.db.prepare('SELECT 1 FROM store_latest WHERE retailer = ? LIMIT 1').get(retailer);
+    if (!has && prices) this.refreshMarkdowns(retailer);
   }
 
   /** Save one price row to the daily history and the latest-price table. */
@@ -330,6 +351,7 @@ export class StoreScanDb {
     const day = (n) => new Date(now - n * 86400000).toISOString().slice(0, 10);
     this.db.prepare('DELETE FROM store_prices WHERE date < ?').run(day(PRICE_DAYS));
     this.db.prepare('DELETE FROM store_latest WHERE date < ?').run(day(PRICE_DAYS));
+    this.db.prepare('DELETE FROM store_markdowns WHERE date < ?').run(day(PRICE_DAYS));
     this.db.prepare('DELETE FROM discovery_finds WHERE day < ?').run(day(60));
   }
 
@@ -340,10 +362,54 @@ export class StoreScanDb {
     return Math.round((pages * size) / 1048576);
   }
 
-  candidateItems(retailer, { days = PRICE_DAYS, now = Date.now() } = {}) {
+  /** Items marked down at any store (any kind), from store_markdowns. */
+  candidateItems(retailer) {
+    return this.db.prepare('SELECT DISTINCT item_id FROM store_markdowns WHERE retailer = ?').all(retailer).map((r) => r.item_id);
+  }
+
+  /**
+   * Rebuild store_markdowns from the current prices: Walmart-sold, priced, and
+   * flagged Clearance at that store, below that store's was-price, or
+   * "calculated clearance" (at least CALC_CLEARANCE_GAP below the item's
+   * highest current price at any store). ~1-2s at 800k prices; runs in the
+   * background a few times an hour while checks run.
+   */
+  refreshMarkdowns(retailer, { days = PRICE_DAYS, now = Date.now() } = {}) {
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
-    return this.db.prepare(`SELECT DISTINCT item_id FROM store_latest
-      WHERE retailer = ? AND date >= ? AND (clearance = 1 OR was_price > price)`).all(retailer, since).map((r) => r.item_id);
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('DELETE FROM store_markdowns WHERE retailer = ?').run(retailer);
+      this.db.prepare(`INSERT INTO store_markdowns (retailer, store_id, item_id, date, price, ref_price, in_stock, kind)
+        WITH cur AS (
+          SELECT * FROM store_latest WHERE retailer = ? AND date >= ? AND price > 0 AND lower(seller) IN ('walmart', 'walmart.com')),
+        top AS (SELECT item_id, MAX(price) hi, COUNT(*) n FROM cur GROUP BY item_id)
+        SELECT c.retailer, c.store_id, c.item_id, c.date, c.price,
+          CASE WHEN c.was_price > c.price THEN c.was_price WHEN t.n >= 2 AND c.price < t.hi * ? THEN t.hi END,
+          c.in_stock,
+          CASE WHEN c.clearance = 1 THEN 'flag' WHEN c.was_price > c.price THEN 'was' ELSE 'calc' END
+        FROM cur c JOIN top t ON t.item_id = c.item_id
+        WHERE c.clearance = 1 OR c.was_price > c.price OR (t.n >= 2 AND c.price < t.hi * ?)`)
+        .run(retailer, since, 1 - CALC_CLEARANCE_GAP, 1 - CALC_CLEARANCE_GAP);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
+  /** Marked-down rows at the given stores, with item title/image/department. */
+  markdownRows(retailer, storeIds) {
+    if (!storeIds.length) return [];
+    const marks = storeIds.map(() => '?').join(',');
+    return this.db.prepare(`SELECT m.*, i.title, i.image_url, i.department FROM store_markdowns m
+      LEFT JOIN store_items i ON i.retailer = m.retailer AND i.item_id = m.item_id
+      WHERE m.retailer = ? AND m.store_id IN (${marks})`).all(retailer, ...storeIds);
+  }
+
+  /** Store-level markdowns: Walmart's Clearance flag at some store, or calculated clearance. */
+  storeLevelItems(retailer) {
+    return this.db.prepare(`SELECT DISTINCT item_id FROM store_markdowns WHERE retailer = ? AND kind IN ('flag', 'calc')`)
+      .all(retailer).map((r) => r.item_id);
   }
 
   /** Stores where the scan found Walmart itself selling an item (latest per store, last `days` days). */
@@ -624,6 +690,7 @@ export class StoreScanner {
         // Searches filtered to Walmart's Clearance listings: every result is clearance.
         clearance: config.filters.includes('special_offers:Clearance') ? 1 : null,
       });
+      this.db.refreshMarkdowns(this.retailer);
       this.db.setMeta('testedSettings', settingsKeyOf(config));
       return { ran: true, ...job, results: results.length };
     } catch (err) {
