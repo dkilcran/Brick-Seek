@@ -423,7 +423,7 @@ export class StoreScanDb {
   /** Stores where the scan found Walmart itself selling an item (latest per store, last `days` days). */
   walmartStoreOffers(retailer, itemId, { days = PRICE_DAYS, now = Date.now() } = {}) {
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
-    return this.db.prepare(`SELECT ${PRICE_COLUMNS} FROM store_latest p ${ITEM_JOIN}
+    return this.db.prepare(`SELECT ${PRICE_COLUMNS} FROM store_latest p INDEXED BY store_latest_by_item ${ITEM_JOIN}
       WHERE p.retailer = ? AND p.item_id = ? AND p.date >= ? AND lower(p.seller) IN ('walmart', 'walmart.com')
       ORDER BY p.price`).all(retailer, String(itemId), since);
   }
@@ -436,7 +436,7 @@ export class StoreScanDb {
     const row = this.db.prepare(`SELECT MIN(p.price) min_price, COUNT(*) stores, MAX(p.date) seen_on,
         COALESCE(MAX(p.title), i.title) title, COALESCE(MAX(p.image_url), i.image_url) image_url,
         COALESCE(MAX(p.department), i.department) department
-      FROM store_latest p ${ITEM_JOIN}
+      FROM store_latest p INDEXED BY store_latest_by_item ${ITEM_JOIN}
       WHERE p.retailer = ? AND p.item_id = ? AND lower(p.seller) IN ('walmart', 'walmart.com')`).get(retailer, String(itemId));
     return row?.stores ? row : null;
   }
@@ -471,7 +471,11 @@ export class StoreScanDb {
 
   /** Store ids that have any recent prices. */
   scannedStores(retailer) {
-    return this.db.prepare('SELECT DISTINCT store_id FROM store_latest WHERE retailer = ?').all(retailer).map((r) => r.store_id);
+    // Hop from store to store along the primary key instead of reading every price row.
+    const next = this.db.prepare('SELECT store_id FROM store_latest WHERE retailer = ? AND store_id > ? ORDER BY store_id LIMIT 1');
+    const ids = [];
+    for (let row = next.get(retailer, ''); row; row = next.get(retailer, row.store_id)) ids.push(row.store_id);
+    return ids;
   }
 
   /** A random sample of current store prices. */
