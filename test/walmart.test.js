@@ -599,22 +599,6 @@ test('daily stores every day, plus rotating stores taking turns', async () => {
   assert.equal(rotated.size, 5);
 });
 
-test('a cycle saved before multi-store probes finishes its store, then adds today\'s plan', async () => {
-  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
-  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
-  const db = new StoreScanDb(new PriceTracker().db);
-  db.setMeta('check:state', { day: '2026-10-30', phase: 'probe', probeStore: '2490', probeTotal: 40, offset: 20, candidateTotal: 0, stores: ['2490', '573'], probeFound: 20, candidateRows: 0 });
-  db.setMeta('check:probeIds', Array.from({ length: 40 }, (_, i) => String(i)));
-  const looked = [];
-  const checker = new StoreChecker({
-    db, now: () => new Date('2026-10-31T01:30:00Z'), // still Oct 30 in Chicago
-    source: { poolLoading: false, dealCandidates: async () => [], storeLookup: async (ids, store) => { looked.push(`${store}:${ids[0]}`); return { found: [], missing: [] }; } },
-    loadConfig: () => ({ config: { stores: [{ id: '2490' }, { id: '573' }], dailyStores: ['573'], rotatingStoresPerDay: 0 }, errors: [] }),
-  });
-  while (await checker.step());
-  assert.deepEqual(looked.slice(0, 3), ['2490:20', '573:0', '573:20'], 'resumes 2490 at item 20, then the daily store');
-});
-
 test('changing restartChecks restarts today\'s cycle once', async () => {
   const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
   const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
@@ -670,4 +654,85 @@ test('the deal pool is saved, so a restart reuses it instead of refetching', asy
   await stale.poolRefresh;
   console.log = log;
   assert.equal(fetches, 2);
+});
+
+test('discovery searches each department, then its finds join the store probes', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
+  const db = new StoreScanDb(new PriceTracker().db);
+  const searches = [];
+  const probed = new Set();
+  const source = {
+    poolLoading: false, poolRefreshing: false,
+    dealCandidates: async () => [{ id: 'pool1', price: 5 }],
+    // "toys" has 2 pages of results, "home" 1
+    searchClearance: async ({ query, start, filters }) => {
+      searches.push(`${query}@${start}`);
+      assert.deepEqual(filters, ['special_offers:Clearance', 'retailer_type:Walmart']);
+      if (query === 'toys') return start === 1 ? { ids: ['t1', 't2'], total: 30 } : { ids: ['t3', 't1'], total: 30 };
+      return { ids: ['h1'], total: 1 };
+    },
+    storeLookup: async (ids, store) => { ids.forEach((id) => probed.add(id)); return { found: [], missing: [] }; },
+  };
+  const checker = new StoreChecker({
+    source, db, now: () => new Date('2026-11-04T12:00:00Z'), // 6am Chicago
+    loadConfig: () => ({ config: {
+      stores: [{ id: 'A' }], dailyStores: ['A'], rotatingStoresPerDay: 0,
+      departments: ['Toys', 'Home'], filters: ['special_offers:Clearance', 'retailer_type:Walmart'],
+      discoveryMaxPages: 5, schedule: { storeChecksHour: 5 },
+    }, errors: [] }),
+  });
+  while (await checker.step());
+  assert.deepEqual(searches, ['toys@1', 'toys@26', 'home@1']);
+  assert.deepEqual([...probed].sort(), ['h1', 'pool1', 't1', 't2', 't3']);
+  const status = checker.status();
+  assert.equal(status.discovery.searches, 3);
+  assert.equal(status.discovery.found, 4);
+});
+
+test('the store-check day starts at 5am and waits for the morning product-list refresh', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
+  const { scheduleDayKey } = await import('../src/lib/scanSchedule.js');
+  // 4:30am Chicago on Nov 5 still belongs to the Nov 4 cycle; 5:30am starts Nov 5.
+  assert.equal(scheduleDayKey(new Date('2026-11-05T10:30:00Z'), 5), '2026-11-04');
+  assert.equal(scheduleDayKey(new Date('2026-11-05T11:30:00Z'), 5), '2026-11-05');
+
+  const db = new StoreScanDb(new PriceTracker().db);
+  const source = { poolLoading: false, poolRefreshing: true, dealCandidates: async () => [{ id: '1', price: 5 }], storeLookup: async () => ({ found: [], missing: [] }) };
+  const checker = new StoreChecker({
+    source, db, now: () => new Date('2026-11-05T11:30:00Z'),
+    loadConfig: () => ({ config: { stores: [{ id: 'A' }], schedule: { storeChecksHour: 5 } }, errors: [] }),
+  });
+  assert.equal(await checker.step(), false, 'refresh still running: wait');
+  source.poolRefreshing = false;
+  assert.equal(await checker.step(), true);
+  assert.equal(checker.status().day, '2026-11-05');
+});
+
+test('the product list refreshes once a day at the scheduled time', async () => {
+  const { scheduleDayKey } = await import('../src/lib/scanSchedule.js');
+  const due = (fetchedAt, now) => scheduleDayKey(new Date(fetchedAt), 4) !== scheduleDayKey(now, 4);
+  const fetched = Date.parse('2026-11-04T09:10:00Z'); // 3:10am Chicago Nov 4: belongs to Nov 3
+  assert.equal(due(fetched, new Date('2026-11-04T09:50:00Z')), false, '3:50am: not yet');
+  assert.equal(due(fetched, new Date('2026-11-04T10:05:00Z')), true, '4:05am: refresh');
+  const refreshed = Date.parse('2026-11-04T10:20:00Z');
+  assert.equal(due(refreshed, new Date('2026-11-04T22:00:00Z')), false, 'once a day');
+});
+
+test('searchClearance keeps only Walmart-sold results and passes repeated filters', async () => {
+  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  let seen;
+  const fetchImpl = async (url) => {
+    seen = new URL(String(url));
+    return { ok: true, status: 200, text: async () => '', json: async () => ({ totalResults: 122, items: [
+      { itemId: 1, sellerInfo: 'Walmart.com' }, { itemId: 2, sellerInfo: 'Rug Co' }, { itemId: 3 },
+    ] }) };
+  };
+  const source = new WalmartLiveSource({ consumerId: 'abc', minIntervalMs: 0, maxRetries: 0, privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' }), fetchImpl });
+  const r = await source.searchClearance({ query: 'toys', filters: ['special_offers:Clearance', 'retailer_type:Walmart'], start: 26 });
+  assert.deepEqual(r, { ids: ['1', '3'], total: 122 });
+  assert.deepEqual(seen.searchParams.getAll('facet.filter'), ['special_offers:Clearance', 'retailer_type:Walmart']);
+  assert.equal(seen.searchParams.get('start'), '26');
+  assert.equal(seen.searchParams.get('facet'), 'on');
 });

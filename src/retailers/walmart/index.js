@@ -5,6 +5,7 @@ import { PoolStore } from '../../lib/poolStore.js';
 import { DEFAULT_SCAN_CONFIG_PATH, loadScanConfig } from '../../lib/scanConfig.js';
 import { SerpApiClient, StoreScanDb, StoreScanner } from './storeScan.js';
 import { StoreChecker } from './storeChecker.js';
+import { scheduleDayKey } from '../../lib/scanSchedule.js';
 import { walmartProductUrl } from './identifiers.js';
 import { STOCK_STATUS } from '../RetailerAdapter.js';
 import { WalmartDemoSource } from './demoSource.js';
@@ -38,6 +39,12 @@ export class WalmartAdapter extends RetailerAdapter {
       if (!hasKeys) {
         throw new Error('WALMART_MODE=live needs WALMART_CONSUMER_ID and WALMART_PRIVATE_KEY or WALMART_PRIVATE_KEY_PATH');
       }
+      const loadConfig = () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH);
+      // Refresh the product list once a day at schedule.productListAt (Chicago time).
+      const poolRefreshDue = (fetchedAt, now) => {
+        const hour = loadConfig().config?.schedule?.productListHour ?? 4;
+        return scheduleDayKey(new Date(fetchedAt), hour) !== scheduleDayKey(now, hour);
+      };
       const source = new WalmartLiveSource({
         consumerId: env.WALMART_CONSUMER_ID,
         keyVersion: env.WALMART_KEY_VERSION ?? '1',
@@ -49,16 +56,18 @@ export class WalmartAdapter extends RetailerAdapter {
         poolRefreshMs: Number(env.WALMART_POOL_REFRESH_MINUTES) * 60000 || undefined,
         itemChecks: new ItemChecks(tracker.db),
         poolStore: new PoolStore(tracker.db),
+        // An explicit WALMART_POOL_REFRESH_MINUTES keeps the old interval behavior.
+        poolRefreshDue: env.WALMART_POOL_REFRESH_MINUTES ? undefined : poolRefreshDue,
       });
       const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
       // Store-level prices for the stores in config/store-scan.json: free checks
       // through Walmart's item lookup, plus SerpApi discovery when a key is set.
-      const loadConfig = () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH);
       const storeDb = new StoreScanDb(tracker.db);
       adapter.storeDb = storeDb;
       adapter.loadStoreConfig = loadConfig;
       adapter.storeChecker = new StoreChecker({ source, db: storeDb, loadConfig });
-      if (env.SERPAPI_KEY) {
+      // SerpApi store searches only when turned on in the settings (useSerpApi).
+      if (env.SERPAPI_KEY && loadConfig().config?.useSerpApi) {
         adapter.storeScanner = new StoreScanner({
           client: new SerpApiClient({ apiKey: env.SERPAPI_KEY }),
           db: storeDb,

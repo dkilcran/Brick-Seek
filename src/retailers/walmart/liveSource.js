@@ -104,6 +104,7 @@ export class WalmartLiveSource {
   constructor({
     consumerId, keyVersion = '1', privateKey, privateKeyPath, publisherId, fetchImpl = fetch,
     poolPages = 3, poolRefreshMs = 24 * 60 * 60 * 1000, poolMaxItems = 20000, poolStore = null,
+    poolRefreshDue = null,
     minIntervalMs = 2000, maxRetries = 3, retryPassDelayMs = 30000,
     itemChecks = null,
   } = {}) {
@@ -121,6 +122,8 @@ export class WalmartLiveSource {
     /** @type {import('../../lib/poolStore.js').PoolStore|null} saved copy, so restarts don't refetch */
     this.poolStore = poolStore;
     this.triedSavedPool = false;
+    /** @type {(fetchedAt: number, now: Date) => boolean} when a saved pool needs refreshing; default: older than poolRefreshMs */
+    this.poolRefreshDue = poolRefreshDue ?? ((fetchedAt, now) => now.getTime() - fetchedAt >= this.poolRefreshMs);
     this.poolRefresh = null;
     // Walmart rate-limits the affiliate API, so requests are spaced out.
     this.minIntervalMs = minIntervalMs;
@@ -451,6 +454,22 @@ export class WalmartLiveSource {
    * exist; save and apply the results.
    */
   /**
+   * One page of Walmart's catalog search with facet filters (e.g.
+   * special_offers:Clearance, retailer_type:Walmart). Search isn't store
+   * specific; it finds candidates for the store lookup to check.
+   * @returns {Promise<{ ids: string[], total: number|null }>} ids of items Walmart itself sells
+   */
+  async searchClearance({ query, filters, start = 1, numItems = 25 }) {
+    const data = await this.request('/search', {
+      query, facet: 'on', 'facet.filter': filters, start, numItems,
+    }, { cache: false });
+    const ids = (data?.items ?? [])
+      .filter((item) => item?.itemId && isWalmartSeller(item, { fromLookup: true }))
+      .map((item) => String(item.itemId));
+    return { ids, total: Number(data?.totalResults) || null };
+  }
+
+  /**
    * Walmart's offer for item ids at one store (one lookup of up to 20 ids):
    * with a storeId the lookup returns that store's price, stock, Clearance
    * flag and was-price (strikeThroughPrice) instead of the default online offer.
@@ -600,7 +619,7 @@ export class WalmartLiveSource {
         .finally(() => { this.poolRefresh = null; });
       if (!wait) return [];
       await this.poolRefresh;
-    } else if (Date.now() - this.pool.fetchedAt >= this.poolRefreshMs && !this.poolRefresh) {
+    } else if (!this.poolRefresh && this.poolRefreshDue(this.pool.fetchedAt, new Date())) {
       this.poolRefresh = this.fetchPool()
         .then((pool) => { this.pool = pool; startChecks(); })
         .catch((err) => console.warn('walmart: pool refresh failed', err.message))
@@ -613,6 +632,11 @@ export class WalmartLiveSource {
   /** True until the first pool has loaded (e.g. right after a restart). */
   get poolLoading() {
     return !this.pool;
+  }
+
+  /** True while a pool download (first load or scheduled refresh) is running. */
+  get poolRefreshing() {
+    return Boolean(this.poolRefresh);
   }
 
   /** Changes whenever the pool is refetched. */

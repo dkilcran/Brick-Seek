@@ -69,6 +69,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     adapter.storeScanner?.start();
     adapter.storeChecker?.start();
   }
+  // Check every few minutes whether a scheduled deal-pool refresh is due, even with no visitors.
+  setInterval(() => {
+    for (const adapter of registry.list()) {
+      if (adapter.features.deals) adapter.getDealCandidates({ wait: false }).catch(() => {});
+    }
+  }, 5 * 60 * 1000).unref();
   setInterval(() => registry.tracker.prune(), 24 * 60 * 60 * 1000).unref();
   createApp(registry).listen(port, () => {
     const modes = registry.list().map((r) => `${r.name} (${r.mode})`).join(', ');

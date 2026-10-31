@@ -2,6 +2,7 @@
 // SCAN_CONFIG_PATH). Edited by hand, so everything is validated and problems
 // are reported rather than crashing the server.
 import { readFileSync } from 'node:fs';
+import { parseClock } from './scanSchedule.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -43,6 +44,17 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
   for (const id of dailyStores) if (!storeIds.has(id)) errors.push(`dailyStores: ${id} isn't in "stores"`);
   const rotatingStoresPerDay = raw.rotatingStoresPerDay == null ? 1 : Number(raw.rotatingStoresPerDay);
   if (!(Number.isInteger(rotatingStoresPerDay) && rotatingStoresPerDay >= 0)) errors.push('"rotatingStoresPerDay" should be a whole number, 0 or more');
+  // Daily times (Chicago): product list refresh, then the store checks.
+  const schedule = {
+    productListAt: raw.schedule?.productListAt ?? '04:00',
+    storeChecksAt: raw.schedule?.storeChecksAt ?? '05:00',
+  };
+  const productListHour = parseClock(schedule.productListAt, null);
+  const storeChecksHour = parseClock(schedule.storeChecksAt, null);
+  if (productListHour === null) errors.push('"schedule.productListAt" should be a time like "04:00"');
+  if (storeChecksHour === null) errors.push('"schedule.storeChecksAt" should be a time like "05:00"');
+  const discoveryMaxPages = raw.discoveryMaxPages == null ? 20 : Number(raw.discoveryMaxPages);
+  if (!(Number.isInteger(discoveryMaxPages) && discoveryMaxPages >= 0)) errors.push('"discoveryMaxPages" should be a whole number, 0 or more');
   const maxPages = raw.maxPages == null ? 1 : Number(raw.maxPages);
   if (!(Number.isInteger(maxPages) && maxPages >= 1 && maxPages <= 25)) errors.push('"maxPages" should be a whole number from 1 to 25');
   const monthlySearchBudget = Number(raw.monthlySearchBudget);
@@ -54,6 +66,10 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
       zips: Array.isArray(raw.zips) ? raw.zips.map(String) : raw.zip ? [String(raw.zip)] : [],
       stores: stores.map((s) => ({ id: String(s.id), label: s.label ?? null })),
       discoveryStores,
+      schedule: { ...schedule, productListHour: productListHour ?? 4, storeChecksHour: storeChecksHour ?? 5 },
+      discoveryMaxPages: Number.isInteger(discoveryMaxPages) && discoveryMaxPages >= 0 ? discoveryMaxPages : 20,
+      // SerpApi store searches (paid); off now that Walmart's free search does discovery.
+      useSerpApi: raw.useSerpApi === true,
       dailyStores,
       rotatingStoresPerDay: Number.isInteger(rotatingStoresPerDay) && rotatingStoresPerDay >= 0 ? rotatingStoresPerDay : 1,
       maxPages: Number.isInteger(maxPages) ? maxPages : 1,

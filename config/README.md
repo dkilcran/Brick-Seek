@@ -1,37 +1,41 @@
 # Store scan settings
 
-`store-scan.json` controls the local store scan (store-level prices from
-SerpApi). Edit it on GitHub (open the file, click the pencil, commit); the
+`store-scan.json` controls how the site finds markdowns at your nearby
+Walmarts. Edit it on GitHub (open the file, click the pencil, commit); the
 site redeploys and picks up the change. Check the result at
-`/api/walmart/scan-config` on the live site: it lists any department names it
-doesn't recognize and how often each department gets scanned.
+`/api/walmart/scan-config` on the live site, and daily progress at
+`/api/walmart/store-check`.
+
+Everything runs on Walmart's free affiliate API: its item lookup with a store
+number returns that store's price, stock, Clearance flag and was-price.
+
+## Daily schedule (Chicago time)
+
+1. `schedule.productListAt` (04:00): refresh the product list (~20,000 items
+   from Walmart's department, Clearance and Rollback lists, ~15 minutes). It is
+   saved, so restarts don't redo it.
+2. `schedule.storeChecksAt` (05:00): the store checks start, in order:
+   - **discovery:** Walmart's search for each department with the `filters`
+     (Clearance, sold by Walmart), up to `discoveryMaxPages` pages of 25;
+   - **full checks:** every product-list and discovered item at the
+     `dailyStores` plus `rotatingStoresPerDay` other stores;
+   - **all stores:** everything found marked down is checked at every store.
+
+## Settings
 
 | Setting | Meaning |
 | --- | --- |
 | `zips` | ZIP codes the stores were chosen for (informational). |
-| `stores` | Walmart stores to track. Prices, stock, Clearance flags and was-prices are checked at all of them for free through Walmart's item lookup (no SerpApi searches). `label` is just for you. Find store numbers at `/api/walmart/stores?zip=XXXXX&limit=50`. |
-| `dailyStores` | Stores that get a full check of every tracked item every day (home and work stores). |
-| `rotatingStoresPerDay` | How many of the other stores also get a full check each day, taking turns (2 of the other 20 = each every 10 days). Each full check is about 1,000 free lookups (~35 minutes). |
-| `discoveryStores` | The stores SerpApi searches to *find* clearance items (Walmart's free bulk lists ignore stores). Every item found is then checked at all `stores` for free. Defaults to all stores. |
-| `maxPages` | How many result pages (40 items each) to search per department; pages past a department's last page are skipped. |
-| `departments` | Departments to search at each store. Names must match the list below exactly. |
-| `filters` | Walmart's own search filters. `special_offers:Clearance` = items Walmart marks Clearance; `retailer_type:Walmart` = sold by Walmart (no marketplace sellers). Other examples: `special_offers:Rollback`, `special_offers:Reduced Price`. |
-| `searchTerms` | Optional keywords searched within each department, on top of the filters. Leave empty (`[]`) to list everything the filters match. Each term multiplies the searches per sweep. |
-| `restartChecks` | Change this to any new value to restart today's free store checks right away with the current `dailyStores`/rotation plan (e.g. after changing stores). |
-| `fullSweep` | Change this to any new value (today's date works) to scan every store and department once, right away, instead of waiting for the schedule. Each sweep uses one search per store × department (28 now). |
-| `monthlySearchBudget` | Searches allowed per calendar month. Match your SerpApi plan (the free plan is 100–250). The scan spreads this evenly over the month and stops at the limit. |
-
-Each SerpApi search covers one results page of one department at one
-discovery store and returns about 40 products. With 2 discovery stores, 14
-departments and up to 5 pages, a full pass is at most 140 searches (fewer when
-departments have fewer pages). Store checks are separate and free: each day
-every tracked item is checked at the daily stores plus the day's rotating
-stores, and everything found marked down is then checked at every store. Progress:
-`/api/walmart/store-check`. Searches cluster on Wednesday/Thursday mornings and the first
-week of the month, when Walmart most often marks prices down.
-
-Whenever these settings change, the scan runs one search right away to check
-they work; `/api/walmart/store-scan` shows how it went (`lastRunSummary`).
+| `schedule` | `productListAt` and `storeChecksAt`, as "HH:MM" in Chicago time. Store checks wait for the product-list refresh if it is still running. |
+| `stores` | Walmart stores to track. `label` is just for you. Find store numbers at `/api/walmart/stores?zip=XXXXX&limit=50`. |
+| `dailyStores` | Stores that get a full check of every item every day (home and work stores). |
+| `rotatingStoresPerDay` | How many of the other stores also get a full check each day, taking turns (2 of the other 20 = each every 10 days). Each full check is about 1,000–1,400 free lookups (~35–50 minutes). |
+| `departments` | Departments searched during discovery. Names must match the list below exactly. |
+| `filters` | Walmart search filters for discovery. `special_offers:Clearance` = items Walmart marks Clearance; `retailer_type:Walmart` = sold by Walmart. Others: `special_offers:Rollback`, `special_offers:Reduced Price`. |
+| `searchTerms` | Not used by the free discovery (each department's name is the search text). |
+| `discoveryMaxPages` | Most search pages (25 items) per department. Busy departments like Home have hundreds of pages; this caps the daily work. |
+| `restartChecks` | Change this to any new value to restart today's store checks right away with the current plan. |
+| `useSerpApi` | `false`: SerpApi isn't used. `true` turns the old paid SerpApi store searches back on (needs `SERPAPI_KEY`), using `discoveryStores`, `maxPages`, `monthlySearchBudget`, `fullSweep` and `inspect`. |
 
 ## Departments
 

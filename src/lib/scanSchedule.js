@@ -63,3 +63,20 @@ export function allowanceSoFar(now, budget, schedule = SCHEDULE) {
   const todayShare = Math.min(1, Math.max(0, (t.hour - schedule.morningStartHour) / span));
   return Math.min(budget, Math.floor(before + plan[t.day - 1].searches * todayShare + 1e-9));
 }
+
+/**
+ * The schedule "day" a moment belongs to, when days start at `startHour`
+ * (local, possibly fractional) instead of midnight: before 5am counts as the
+ * previous day for a 5am start. Returns YYYY-MM-DD.
+ */
+export function scheduleDayKey(date, startHour = 0, timeZone = SCHEDULE.timeZone) {
+  const t = localParts(new Date(date.getTime() - startHour * 3600000), timeZone);
+  return `${t.year}-${String(t.month).padStart(2, '0')}-${String(t.day).padStart(2, '0')}`;
+}
+
+/** "05:30" -> 5.5; anything unparseable -> fallback. */
+export function parseClock(value, fallback) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(value ?? '').trim());
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return fallback;
+  return Number(m[1]) + Number(m[2]) / 60;
+}

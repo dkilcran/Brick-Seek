@@ -21,9 +21,14 @@
   at that store: price, store stock (`stock`), `clearance` flag and was-price
   (`strikeThroughPrice`), matching SerpApi item for item. Up to 20 ids per call.
   `zipCode` alone does nothing. The bulk feeds ignore `storeId`.
-- **SerpApi** (`engine=walmart` with `store_id`, `facet=special_offers:Clearance||retailer_type:Walmart`)
-  is for *discovering* store clearance items (40 per page, `total_results` in
-  `search_information`). `engine=walmart_product` with `store_id` adds aisle and
-  pickup availability. Budget: 250 searches/month on the free plan.
+- **Walmart `/search`** (free) takes `facet=on` and repeated `facet.filter`
+  (e.g. `special_offers:Clearance` and `retailer_type:Walmart`), 25 per page,
+  paged with `start`. It ignores `storeId` and `categoryId`; the query text
+  drives results. Used for daily discovery; the store lookup confirms each item.
+- `storeId` on `/items` is undocumented (docs list only `ids`, `upc`,
+  `publisherId`), so it could change without notice.
+- **SerpApi** (paid, now off via `useSerpApi`): `engine=walmart` with `store_id`
+  and facets finds store clearance; `engine=walmart_product` with `store_id`
+  adds aisle and pickup availability. 250 searches/month on the free plan.
 - Walmart's `categoryPath` starts with "Home Page/"; the department is the next segment.
 - `msrp` of 9999 is a placeholder, not a list price.

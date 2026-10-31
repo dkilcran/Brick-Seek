@@ -3,6 +3,10 @@
     "64081",
     "66211"
   ],
+  "schedule": {
+    "productListAt": "04:00",
+    "storeChecksAt": "05:00"
+  },
   "stores": [
     {
       "id": "1599",
@@ -103,10 +107,6 @@
     "1599"
   ],
   "rotatingStoresPerDay": 2,
-  "discoveryStores": [
-    "573",
-    "1599"
-  ],
   "departments": [
     "Home",
     "Home Improvement",
@@ -128,6 +128,13 @@
     "retailer_type:Walmart"
   ],
   "searchTerms": [],
+  "discoveryMaxPages": 20,
+  "restartChecks": "2026-10-30 20:10",
+  "useSerpApi": false,
+  "discoveryStores": [
+    "573",
+    "1599"
+  ],
   "maxPages": 5,
   "monthlySearchBudget": 250,
   "fullSweep": "2026-10-30",
@@ -143,6 +150,5 @@
       "573"
     ],
     "searchDepartment": "Toys"
-  },
-  "restartChecks": "2026-10-30 20:10"
+  }
 }
