@@ -344,6 +344,16 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       };
     }],
 
+    // Is discovery worth it? Finds per day and per department/page, new vs already
+    // in the product list, and how many turned out marked down at a store.
+    ['GET', '/api/:retailer/discovery-stats', async ({ params, query }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.storeData) return { enabled: false, reason: 'Live mode only' };
+      const days = clampInt(query.get('days'), 7, 1, 60);
+      const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
+      return { since, ...adapter.storeData.discoveryYield(adapter.id, since) };
+    }],
+
     // Free store checks (Walmart item lookup per store): today's progress.
     ['GET', '/api/:retailer/store-check', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);

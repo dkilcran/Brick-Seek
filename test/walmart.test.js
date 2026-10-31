@@ -736,3 +736,33 @@ test('searchClearance keeps only Walmart-sold results and passes repeated filter
   assert.equal(seen.searchParams.get('start'), '26');
   assert.equal(seen.searchParams.get('facet'), 'on');
 });
+
+test('discovery yield: new vs already listed, and marked down at a store', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
+  const db = new StoreScanDb(new PriceTracker().db);
+  // Toys page 1: t1 (already listed), t2 (new); page 2: t3 (new). t2 and t1 are marked down at the store.
+  const source = {
+    poolLoading: false, poolRefreshing: false,
+    dealCandidates: async () => [{ id: 't1', price: 5 }],
+    searchClearance: async ({ start }) => (start === 1 ? { ids: ['t1', 't2'], total: 30 } : { ids: ['t3'], total: 30 }),
+    storeLookup: async (ids) => ({
+      found: ids.map((id) => ({ itemId: id, price: 4, seller: 'Walmart.com', clearance: id !== 't3', wasPrice: null, inStock: true })),
+      missing: [],
+    }),
+  };
+  const checker = new StoreChecker({
+    source, db, now: () => new Date('2026-11-04T12:00:00Z'),
+    loadConfig: () => ({ config: {
+      stores: [{ id: 'A' }], dailyStores: ['A'], rotatingStoresPerDay: 0, departments: ['Toys'],
+      filters: ['special_offers:Clearance'], discoveryMaxPages: 5, schedule: { storeChecksHour: 5 },
+    }, errors: [] }),
+  });
+  while (await checker.step());
+  const y = db.discoveryYield('walmart', '2026-11-01');
+  assert.deepEqual(y.days, [{ day: '2026-11-04', found: 3, new: 2, markedDown: 2, markedDownNew: 1, markedDownAllSources: 2 }]);
+  assert.deepEqual(y.byDepartment[0].pages, [
+    { page: 1, found: 2, new: 1, markedDown: 2, markedDownNew: 1 },
+    { page: 2, found: 1, new: 1, markedDown: 0, markedDownNew: 0 },
+  ]);
+});

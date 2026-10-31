@@ -105,6 +105,19 @@ export class StoreScanDb {
     const runCols = db.prepare('PRAGMA table_info(store_scan_runs)').all().map((c) => c.name);
     if (!runCols.includes('page')) db.exec('ALTER TABLE store_scan_runs ADD COLUMN page INTEGER NOT NULL DEFAULT 1');
     if (!runCols.includes('total_results')) db.exec('ALTER TABLE store_scan_runs ADD COLUMN total_results INTEGER');
+    // What daily discovery found (first place each item turned up), to measure its yield.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS discovery_finds (
+        retailer   TEXT NOT NULL,
+        day        TEXT NOT NULL,    -- store-check day (YYYY-MM-DD)
+        item_id    TEXT NOT NULL,
+        department TEXT NOT NULL,
+        page       INTEGER NOT NULL, -- 1-based search page
+        in_pool    INTEGER NOT NULL, -- 1 = already in the product list
+        PRIMARY KEY (retailer, day, item_id)
+      ) WITHOUT ROWID;
+      CREATE INDEX IF NOT EXISTS store_prices_by_item_date ON store_prices (retailer, item_id, date);
+    `);
     this.insertRun = db.prepare(`INSERT INTO store_scan_runs
       (retailer, store_id, department, term, month, ran_at, result_count, error, page, total_results)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
@@ -206,6 +219,50 @@ export class StoreScanDb {
   }
 
   /** Items marked down at any store recently: Clearance-flagged or below their was-price. */
+  /** @param {{ itemId: string, inPool: boolean }[]} finds  items from one search page */
+  recordDiscovery(retailer, day, department, page, finds) {
+    const insert = this.db.prepare(`INSERT OR IGNORE INTO discovery_finds
+      (retailer, day, item_id, department, page, in_pool) VALUES (?, ?, ?, ?, ?, ?)`);
+    for (const f of finds) insert.run(retailer, day, String(f.itemId), department, page, f.inPool ? 1 : 0);
+  }
+
+  /**
+   * How discovery paid off, from `sinceDay` on: per day, and per department
+   * and page, items found, how many were new to the product list, and how
+   * many were marked down at a store that day (Walmart-sold, Clearance flag or
+   * a higher was-price).
+   */
+  discoveryYield(retailer, sinceDay) {
+    const markedDown = `EXISTS (SELECT 1 FROM store_prices p WHERE p.retailer = f.retailer AND p.item_id = f.item_id
+      AND p.date = f.day AND (p.clearance = 1 OR p.was_price > p.price) AND lower(p.seller) IN ('walmart', 'walmart.com'))`;
+    const counts = `COUNT(*) found, SUM(f.in_pool = 0) new_items,
+      SUM(CASE WHEN ${markedDown} THEN 1 ELSE 0 END) marked_down,
+      SUM(CASE WHEN f.in_pool = 0 AND ${markedDown} THEN 1 ELSE 0 END) marked_down_new`;
+    const days = this.db.prepare(`SELECT f.day, ${counts} FROM discovery_finds f
+      WHERE f.retailer = ? AND f.day >= ? GROUP BY f.day ORDER BY f.day`).all(retailer, sinceDay);
+    // All items marked down at any store each day, to compare discovery's share against.
+    const allMarked = this.db.prepare(`SELECT date day, COUNT(DISTINCT item_id) n FROM store_prices
+      WHERE retailer = ? AND date >= ? AND (clearance = 1 OR was_price > price) AND lower(seller) IN ('walmart', 'walmart.com')
+      GROUP BY date`).all(retailer, sinceDay);
+    const markedByDay = new Map(allMarked.map((r) => [r.day, r.n]));
+    const pages = this.db.prepare(`SELECT f.department, f.page, ${counts} FROM discovery_finds f
+      WHERE f.retailer = ? AND f.day >= ? GROUP BY f.department, f.page ORDER BY f.department, f.page`).all(retailer, sinceDay);
+    const byDepartment = new Map();
+    for (const r of pages) {
+      const d = byDepartment.get(r.department) ?? { department: r.department, found: 0, new: 0, markedDown: 0, markedDownNew: 0, pages: [] };
+      d.found += r.found; d.new += r.new_items; d.markedDown += r.marked_down; d.markedDownNew += r.marked_down_new;
+      d.pages.push({ page: r.page, found: r.found, new: r.new_items, markedDown: r.marked_down, markedDownNew: r.marked_down_new });
+      byDepartment.set(r.department, d);
+    }
+    return {
+      days: days.map((r) => ({
+        day: r.day, found: r.found, new: r.new_items, markedDown: r.marked_down, markedDownNew: r.marked_down_new,
+        markedDownAllSources: markedByDay.get(r.day) ?? 0,
+      })),
+      byDepartment: [...byDepartment.values()],
+    };
+  }
+
   candidateItems(retailer, { days = 14, now = Date.now() } = {}) {
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
     return this.db.prepare(`SELECT DISTINCT item_id FROM store_prices

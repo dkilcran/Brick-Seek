@@ -124,6 +124,12 @@ export class StoreChecker {
       const discovered = this.list('discovered');
       const fresh = ids.filter((id) => !discovered.includes(id));
       if (fresh.length) this.saveList('discovered', [...discovered, ...fresh]);
+      // Measure: where each find turned up, and whether the product list already had it.
+      if (this.poolDay !== date) {
+        this.poolIds = new Set((await this.source.dealCandidates({ wait: false })).map((p) => p.id));
+        this.poolDay = date;
+      }
+      this.db.recordDiscovery(this.retailer, date, dept, state.page + 1, ids.map((id) => ({ itemId: id, inPool: this.poolIds.has(id) })));
       const nextPage = state.page + 1;
       const more = ids.length > 0 && nextPage < (config.discoveryMaxPages ?? 20) && nextPage * SEARCH_PAGE < (total ?? 0);
       this.state = { ...state, searches: state.searches + 1, ...(more ? { page: nextPage } : { dept: state.dept + 1, page: 0 }) };
