@@ -97,6 +97,12 @@
       "label": "Shawnee Supercenter, 5701 Silverheel St"
     }
   ],
+  "dailyStores": [
+    "573",
+    "4590",
+    "1599"
+  ],
+  "rotatingStoresPerDay": 2,
   "discoveryStores": [
     "573",
     "1599"

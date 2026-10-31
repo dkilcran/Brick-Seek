@@ -1,8 +1,8 @@
 // Free store-level checks through Walmart's affiliate item lookup with a
 // storeId (20 items per call, rate-limited). The bulk feeds ignore storeId,
 // so the checker works in two phases each day:
-//   1. probe: every item in the deal pool at one store (rotating daily)
-//      to discover what's marked down there;
+//   1. probe: every item in the deal pool at the daily stores plus a few
+//      rotating ones, to discover what's marked down there;
 //   2. candidates: every recently marked-down item (from any store, or found
 //      by SerpApi discovery) at every configured store.
 // Progress is saved, so a restart resumes where it left off.
@@ -53,20 +53,42 @@ export class StoreChecker {
     this.lists = { ...this.lists, [name]: ids };
   }
 
+  /**
+   * Stores that get the full probe on a day: config.dailyStores every day, plus
+   * config.rotatingStoresPerDay of the others, taking turns.
+   */
+  static probeStoresFor(day, config) {
+    const ids = config.stores.map((s) => s.id);
+    const daily = (config.dailyStores ?? []).filter((id) => ids.includes(id));
+    const others = ids.filter((id) => !daily.includes(id));
+    const perDay = Math.min(config.rotatingStoresPerDay ?? 1, others.length);
+    const dayNumber = Math.floor(Date.parse(`${day}T00:00:00Z`) / 86400000);
+    const start = others.length ? (dayNumber * perDay) % others.length : 0;
+    const rotating = Array.from({ length: perDay }, (_, i) => others[(start + i) % others.length]);
+    return [...daily, ...rotating];
+  }
+
   /** Start today's cycle if needed. Returns the state, or null if it can't start yet. */
   async ensureCycle(config) {
     const day = dayKeyOf(this.now());
-    if (this.state?.day === day) return this.state;
+    const current = this.state;
+    if (current?.day === day) {
+      // A cycle saved before multi-store probes: finish its store, then add today's plan.
+      if (!current.probeStores) {
+        const probeStores = [...new Set([current.probeStore, ...StoreChecker.probeStoresFor(day, config)])];
+        this.state = { ...current, probeStores, probeIndex: 0 };
+      }
+      return this.state;
+    }
     if (this.source.poolLoading) return null; // the deal pool loads after a restart
     const pool = await this.source.dealCandidates({ wait: false });
-    // Rotate the full probe through the stores, one store per day.
-    const dayNumber = Math.floor(Date.parse(`${day}T00:00:00Z`) / 86400000);
-    const probeStore = config.stores[dayNumber % config.stores.length].id;
     const probeIds = pool.filter((p) => p.price > 0).map((p) => p.id);
     this.saveList('probeIds', probeIds);
     this.saveList('candidates', []);
+    const probeStores = StoreChecker.probeStoresFor(day, config);
     this.state = {
-      day, phase: 'probe', probeStore, probeTotal: probeIds.length, offset: 0,
+      day, phase: 'probe', probeStores, probeIndex: 0, probeStore: probeStores[0],
+      probeTotal: probeIds.length, offset: 0,
       candidateTotal: 0, stores: config.stores.map((s) => s.id),
       startedAt: this.now().toISOString(), probeFound: 0, candidateRows: 0,
     };
@@ -84,6 +106,12 @@ export class StoreChecker {
     if (state.phase === 'probe') {
       const ids = this.list('probeIds').slice(state.offset, state.offset + BATCH);
       if (!ids.length) {
+        // This store is done; move to the next probe store, or on to candidates.
+        const next = state.probeIndex + 1;
+        if (next < state.probeStores.length) {
+          this.state = { ...state, probeIndex: next, probeStore: state.probeStores[next], offset: 0 };
+          return true;
+        }
         const candidates = this.db.candidateItems(this.retailer);
         this.saveList('candidates', candidates);
         this.saveList('probeIds', []);
@@ -142,7 +170,10 @@ export class StoreChecker {
       day: s.day,
       phase: s.phase,
       probeStore: s.probeStore,
-      probe: s.phase === 'probe' ? { checked: s.offset, of: s.probeTotal } : { checked: s.probeTotal, found: s.probeFound },
+      probeStores: s.probeStores ?? [s.probeStore],
+      probe: s.phase === 'probe'
+        ? { store: (s.probeIndex ?? 0) + 1, ofStores: (s.probeStores ?? [s.probeStore]).length, checked: s.offset, of: s.probeTotal }
+        : { stores: (s.probeStores ?? [s.probeStore]).length, itemsPerStore: s.probeTotal, found: s.probeFound },
       candidates: s.candidateTotal ?? 0,
       candidateLookups: s.phase === 'candidates' ? { done: s.offset, of: batches * s.stores.length } : null,
       candidateRows: s.candidateRows,

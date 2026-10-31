@@ -581,3 +581,36 @@ test('isMarkedDown: Clearance flag, was-price, or an early clearance-only SerpAp
   assert.equal(isMarkedDown({ clearance: 0, price: 5, was_price: null, source: 'walmart-api' }), false);
   assert.equal(isMarkedDown({ clearance: null, price: 5, source: null }), true, 'legacy SerpApi clearance search row');
 });
+
+test('daily stores every day, plus rotating stores taking turns', async () => {
+  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
+  const config = {
+    stores: ['573', '4590', '1599', 'A', 'B', 'C', 'D', 'E'].map((id) => ({ id })),
+    dailyStores: ['573', '4590', '1599'], rotatingStoresPerDay: 2,
+  };
+  const days = ['2026-11-01', '2026-11-02', '2026-11-03'];
+  const plans = days.map((d) => StoreChecker.probeStoresFor(d, config));
+  for (const plan of plans) {
+    assert.deepEqual(plan.slice(0, 3), ['573', '4590', '1599']);
+    assert.equal(plan.length, 5);
+  }
+  // over consecutive days the rotation covers every other store
+  const rotated = new Set(plans.flatMap((p) => p.slice(3)));
+  assert.equal(rotated.size, 5);
+});
+
+test('a cycle saved before multi-store probes finishes its store, then adds today\'s plan', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
+  const db = new StoreScanDb(new PriceTracker().db);
+  db.setMeta('check:state', { day: '2026-10-30', phase: 'probe', probeStore: '2490', probeTotal: 40, offset: 20, candidateTotal: 0, stores: ['2490', '573'], probeFound: 20, candidateRows: 0 });
+  db.setMeta('check:probeIds', Array.from({ length: 40 }, (_, i) => String(i)));
+  const looked = [];
+  const checker = new StoreChecker({
+    db, now: () => new Date('2026-10-31T01:30:00Z'), // still Oct 30 in Chicago
+    source: { poolLoading: false, dealCandidates: async () => [], storeLookup: async (ids, store) => { looked.push(`${store}:${ids[0]}`); return { found: [], missing: [] }; } },
+    loadConfig: () => ({ config: { stores: [{ id: '2490' }, { id: '573' }], dailyStores: ['573'], rotatingStoresPerDay: 0 }, errors: [] }),
+  });
+  while (await checker.step());
+  assert.deepEqual(looked.slice(0, 3), ['2490:20', '573:0', '573:20'], 'resumes 2490 at item 20, then the daily store');
+});

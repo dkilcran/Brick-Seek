@@ -38,6 +38,11 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
     ? raw.discoveryStores.map(String)
     : [...storeIds];
   for (const id of discoveryStores) if (!storeIds.has(id)) errors.push(`discoveryStores: ${id} isn't in "stores"`);
+  // Full daily checks: these stores every day, plus this many others in rotation.
+  const dailyStores = Array.isArray(raw.dailyStores) ? raw.dailyStores.map(String) : [];
+  for (const id of dailyStores) if (!storeIds.has(id)) errors.push(`dailyStores: ${id} isn't in "stores"`);
+  const rotatingStoresPerDay = raw.rotatingStoresPerDay == null ? 1 : Number(raw.rotatingStoresPerDay);
+  if (!(Number.isInteger(rotatingStoresPerDay) && rotatingStoresPerDay >= 0)) errors.push('"rotatingStoresPerDay" should be a whole number, 0 or more');
   const maxPages = raw.maxPages == null ? 1 : Number(raw.maxPages);
   if (!(Number.isInteger(maxPages) && maxPages >= 1 && maxPages <= 25)) errors.push('"maxPages" should be a whole number from 1 to 25');
   const monthlySearchBudget = Number(raw.monthlySearchBudget);
@@ -49,6 +54,8 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
       zips: Array.isArray(raw.zips) ? raw.zips.map(String) : raw.zip ? [String(raw.zip)] : [],
       stores: stores.map((s) => ({ id: String(s.id), label: s.label ?? null })),
       discoveryStores,
+      dailyStores,
+      rotatingStoresPerDay: Number.isInteger(rotatingStoresPerDay) && rotatingStoresPerDay >= 0 ? rotatingStoresPerDay : 1,
       maxPages: Number.isInteger(maxPages) ? maxPages : 1,
       departments: [...new Set(departments)],
       filters,
