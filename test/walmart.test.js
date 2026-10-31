@@ -442,6 +442,14 @@ test('store scan prices feed Clearance near you and the stock check', async () =
   assert.equal(clearance[0].price, 7.97);
   assert.equal(clearance[0].discountPercent, 27, 'measured against Walmart\'s was price');
   assert.equal(clearance[0].store.name, "Lee's Summit Supercenter");
+  assert.equal(await adapter.getLocalClearance('64081'), clearance, 'reused until markdowns are rebuilt');
+  db.recordRun({
+    retailer: 'walmart', storeId: '573', department: 'Home', term: '', month: '2026-10', ranAt: Date.now(), clearance: 1,
+    results: [{ itemId: '557', title: 'New markdown', price: 3, wasPrice: 6, inStock: true, seller: 'Walmart.com' }],
+  });
+  db.refreshMarkdowns('walmart');
+  const after = await adapter.getLocalClearance('64081');
+  assert.ok(after.some((c) => c.product.id === '557'), 'a rebuild shows new markdowns');
 
   const inv = await adapter.checkInventory('24016954', '64081');
   const [lees, raytown] = inv.results;

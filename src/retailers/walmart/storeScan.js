@@ -73,6 +73,8 @@ export function parseSearchResult(r) {
 export class StoreScanDb {
   constructor(db) {
     this.db = db;
+    /** Bumps whenever store_markdowns is rebuilt, so pages can cache what they read from it. */
+    this.markdownVersion = 0;
     db.exec(`
       CREATE TABLE IF NOT EXISTS store_scan_runs (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -399,6 +401,7 @@ export class StoreScanDb {
         WHERE c.clearance = 1 OR c.was_price > c.price OR (t.n >= 2 AND c.price < t.hi * ?)`)
         .run(retailer, since, 1 - CALC_CLEARANCE_GAP, 1 - CALC_CLEARANCE_GAP);
       this.db.exec('COMMIT');
+      this.markdownVersion += 1;
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;

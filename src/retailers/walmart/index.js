@@ -272,6 +272,18 @@ export class WalmartAdapter extends RetailerAdapter {
     const db = this.storeData;
     const scanned = new Set(db.scannedStores(this.id));
     const stores = (await this.source.stores(zip, { limit: 50 })).filter((s) => scanned.has(s.id));
+    // The markdown table only changes when it's rebuilt, so reuse the result until then.
+    const key = `${db.markdownVersion}|${stores.map((s) => s.id).join(',')}|${category ?? ''}`;
+    this.clearanceCache ??= new Map();
+    const cached = this.clearanceCache.get(key);
+    if (cached) return cached;
+    const rows = this.readClearance(db, stores, { category });
+    if (this.clearanceCache.size >= 20) this.clearanceCache.clear();
+    this.clearanceCache.set(key, rows);
+    return rows;
+  }
+
+  readClearance(db, stores, { category }) {
     const storeById = new Map(stores.map((s) => [s.id, s]));
     // Precomputed markdowns (Walmart Clearance flag, below was-price, or calculated
     // clearance: cheaper than the item's highest price at another store).
