@@ -72,7 +72,9 @@ export class StoreChecker {
   async ensureCycle(config) {
     const day = dayKeyOf(this.now());
     const current = this.state;
-    if (current?.day === day) {
+    // Changing config.restartChecks starts today's cycle over with the current plan.
+    const restart = config.restartChecks && this.db.getMeta('check:restartDone') !== config.restartChecks;
+    if (current?.day === day && !restart) {
       // A cycle saved before multi-store probes: finish its store, then add today's plan.
       if (!current.probeStores) {
         const probeStores = [...new Set([current.probeStore, ...StoreChecker.probeStoresFor(day, config)])];
@@ -86,6 +88,7 @@ export class StoreChecker {
     this.saveList('probeIds', probeIds);
     this.saveList('candidates', []);
     const probeStores = StoreChecker.probeStoresFor(day, config);
+    if (restart) this.db.setMeta('check:restartDone', config.restartChecks);
     this.state = {
       day, phase: 'probe', probeStores, probeIndex: 0, probeStore: probeStores[0],
       probeTotal: probeIds.length, offset: 0,

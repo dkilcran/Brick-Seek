@@ -614,3 +614,23 @@ test('a cycle saved before multi-store probes finishes its store, then adds toda
   while (await checker.step());
   assert.deepEqual(looked.slice(0, 3), ['2490:20', '573:0', '573:20'], 'resumes 2490 at item 20, then the daily store');
 });
+
+test('changing restartChecks restarts today\'s cycle once', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
+  const db = new StoreScanDb(new PriceTracker().db);
+  const looked = [];
+  let restartChecks = null;
+  const checker = new StoreChecker({
+    db, now: () => new Date('2026-11-04T15:00:00Z'),
+    source: { poolLoading: false, dealCandidates: async () => [{ id: '1', price: 5 }], storeLookup: async (ids, store) => { looked.push(store); return { found: [], missing: [] }; } },
+    loadConfig: () => ({ config: { stores: [{ id: 'A' }, { id: 'B' }], dailyStores: ['A'], rotatingStoresPerDay: 0, restartChecks }, errors: [] }),
+  });
+  while (await checker.step());
+  assert.deepEqual(looked, ['A']);
+  restartChecks = 'now';
+  while (await checker.step());
+  assert.deepEqual(looked, ['A', 'A'], 'probed again after the restart');
+  while (await checker.step());
+  assert.deepEqual(looked, ['A', 'A'], 'only once per value');
+});

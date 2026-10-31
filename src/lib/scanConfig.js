@@ -63,6 +63,8 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
       monthlySearchBudget: monthlySearchBudget > 0 ? Math.floor(monthlySearchBudget) : 0,
       // Change this value (e.g. to today's date) to scan everything once, right away.
       fullSweep: raw.fullSweep ? String(raw.fullSweep) : null,
+      // Change this value to restart today's free store checks with the current plan.
+      restartChecks: raw.restartChecks ? String(raw.restartChecks) : null,
       // Diagnostics: { run, items: [itemIds], stores: [storeIds], searchDepartment }; change run to repeat.
       inspect: raw.inspect?.run ? {
         run: String(raw.inspect.run),
