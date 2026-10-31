@@ -280,35 +280,41 @@ export class StoreScanDb {
    * a higher was-price).
    */
   discoveryYield(retailer, sinceDay) {
-    // Only look up the found items themselves (indexed by item and date); a
-    // query that scanned every store price took ~30s at 135k rows.
-    const markedCte = `WITH md AS (
-      SELECT DISTINCT f.item_id, f.day FROM discovery_finds f
-      JOIN store_prices p ON p.retailer = f.retailer AND p.item_id = f.item_id AND p.date = f.day
-      WHERE f.retailer = ? AND f.day >= ? AND (p.clearance = 1 OR p.was_price > p.price)
-        AND lower(p.seller) IN ('walmart', 'walmart.com'))`;
-    const counts = `COUNT(*) found, SUM(f.in_pool = 0) new_items,
-      SUM(md.item_id IS NOT NULL) marked_down, SUM(f.in_pool = 0 AND md.item_id IS NOT NULL) marked_down_new`;
-    const from = `FROM discovery_finds f LEFT JOIN md ON md.item_id = f.item_id AND md.day = f.day
-      WHERE f.retailer = ? AND f.day >= ?`;
-    const args = [retailer, sinceDay, retailer, sinceDay];
-    const days = this.db.prepare(`${markedCte} SELECT f.day, ${counts} ${from} GROUP BY f.day ORDER BY f.day`).all(...args);
-    const pages = this.db.prepare(`${markedCte} SELECT f.department, f.page, ${counts} ${from}
-      GROUP BY f.department, f.page ORDER BY f.department, f.page`).all(...args);
+    // Simple indexed queries, counted in JS. A single SQL query with a CTE was
+    // re-evaluated per row by SQLite and blocked the server for minutes.
+    const finds = this.db.prepare(`SELECT day, item_id, department, page, in_pool FROM discovery_finds
+      WHERE retailer = ? AND day >= ?`).all(retailer, sinceDay);
+    const isMarked = this.db.prepare(`SELECT 1 FROM store_prices INDEXED BY store_prices_by_item_date
+      WHERE retailer = ? AND item_id = ? AND date = ? AND (clearance = 1 OR was_price > price)
+        AND lower(seller) IN ('walmart', 'walmart.com') LIMIT 1`);
+    const blank = () => ({ found: 0, new: 0, markedDown: 0, markedDownNew: 0 });
+    const add = (acc, f, marked) => {
+      acc.found += 1;
+      if (!f.in_pool) acc.new += 1;
+      if (marked) acc.markedDown += 1;
+      if (marked && !f.in_pool) acc.markedDownNew += 1;
+    };
+    const byDay = new Map();
     const byDepartment = new Map();
-    for (const r of pages) {
-      const d = byDepartment.get(r.department) ?? { department: r.department, found: 0, new: 0, markedDown: 0, markedDownNew: 0, pages: [] };
-      d.found += r.found; d.new += r.new_items; d.markedDown += r.marked_down; d.markedDownNew += r.marked_down_new;
-      d.pages.push({ page: r.page, found: r.found, new: r.new_items, markedDown: r.marked_down, markedDownNew: r.marked_down_new });
-      byDepartment.set(r.department, d);
+    for (const f of finds) {
+      const marked = Boolean(isMarked.get(retailer, f.item_id, f.day));
+      if (!byDay.has(f.day)) byDay.set(f.day, { day: f.day, ...blank() });
+      add(byDay.get(f.day), f, marked);
+      if (!byDepartment.has(f.department)) byDepartment.set(f.department, { department: f.department, ...blank(), pages: new Map() });
+      const d = byDepartment.get(f.department);
+      add(d, f, marked);
+      if (!d.pages.has(f.page)) d.pages.set(f.page, { page: f.page, ...blank() });
+      add(d.pages.get(f.page), f, marked);
     }
     return {
-      days: days.map((r) => ({
-        day: r.day, found: r.found, new: r.new_items, markedDown: r.marked_down, markedDownNew: r.marked_down_new,
+      days: [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day)).map((d) => ({
+        ...d,
         // All items marked down that day from any source, counted when the day's checks finished.
-        markedDownAllSources: this.getMeta(`markedDown:${retailer}:${r.day}`),
+        markedDownAllSources: this.getMeta(`markedDown:${retailer}:${d.day}`),
       })),
-      byDepartment: [...byDepartment.values()],
+      byDepartment: [...byDepartment.values()]
+        .sort((a, b) => a.department.localeCompare(b.department))
+        .map((d) => ({ ...d, pages: [...d.pages.values()].sort((a, b) => a.page - b.page) })),
     };
   }
 
