@@ -142,7 +142,8 @@ export class WalmartLiveSource {
   async request(path, params = {}, { cache = true } = {}) {
     const url = new URL(BASE_URL + path);
     for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
+      if (Array.isArray(v)) for (const each of v) url.searchParams.append(k, each); // repeated parameter
+      else if (v !== undefined && v !== null && v !== '') url.searchParams.set(k, v);
     }
     if (this.publisherId) url.searchParams.set('publisherId', this.publisherId);
     const fetchJson = async (attempt = 0) => {
