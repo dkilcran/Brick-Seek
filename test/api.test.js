@@ -143,3 +143,28 @@ test('scan-config shows the settings checked against departments', async () => {
   assert.ok(body.availableDepartments.includes('Toys'));
   assert.equal(typeof body.daysBetweenScans, 'number');
 });
+
+test('full deal lists are uncapped and paged; the home page stays capped', async () => {
+  const first = await get('/api/walmart/deals?section=top&limit=10&offset=0');
+  assert.equal(first.status, 200);
+  assert.equal(first.body.deals.length, 10);
+  assert.ok(first.body.total > 10);
+  assert.equal(first.body.hasMore, true);
+  const rest = await get(`/api/walmart/deals?section=top&limit=100&offset=10`);
+  const all = [...first.body.deals, ...rest.body.deals];
+  assert.equal(all.length, first.body.total, 'paging returns every match');
+  assert.equal(new Set(all.map((d) => d.product.id)).size, all.length, 'no repeats across pages');
+  // no per-category cap in the full list (the home page allows 2)
+  const perCat = {};
+  for (const d of all) perCat[d.product.category] = (perCat[d.product.category] ?? 0) + 1;
+  assert.ok(Math.max(...Object.values(perCat)) > 2);
+
+  const clearance = await get('/api/walmart/deals?section=clearance&zip=72712&limit=5');
+  assert.equal(clearance.body.deals.length, Math.min(5, clearance.body.total));
+
+  const { body } = await get('/api/walmart/deals/sections?zip=72712');
+  const home = body.sections.find((s) => s.id === 'clearance').deals;
+  const brands = {};
+  for (const d of home) { const b = (d.product.brand || d.product.name.split(' ')[0]).toLowerCase(); brands[b] = (brands[b] ?? 0) + 1; }
+  assert.ok(Object.values(brands).every((n) => n <= 2), 'home clearance: at most 2 per brand');
+});

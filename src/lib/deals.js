@@ -137,7 +137,12 @@ export const SECTIONS = Object.freeze({
  * Rank analyzed deals for one section.
  * @param {ReturnType<typeof analyzeDeal>[]} analyzed
  */
-export function rankSection(section, analyzed, { category, minDiscount = 0, limit = 50, perCategory, perBrand } = {}) {
+/**
+ * @param {{ all?: boolean }} opts  all: every match, best first, with no caps or
+ *   limit (for full lists the caller pages through); otherwise a capped,
+ *   varied selection of `limit` deals (home page).
+ */
+export function rankSection(section, analyzed, { category, minDiscount = 0, limit = 50, perCategory, perBrand, all = false } = {}) {
   let list = analyzed.filter(
     (d) => d.discountPercent >= minDiscount && (!category || d.product.category === category),
   );
@@ -157,6 +162,7 @@ export function rankSection(section, analyzed, { category, minDiscount = 0, limi
     default:
       throw Object.assign(new Error(`Unknown deal section "${section}"`), { status: 400 });
   }
+  if (all) return list;
   // Caps grow with the page size; a picked category can fill the page, but one brand can't.
   return diversify(list, {
     limit,

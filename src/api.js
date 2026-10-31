@@ -2,7 +2,7 @@
 // retailers show up automatically once they're in the registry.
 import { isValidZip } from './lib/geo.js';
 import { summarizeAvailability, isSoldByRetailer } from './retailers/RetailerAdapter.js';
-import { analyzeDeal, isEligible, rankSection, SECTIONS } from './lib/deals.js';
+import { analyzeDeal, diversify, isEligible, rankSection, SECTIONS } from './lib/deals.js';
 import { DEFAULT_SCAN_CONFIG_PATH, describeScanConfig, loadScanConfig } from './lib/scanConfig.js';
 
 export class HttpError extends Error {
@@ -67,7 +67,8 @@ async function analyzeCandidates(adapter, { category } = {}) {
 }
 
 // One row per product: its best store markdown, plus how many stores have it.
-async function localClearanceDeals(adapter, zip, { category, minDiscount = 0, limit = 50 } = {}) {
+// Returns every match, biggest discount first.
+async function localClearanceDeals(adapter, zip, { category, minDiscount = 0 } = {}) {
   const rows = (await adapter.getLocalClearance(zip, { category })).filter(
     (r) => isSoldByRetailer(r.product) && r.discountPercent >= minDiscount,
   );
@@ -94,8 +95,7 @@ async function localClearanceDeals(adapter, zip, { category, minDiscount = 0, li
       clearance: true,
       reasons: ['Clearance'],
     }))
-    .sort((a, b) => b.discountPercent - a.discountPercent)
-    .slice(0, limit);
+    .sort((a, b) => b.discountPercent - a.discountPercent);
 }
 
 function clampInt(value, fallback, min, max) {
@@ -170,15 +170,20 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const opts = {
         category: query.get('category') || undefined,
         minDiscount: clampInt(query.get('minDiscount'), 0, 0, 100),
-        limit: clampInt(query.get('limit'), 50, 1, 100),
       };
+      // Full lists: every match, best first, no per-category or per-brand caps; paged.
+      const limit = clampInt(query.get('limit'), 50, 1, 100);
+      const offset = clampInt(query.get('offset'), 0, 0, 100000);
+      let all;
       if (section === 'clearance') {
         if (!adapter.features.localClearance) {
           throw new HttpError(501, `${adapter.name} doesn't publish store-level prices yet`);
         }
-        return { section, deals: await localClearanceDeals(adapter, requireZip(query.get('zip')), opts) };
+        all = await localClearanceDeals(adapter, requireZip(query.get('zip')), opts);
+      } else {
+        all = rankSection(section, await analyzeCandidates(adapter, opts), { ...opts, all: true });
       }
-      return { section, deals: rankSection(section, await analyzeCandidates(adapter, opts), opts) };
+      return { section, total: all.length, offset, deals: all.slice(offset, offset + limit), hasMore: offset + limit < all.length };
     }],
 
     // Every section at once, for the home page.
@@ -200,7 +205,9 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
             ? `${adapter.name} doesn't publish store-level prices, so this needs another data source.`
             : !zip ? 'Enter your ZIP code to see shelf markdowns at nearby stores.' : null;
           if (!note) {
-            deals = unseen(await localClearanceDeals(adapter, zip, { ...opts, limit: 100 }));
+            // At most 2 per brand on the home page, like the other sections.
+            const fresh = (await localClearanceDeals(adapter, zip, opts)).filter((d) => !shown.has(d.product.id));
+            deals = diversify(fresh, { limit: opts.limit, perCategory: Infinity, perBrand: 2 });
             if (!deals.length) note = 'No clearance found yet at scanned stores near this ZIP.';
           }
         } else if (adapter.dealsLoading) {

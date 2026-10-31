@@ -409,14 +409,45 @@ async function dealsView(query) {
     $list.innerHTML = '<div class="card empty">Enter your ZIP code at the top of the page to see shelf markdowns at nearby stores.</div>';
     return;
   }
+  // Every match, best first, 60 at a time.
+  const PAGE = 60;
+  const params = new URLSearchParams({ section, minDiscount: min, limit: String(PAGE) });
+  if (category) params.set('category', category);
+  if (state.zip) params.set('zip', state.zip);
+  const loadPage = async (offset) => {
+    params.set('offset', String(offset));
+    return api(`/api/${r.id}/deals?${params}`);
+  };
   try {
-    const params = new URLSearchParams({ section, minDiscount: min, limit: '60' });
-    if (category) params.set('category', category);
-    if (state.zip) params.set('zip', state.zip);
-    const { deals } = await api(`/api/${r.id}/deals?${params}`);
-    $list.innerHTML = deals.length
-      ? `<div class="grid">${deals.map(dealCard).join('')}</div>`
-      : '<div class="empty">No deals match those filters yet. Price drop and lowest-ever deals appear as the app records prices day to day.</div>';
+    const first = await loadPage(0);
+    if (!first.deals.length) {
+      $list.innerHTML = '<div class="empty">No deals match those filters yet. Price drop and lowest-ever deals appear as the app records prices day to day.</div>';
+      return;
+    }
+    $list.innerHTML = `<p class="muted" id="deal-count"></p><div class="grid" id="deal-grid"></div>
+      <div style="text-align:center;margin-top:20px"><button class="btn secondary" id="load-more" type="button" hidden>Load more</button></div>`;
+    const $grid = $list.querySelector('#deal-grid');
+    const $more = $list.querySelector('#load-more');
+    const $count = $list.querySelector('#deal-count');
+    let shown = 0;
+    const show = (page) => {
+      $grid.insertAdjacentHTML('beforeend', page.deals.map(dealCard).join(''));
+      shown += page.deals.length;
+      $count.textContent = `Showing ${shown} of ${page.total} deals`;
+      $more.hidden = !page.hasMore;
+    };
+    show(first);
+    $more.addEventListener('click', async () => {
+      $more.disabled = true;
+      $more.textContent = 'Loading…';
+      try {
+        show(await loadPage(shown));
+      } catch (err) {
+        $count.textContent = err.message;
+      }
+      $more.disabled = false;
+      $more.textContent = 'Load more';
+    });
   } catch (err) {
     $list.innerHTML = `<div class="error">${esc(err.message)}</div>`;
   }
