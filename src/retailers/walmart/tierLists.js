@@ -182,6 +182,12 @@ export class TierStore {
       ORDER BY item_id LIMIT ?`).all(this.retailer, run, afterId, limit).map((r) => r.item_id);
   }
 
+  /** One saved tier 1/2 product (Walmart-sold, from today's search), or null. */
+  product(itemId) {
+    const row = this.db.prepare('SELECT data FROM tier_products WHERE retailer = ? AND item_id = ?').get(this.retailer, String(itemId));
+    return row ? JSON.parse(row.data) : null;
+  }
+
   /** Products from the given tier 1/2 build, for the deal sections; older ones are dropped. */
   products(run) {
     this.db.prepare('DELETE FROM tier_products WHERE retailer = ? AND run <> ?').run(this.retailer, run);

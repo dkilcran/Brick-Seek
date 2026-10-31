@@ -135,6 +135,14 @@ export class StoreScanDb {
         department TEXT,
         PRIMARY KEY (retailer, item_id)
       ) WITHOUT ROWID;
+      -- Walmart's store list per ZIP (stores rarely change), so visitor pages don't wait on Walmart.
+      CREATE TABLE IF NOT EXISTS zip_stores (
+        retailer   TEXT NOT NULL,
+        zip        TEXT NOT NULL,
+        fetched_at INTEGER NOT NULL,
+        data       TEXT NOT NULL,
+        PRIMARY KEY (retailer, zip)
+      ) WITHOUT ROWID;
     `);
     this.upsertItem = db.prepare(`INSERT INTO store_items (retailer, item_id, title, image_url, department) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET title = COALESCE(excluded.title, store_items.title),
@@ -418,6 +426,32 @@ export class StoreScanDb {
     return this.db.prepare(`SELECT ${PRICE_COLUMNS} FROM store_latest p ${ITEM_JOIN}
       WHERE p.retailer = ? AND p.item_id = ? AND p.date >= ? AND lower(p.seller) IN ('walmart', 'walmart.com')
       ORDER BY p.price`).all(retailer, String(itemId), since);
+  }
+
+  /**
+   * What the store checks know about an item Walmart sells at a checked store:
+   * title, image, department and the lowest current store price. Null if none.
+   */
+  itemInfo(retailer, itemId) {
+    const row = this.db.prepare(`SELECT MIN(p.price) min_price, COUNT(*) stores, MAX(p.date) seen_on,
+        COALESCE(MAX(p.title), i.title) title, COALESCE(MAX(p.image_url), i.image_url) image_url,
+        COALESCE(MAX(p.department), i.department) department
+      FROM store_latest p ${ITEM_JOIN}
+      WHERE p.retailer = ? AND p.item_id = ? AND lower(p.seller) IN ('walmart', 'walmart.com')`).get(retailer, String(itemId));
+    return row?.stores ? row : null;
+  }
+
+  /** A saved store list for a ZIP, if fetched within maxAgeDays. */
+  zipStores(retailer, zip, { maxAgeDays = 7, now = Date.now() } = {}) {
+    const row = this.db.prepare('SELECT fetched_at, data FROM zip_stores WHERE retailer = ? AND zip = ?').get(retailer, String(zip));
+    if (!row || now - row.fetched_at > maxAgeDays * 86400000) return null;
+    return JSON.parse(row.data);
+  }
+
+  saveZipStores(retailer, zip, stores, now = Date.now()) {
+    this.db.prepare(`INSERT INTO zip_stores (retailer, zip, fetched_at, data) VALUES (?, ?, ?, ?)
+      ON CONFLICT (retailer, zip) DO UPDATE SET fetched_at = excluded.fetched_at, data = excluded.data`)
+      .run(retailer, String(zip), now, JSON.stringify(stores));
   }
 
   /** Recent items whose online seller hasn't been recorded yet. */

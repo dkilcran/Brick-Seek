@@ -48,6 +48,9 @@ export class WalmartAdapter extends RetailerAdapter {
         const hour = loadConfig().config?.schedule?.productListHour ?? 4;
         return scheduleDayKey(new Date(fetchedAt), hour) !== scheduleDayKey(now, hour);
       };
+      // Store-level prices for the stores in config/store-scan.json: free checks
+      // through Walmart's item lookup, plus SerpApi discovery when a key is set.
+      const storeDb = new StoreScanDb(tracker.db);
       const source = new WalmartLiveSource({
         consumerId: env.WALMART_CONSUMER_ID,
         keyVersion: env.WALMART_KEY_VERSION ?? '1',
@@ -61,11 +64,12 @@ export class WalmartAdapter extends RetailerAdapter {
         poolStore: new PoolStore(tracker.db),
         // An explicit WALMART_POOL_REFRESH_MINUTES keeps the old interval behavior.
         poolRefreshDue: env.WALMART_POOL_REFRESH_MINUTES ? undefined : poolRefreshDue,
+        zipStoreCache: {
+          get: (zip) => storeDb.zipStores('walmart', zip),
+          set: (zip, stores) => storeDb.saveZipStores('walmart', zip, stores),
+        },
       });
       const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
-      // Store-level prices for the stores in config/store-scan.json: free checks
-      // through Walmart's item lookup, plus SerpApi discovery when a key is set.
-      const storeDb = new StoreScanDb(tracker.db);
       storeDb.ensureMarkdowns('walmart');
       adapter.storeDb = storeDb;
       adapter.loadStoreConfig = loadConfig;
@@ -142,9 +146,33 @@ export class WalmartAdapter extends RetailerAdapter {
   }
 
   async getProduct(id) {
+    const stored = this.storedProduct(id);
+    if (stored) return stored;
     const product = await this.source.getById(id);
     if (product) this.tracker.record(this.id, product.id, product.price);
     return product;
+  }
+
+  /**
+   * A product from saved data, so visitor pages don't wait on Walmart: today's
+   * deal pool, then the tier 1/2 search results, then what the store checks saw.
+   * Only items Walmart itself sells; anything else is looked up live.
+   */
+  storedProduct(id) {
+    const key = String(id);
+    const pooled = this.source.pool?.byId?.get?.(key);
+    if (pooled?.seller?.isRetailer) return pooled;
+    const tiered = this.tierStore?.product(key);
+    if (tiered) return tiered;
+    const info = this.storeData?.itemInfo?.(this.id, key);
+    if (!info) return null;
+    return {
+      retailer: this.id, id: key, sku: key, upc: null, name: info.title ?? `Item ${key}`, brand: null,
+      category: info.department ?? null, imageUrl: info.image_url ?? null, url: walmartProductUrl(key),
+      // Only store prices are known; the online offer wasn't looked up.
+      price: null, msrp: null, seller: { name: 'Walmart.com', isRetailer: true },
+      rating: null, reviewCount: null, specialOffer: null, inStockOnline: null, storeOnly: true,
+    };
   }
 
   async findStores(zip, opts = {}) {
@@ -293,7 +321,7 @@ export class WalmartAdapter extends RetailerAdapter {
   }
 
   async getPriceHistory(productId, opts = {}) {
-    const product = await this.source.getById(productId);
+    const product = await this.getProduct(productId);
     if (!product) return null;
     return this.getPriceHistoryFor(product, opts);
   }

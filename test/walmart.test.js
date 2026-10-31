@@ -449,7 +449,7 @@ test('store scan prices feed Clearance near you and the stock check', async () =
   assert.equal(lees.status, 'in_stock');
   assert.equal(lees.clearance, true);
   assert.ok(lees.seenOn);
-  assert.equal(raytown.price, 10.97, 'unscanned store keeps the online price');
+  assert.equal(raytown.price, null, 'unchecked store: the online offer is not looked up for a stored item');
   assert.equal(raytown.status, 'unknown');
 });
 
@@ -626,4 +626,43 @@ test('Clearance near you includes calculated clearance: cheaper at one store tha
   assert.equal(deals[0].store.id, '4590');
   assert.equal(deals[0].product.msrp, 28.98);
   assert.equal(deals[0].discountPercent, 21);
+});
+
+test('product pages and store lists come from saved data instead of Walmart', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const { TierStore } = await import('../src/retailers/walmart/tierLists.js');
+  const tracker = new PriceTracker();
+  const db = new StoreScanDb(tracker.db);
+  db.recordRun({
+    retailer: 'walmart', storeId: '573', department: 'Home', term: '', month: '2026-10', ranAt: Date.now(), clearance: 1,
+    results: [{ itemId: '700', title: 'Lamp', price: 5, wasPrice: 9, inStock: true, seller: 'Walmart.com' }],
+  });
+  const tiers = new TierStore(db);
+  tiers.upsertProduct.run('walmart', '701', '2026-10-31:t12', JSON.stringify({ id: '701', name: 'Rug', price: 20, seller: { name: 'Walmart.com', isRetailer: true } }));
+  let liveCalls = 0;
+  const source = { getById: async () => { liveCalls += 1; return null; } };
+  const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
+  adapter.storeDb = db;
+  adapter.tierStore = tiers;
+  assert.equal((await adapter.getProduct('701')).name, 'Rug', 'from the tier search');
+  const lamp = await adapter.getProduct('700');
+  assert.equal(lamp.name, 'Lamp', 'from the store checks');
+  assert.equal(lamp.seller.isRetailer, true);
+  assert.equal(liveCalls, 0);
+  assert.equal(await adapter.getProduct('999'), null);
+  assert.equal(liveCalls, 1, 'unknown items are looked up live');
+
+  // The store list for a ZIP is saved and reused for a week.
+  const calls = [];
+  const live = new WalmartLiveSource({
+    consumerId: 'x', privateKey: generateKeyPairSync('rsa', { modulusLength: 1024 }).privateKey.export({ type: 'pkcs1', format: 'pem' }),
+    minIntervalMs: 0,
+    fetchImpl: async (url) => { calls.push(String(url)); return { ok: true, status: 200, json: async () => [{ no: 573, name: 'Lee', coordinates: [-94, 38] }, { no: 1094, name: 'Raytown' }] }; },
+    zipStoreCache: { get: (zip) => db.zipStores('walmart', zip), set: (zip, stores) => db.saveZipStores('walmart', zip, stores) },
+  });
+  assert.deepEqual((await live.stores('64081', { limit: 1 })).map((s) => s.id), ['573']);
+  live.cache.clear?.();
+  assert.deepEqual((await live.stores('64081')).map((s) => s.id), ['573', '1094'], 'the full list was saved');
+  assert.equal(calls.length, 1);
+  assert.equal(db.zipStores('walmart', '64081', { now: Date.now() + 8 * 86400000 }), null, 'older than a week is refetched');
 });

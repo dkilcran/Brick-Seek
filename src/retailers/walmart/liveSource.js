@@ -104,7 +104,7 @@ export class WalmartLiveSource {
   constructor({
     consumerId, keyVersion = '1', privateKey, privateKeyPath, publisherId, fetchImpl = fetch,
     poolPages = 3, poolRefreshMs = 24 * 60 * 60 * 1000, poolMaxItems = 20000, poolStore = null,
-    poolRefreshDue = null,
+    poolRefreshDue = null, zipStoreCache = null,
     minIntervalMs = 2000, maxRetries = 3, retryPassDelayMs = 30000,
     itemChecks = null,
   } = {}) {
@@ -125,6 +125,8 @@ export class WalmartLiveSource {
     /** @type {(fetchedAt: number, now: Date) => boolean} when a saved pool needs refreshing; default: older than poolRefreshMs */
     this.poolRefreshDue = poolRefreshDue ?? ((fetchedAt, now) => now.getTime() - fetchedAt >= this.poolRefreshMs);
     this.poolRefresh = null;
+    /** @type {{ get(zip): object[]|null, set(zip, stores): void }|null} saved store lists per ZIP */
+    this.zipStoreCache = zipStoreCache;
     // Walmart rate-limits the affiliate API, so requests are spaced out.
     this.minIntervalMs = minIntervalMs;
     this.maxRetries = maxRetries;
@@ -312,9 +314,11 @@ export class WalmartLiveSource {
   }
 
   async stores(zip, { limit = 15 } = {}) {
+    const saved = this.zipStoreCache?.get(zip);
+    if (saved?.length) return saved.slice(0, limit);
     const data = await this.request('/stores', { zip });
     const list = Array.isArray(data) ? data : [];
-    return list.slice(0, limit).map((s) => ({
+    const stores = list.map((s) => ({
       retailer: 'walmart',
       id: String(s.no),
       name: s.name ?? `Walmart #${s.no}`,
@@ -328,6 +332,14 @@ export class WalmartLiveSource {
       lon: Array.isArray(s.coordinates) ? s.coordinates[0] : null,
       distanceMiles: null,
     }));
+    if (stores.length) {
+      try {
+        this.zipStoreCache?.set(zip, stores);
+      } catch (err) {
+        console.warn('walmart: could not save the store list', err.message);
+      }
+    }
+    return stores.slice(0, limit);
   }
 
   async inventory(product, zip, opts = {}) {
