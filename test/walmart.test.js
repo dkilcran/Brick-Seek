@@ -674,3 +674,25 @@ test('product pages and store lists come from saved data instead of Walmart', as
   assert.equal(calls.length, 1);
   assert.equal(db.zipStores('walmart', '64081', { now: Date.now() + 8 * 86400000 }), null, 'older than a week is refetched');
 });
+
+test('deal lists show only the departments in the settings', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const tracker = new PriceTracker();
+  const db = new StoreScanDb(tracker.db);
+  const shirt = { itemId: '801', title: 'Shirt', price: 2, wasPrice: 9, inStock: true, seller: 'Walmart.com', category: 'Clothing' };
+  const lamp = { itemId: '802', title: 'Lamp', price: 4, wasPrice: 9, inStock: true, seller: 'Walmart.com', category: 'Home' };
+  db.recordStorePrices('walmart', '573', [shirt, lamp], new Date().toISOString().slice(0, 10));
+  db.refreshMarkdowns('walmart');
+  const pool = [
+    { id: '801', category: 'Clothing', price: 2, seller: { isRetailer: true } },
+    { id: '802', category: 'Home', price: 4, seller: { isRetailer: true } },
+    { id: '803', category: null, price: 4, seller: { isRetailer: true } },
+  ];
+  const source = { stores: async () => [{ id: '573' }], dealCandidates: async () => pool };
+  const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
+  adapter.storeDb = db;
+  adapter.loadStoreConfig = () => ({ config: { departments: ['Home', 'Toys'], stores: [] }, errors: [] });
+  assert.deepEqual((await adapter.getLocalClearance('64081')).map((c) => c.product.id), ['802']);
+  assert.deepEqual((await adapter.getDealCandidates()).map((p) => p.id), ['802', '803']);
+  assert.deepEqual(await adapter.getCategories(), ['Home']);
+});

@@ -221,7 +221,19 @@ export class WalmartAdapter extends RetailerAdapter {
       this.tracker.recordMany(this.id, products);
       this.recordedStamp = this.source.poolStamp;
     }
-    return products;
+    const keep = this.departmentFilter();
+    return keep ? products.filter((p) => keep(p.category)) : products;
+  }
+
+  /**
+   * Deal lists show only the departments in config/store-scan.json (items
+   * with no department are kept). Null when there's no such setting.
+   */
+  departmentFilter() {
+    const departments = this.storeConfig()?.departments;
+    if (!departments?.length) return null;
+    const allowed = new Set(departments);
+    return (category) => !category || allowed.has(category);
   }
 
   /** Changes whenever the deal pool does; used to cache ranking. */
@@ -273,7 +285,8 @@ export class WalmartAdapter extends RetailerAdapter {
     const scanned = new Set(db.scannedStores(this.id));
     const stores = (await this.source.stores(zip, { limit: 50 })).filter((s) => scanned.has(s.id));
     // The markdown table only changes when it's rebuilt, so reuse the result until then.
-    const key = `${db.markdownVersion}|${stores.map((s) => s.id).join(',')}|${category ?? ''}`;
+    const departments = this.storeConfig()?.departments ?? [];
+    const key = `${db.markdownVersion}|${stores.map((s) => s.id).join(',')}|${category ?? ''}|${departments.join(',')}`;
     this.clearanceCache ??= new Map();
     const cached = this.clearanceCache.get(key);
     if (cached) return cached;
@@ -285,11 +298,12 @@ export class WalmartAdapter extends RetailerAdapter {
 
   readClearance(db, stores, { category }) {
     const storeById = new Map(stores.map((s) => [s.id, s]));
+    const keep = this.departmentFilter() ?? (() => true);
     // Precomputed markdowns (Walmart Clearance flag, below was-price, or calculated
     // clearance: cheaper than the item's highest price at another store).
     return db.markdownRows(this.id, stores.map((s) => s.id))
       .filter((r) => r.in_stock !== 0)
-      .filter((r) => !category || r.department === category)
+      .filter((r) => (!category || r.department === category) && keep(r.department))
       .map((r) => {
         // Discounts use Walmart's own "was" price for that store (strike-through
         // price), else the highest price at another store. The default online
@@ -325,7 +339,7 @@ export class WalmartAdapter extends RetailerAdapter {
   /** Departments that have Walmart-sold items in the deal pool, most items first. */
   async getCategories() {
     const counts = new Map();
-    for (const p of await this.source.dealCandidates({ wait: false })) {
+    for (const p of await this.getDealCandidates({ wait: false })) {
       if (!p.seller?.isRetailer || !p.category) continue;
       counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
     }

@@ -76,7 +76,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   }, 5 * 60 * 1000).unref();
   const pruneAll = () => {
     registry.tracker.prune();
-    for (const adapter of registry.list()) adapter.storeData?.prune();
+    for (const adapter of registry.list()) adapter.storeData?.prune().catch((err) => console.warn('prune failed', err.message));
   };
   pruneAll();
   setInterval(pruneAll, 24 * 60 * 60 * 1000).unref();

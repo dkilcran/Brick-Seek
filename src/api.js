@@ -47,6 +47,8 @@ function requireRetailerItem(adapter, product) {
   throw new HttpError(404, `This item is sold by ${product.seller?.name ?? 'a marketplace seller'}, not ${adapter.name}`);
 }
 
+const discoveryCache = new Map();
+
 // Ranking ~20k items takes a few hundred ms, so reuse it until the pool changes.
 const analysisCache = new Map();
 
@@ -352,14 +354,20 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       if (!adapter.storeData) return { enabled: false, reason: 'Live mode only' };
       const days = clampInt(query.get('days'), 7, 1, 60);
       const since = new Date(Date.now() - days * 86400000).toISOString().slice(0, 10);
-      return { since, ...adapter.storeData.discoveryYield(adapter.id, since) };
+      // Reused for 10 minutes: it reads every find in the window.
+      const key = `${adapter.id}|${since}`;
+      const hit = discoveryCache.get(key);
+      if (hit && Date.now() - hit.at < 10 * 60000) return hit.result;
+      const result = { since, ...(await adapter.storeData.discoveryYield(adapter.id, since)) };
+      discoveryCache.set(key, { at: Date.now(), result });
+      return result;
     }],
 
     // Free store checks (Walmart item lookup per store): today's progress.
     ['GET', '/api/:retailer/store-check', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);
       if (!adapter.storeChecker) return { enabled: false, reason: 'Live mode only' };
-      return { enabled: true, ...adapter.storeChecker.status(), prices: adapter.storeData.priceCount(adapter.id), databaseMb: adapter.storeData.sizeMb() };
+      return { enabled: true, ...adapter.storeChecker.status(), prices: adapter.storeData.priceCount(adapter.id), databaseMb: adapter.storeData.sizeMb(), databaseFreeMb: adapter.storeData.freeMb() };
     }],
 
     ['GET', '/api/:retailer/store-scan/inspect', async ({ params }) => {

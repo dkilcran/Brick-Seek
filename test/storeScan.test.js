@@ -213,3 +213,34 @@ test('online sellers are backfilled for items scanned before they were tracked',
   assert.equal(rows[0].online_price, 5);
   assert.equal(rows[1].online_seller, '(not sold online)');
 });
+
+test('price history only grows when something changes; current prices still show the latest check', async () => {
+  const db = new StoreScanDb(new PriceTracker().db);
+  const save = (date, price, clearance = false) => db.recordStorePrices('walmart', '573', [{ itemId: '1', price, seller: 'Walmart.com', inStock: true, clearance }], date);
+  save('2026-11-01', 5);
+  save('2026-11-02', 5);
+  save('2026-11-03', 5);
+  save('2026-11-04', 3, true);
+  const rows = db.db.prepare('SELECT date, price FROM store_prices ORDER BY date').all().map((r) => `${r.date}:${r.price}`);
+  assert.deepEqual(rows, ['2026-11-01:5', '2026-11-04:3']);
+  assert.equal(db.db.prepare('SELECT date FROM store_latest').get().date, '2026-11-04');
+
+  // Discovery stats still see an item marked down on a day it didn't change.
+  save('2026-11-05', 3, true);
+  db.recordDiscovery('walmart', '2026-11-05', 'T1 Toys', 1, [{ itemId: '1', inPool: false }]);
+  db.recordDiscovery('walmart', '2026-11-02', 'T1 Toys', 1, [{ itemId: '1', inPool: false }]);
+  const days = (await db.discoveryYield('walmart', '2026-11-01')).days;
+  assert.deepEqual(days.map((d) => [d.day, d.markedDown]), [['2026-11-02', 0], ['2026-11-05', 1]]);
+
+  db.refreshMarkdowns('walmart', { now: Date.parse('2026-11-05T12:00:00Z') });
+  assert.equal(db.markedDownCount('walmart', '2026-11-05'), 1);
+});
+
+test('prune drops price history older than 14 days in chunks and keeps current prices', async () => {
+  const db = new StoreScanDb(new PriceTracker().db);
+  const items = Array.from({ length: 6000 }, (_, i) => ({ itemId: String(i), price: 5, seller: 'Walmart.com' }));
+  db.recordStorePrices('walmart', '573', items, '2026-10-01');
+  db.recordStorePrices('walmart', '573', [{ itemId: '1', price: 4, seller: 'Walmart.com' }], '2026-11-01');
+  await db.prune(Date.parse('2026-11-04T12:00:00Z'));
+  assert.deepEqual(db.db.prepare('SELECT item_id, date FROM store_prices').all().map((r) => `${r.item_id}:${r.date}`), ['1:2026-11-01']);
+});

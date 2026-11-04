@@ -206,9 +206,20 @@ export class StoreScanDb {
     if (!has && prices) this.refreshMarkdowns(retailer);
   }
 
-  /** Save one price row to the daily history and the latest-price table. */
+  /**
+   * Save one price: the latest-price table always, the history only when
+   * something changed (price, was-price, stock, Clearance flag or seller), so
+   * the history is a change log instead of a daily copy of every price.
+   * Values are in the column order of store_prices.
+   */
   savePrice(...values) {
-    this.upsertPrice.run(...values);
+    const [retailer, storeId, itemId, , price, wasPrice, inStock, seller, , , , , , , clearance] = values;
+    this.getLatest ??= this.db.prepare(`SELECT price, was_price, in_stock, seller, clearance FROM store_latest
+      WHERE retailer = ? AND store_id = ? AND item_id = ?`);
+    const prev = this.getLatest.get(retailer, storeId, itemId);
+    const same = prev && prev.price === price && prev.was_price === wasPrice && prev.in_stock === inStock
+      && prev.seller === seller && (clearance === null || prev.clearance === clearance);
+    if (!same) this.upsertPrice.run(...values);
     this.upsertLatest.run(...values);
   }
 
@@ -310,14 +321,25 @@ export class StoreScanDb {
    * many were marked down at a store that day (Walmart-sold, Clearance flag or
    * a higher was-price).
    */
-  discoveryYield(retailer, sinceDay) {
+  async discoveryYield(retailer, sinceDay) {
     // Simple indexed queries, counted in JS. A single SQL query with a CTE was
     // re-evaluated per row by SQLite and blocked the server for minutes.
     const finds = this.db.prepare(`SELECT day, item_id, department, page, in_pool FROM discovery_finds
       WHERE retailer = ? AND day >= ?`).all(retailer, sinceDay);
-    const isMarked = this.db.prepare(`SELECT 1 FROM store_prices INDEXED BY store_prices_by_item_date
-      WHERE retailer = ? AND item_id = ? AND date = ? AND (clearance = 1 OR was_price > price)
-        AND lower(seller) IN ('walmart', 'walmart.com') LIMIT 1`);
+    // The history only has a row when something changed, so an item was marked
+    // down at a store on a day if its latest price (seen by then) is, or a
+    // marked-down history row up to that day has no newer row by that day.
+    const WALMART_MARKED = `(clearance = 1 OR was_price > price) AND lower(seller) IN ('walmart', 'walmart.com')`;
+    const latestMarked = this.db.prepare(`SELECT 1 FROM store_latest INDEXED BY store_latest_by_item
+      WHERE retailer = ? AND item_id = ? AND date <= ? AND ${WALMART_MARKED} LIMIT 1`);
+    const markedRows = this.db.prepare(`SELECT store_id, date FROM store_prices INDEXED BY store_prices_by_item_date
+      WHERE retailer = ? AND item_id = ? AND date <= ? AND ${WALMART_MARKED}`);
+    const newer = this.db.prepare(`SELECT 1 FROM store_prices
+      WHERE retailer = ? AND store_id = ? AND item_id = ? AND date > ? AND date <= ? LIMIT 1`);
+    const isMarked = {
+      get: (ret, itemId, day) => latestMarked.get(ret, itemId, day)
+        || markedRows.all(ret, itemId, day).some((r) => !newer.get(ret, r.store_id, itemId, r.date, day)),
+    };
     const blank = () => ({ found: 0, new: 0, markedDown: 0, markedDownNew: 0 });
     const add = (acc, f, marked) => {
       acc.found += 1;
@@ -327,7 +349,9 @@ export class StoreScanDb {
     };
     const byDay = new Map();
     const byDepartment = new Map();
-    for (const f of finds) {
+    // ~25 microseconds per find; pause every 2,000 so other requests aren't held up.
+    for (const [i, f] of finds.entries()) {
+      if (i && i % 2000 === 0) await new Promise((r) => setImmediate(r));
       const marked = Boolean(isMarked.get(retailer, f.item_id, f.day));
       if (!byDay.has(f.day)) byDay.set(f.day, { day: f.day, ...blank() });
       add(byDay.get(f.day), f, marked);
@@ -349,20 +373,44 @@ export class StoreScanDb {
     };
   }
 
-  /** Distinct Walmart-sold items marked down at any store on a day (one indexed pass over that day). */
+  /**
+   * Distinct Walmart-sold items marked down (Clearance flag or below was-price)
+   * at a store checked that day, from the markdown table (rebuilt just before).
+   */
   markedDownCount(retailer, day) {
-    return this.db.prepare(`SELECT COUNT(DISTINCT item_id) n FROM store_prices
-      WHERE retailer = ? AND date = ? AND (clearance = 1 OR was_price > price) AND lower(seller) IN ('walmart', 'walmart.com')`)
-      .get(retailer, day).n;
+    return this.db.prepare(`SELECT COUNT(DISTINCT item_id) n FROM store_markdowns
+      WHERE retailer = ? AND date = ? AND kind IN ('flag', 'was')`).get(retailer, day).n;
   }
 
-  /** Drop history older than PRICE_DAYS (and discovery records older than 60 days). */
-  prune(now = Date.now()) {
+  /**
+   * Drop history older than PRICE_DAYS (and discovery records older than 60
+   * days). If the database is still over maxMb (the Render disk is 1 GB),
+   * history is cut to a week; current prices are kept.
+   */
+  async prune(now = Date.now(), { maxMb = 700 } = {}) {
     const day = (n) => new Date(now - n * 86400000).toISOString().slice(0, 10);
-    this.db.prepare('DELETE FROM store_prices WHERE date < ?').run(day(PRICE_DAYS));
+    await this.deleteHistoryBefore(day(PRICE_DAYS));
+    if (this.sizeMb() - this.freeMb() > maxMb) {
+      console.warn(`store prices: database over ${maxMb} MB, keeping 7 days of price history`);
+      await this.deleteHistoryBefore(day(7));
+    }
     this.db.prepare('DELETE FROM store_latest WHERE date < ?').run(day(PRICE_DAYS));
     this.db.prepare('DELETE FROM store_markdowns WHERE date < ?').run(day(PRICE_DAYS));
     this.db.prepare('DELETE FROM discovery_finds WHERE day < ?').run(day(60));
+  }
+
+  /** Delete history rows dated before `date`, 5,000 at a time so requests aren't held up. */
+  async deleteHistoryBefore(date) {
+    const chunk = this.db.prepare(`DELETE FROM store_prices WHERE (retailer, store_id, item_id, date) IN
+      (SELECT retailer, store_id, item_id, date FROM store_prices INDEXED BY store_prices_by_date WHERE date < ? LIMIT 5000)`);
+    while (chunk.run(date).changes) await new Promise((r) => setImmediate(r));
+  }
+
+  /** Space inside the database file that's free for reuse (after deletes), in MB. */
+  freeMb() {
+    const { freelist_count: free } = this.db.prepare('PRAGMA freelist_count').get();
+    const { page_size: size } = this.db.prepare('PRAGMA page_size').get();
+    return Math.round((free * size) / 1048576);
   }
 
   /** Database file size in MB. */
@@ -373,6 +421,20 @@ export class StoreScanDb {
   }
 
   /** Items marked down at any store (any kind), from store_markdowns. */
+  /**
+   * Keep the ids whose department (from earlier store checks) is in
+   * `departments`; items with no known department are kept.
+   */
+  inDepartments(retailer, ids, departments) {
+    if (!departments?.length) return ids;
+    const allowed = new Set(departments);
+    const dept = this.db.prepare('SELECT department FROM store_items WHERE retailer = ? AND item_id = ?');
+    return ids.filter((id) => {
+      const d = dept.get(retailer, String(id))?.department;
+      return !d || allowed.has(d);
+    });
+  }
+
   candidateItems(retailer) {
     return this.db.prepare('SELECT DISTINCT item_id FROM store_markdowns WHERE retailer = ?').all(retailer).map((r) => r.item_id);
   }

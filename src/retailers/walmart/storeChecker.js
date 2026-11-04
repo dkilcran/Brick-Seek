@@ -155,7 +155,7 @@ export class StoreChecker {
     if (state.phase === 'lists') {
       const job = this.tiers.nextJob(state.listRun);
       if (job) {
-        await this.tiers.runJob(state.listRun, job, this.source);
+        await this.tiers.runJob(state.listRun, job, this.source, { keep: this.keepProduct(config) });
         this.state = { ...state, searches: state.searches + 1 };
         return true;
       }
@@ -181,7 +181,8 @@ export class StoreChecker {
       if (state.segmentTotal === null) {
         // Fresh markdowns first: the later segments' lists come from them.
         this.db.refreshMarkdowns(this.retailer);
-        const ids = seg.ids();
+        // Only the departments in the settings (items found earlier in others are skipped).
+        const ids = this.db.inDepartments(this.retailer, seg.ids(), config.departments);
         this.saveList('segment', ids);
         this.state = { ...state, segmentTotal: ids.length, offset: 0 };
         return true;
@@ -212,7 +213,7 @@ export class StoreChecker {
       }
       const job = this.tiers.nextJob(run);
       if (job) {
-        await this.tiers.runJob(run, job, this.source);
+        await this.tiers.runJob(run, job, this.source, { keep: this.keepProduct(config) });
         this.state = { ...state, searches: state.searches + 1 };
         return true;
       }
@@ -237,13 +238,11 @@ export class StoreChecker {
       let slice = state.tier3Slice;
       if (!slice || slice.storeIndex >= daily.length) {
         const cursor = this.db.getMeta(`tier3:cursor:${this.retailer}`) ?? '';
-        let ids = this.tiers.tier3Batch(cursor, BATCH);
-        if (!ids.length && cursor) ids = this.tiers.tier3Batch('', BATCH); // wrap around
+        const ids = this.tier3Ids(cursor, config);
         if (!ids.length) {
           this.finish(state);
           return false;
         }
-        this.db.setMeta(`tier3:cursor:${this.retailer}`, ids.at(-1));
         slice = { ids, storeIndex: 0 };
       }
       const storeId = daily[slice.storeIndex];
@@ -258,6 +257,42 @@ export class StoreChecker {
       return true;
     }
     return false;
+  }
+
+  /** Search results to keep: items in the settings' departments (or with no department). */
+  keepProduct(config) {
+    const allowed = new Set(config.departments ?? []);
+    return (p) => !allowed.size || !p.category || allowed.has(p.category);
+  }
+
+  /**
+   * The next BATCH tier 3 items after the cursor that are in the settings'
+   * departments, wrapping around at the end of the list. Moves the cursor.
+   */
+  tier3Ids(cursor, config) {
+    const ids = [];
+    let at = cursor;
+    let wrapped = !cursor;
+    for (let tries = 0; ids.length < BATCH && tries < 50; tries += 1) {
+      let candidates = this.tiers.tier3Batch(at, BATCH * 5);
+      if (!candidates.length) {
+        if (wrapped) break;
+        wrapped = true;
+        at = '';
+        candidates = this.tiers.tier3Batch(at, BATCH * 5);
+        if (!candidates.length) break;
+      }
+      for (const id of this.db.inDepartments(this.retailer, candidates, config.departments)) {
+        if (ids.length >= BATCH) break;
+        if (wrapped && cursor && id > cursor) break; // a full lap
+        ids.push(id);
+        at = id;
+      }
+      if (ids.length < BATCH) at = candidates.at(-1);
+      if (wrapped && cursor && at >= cursor) break;
+    }
+    if (ids.length) this.db.setMeta(`tier3:cursor:${this.retailer}`, ids.at(-1));
+    return ids;
   }
 
   /** After checks: rebuild tier 3 on its day (or continue a rebuild), else go straight to tier 3 slices. */

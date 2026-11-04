@@ -211,3 +211,44 @@ test('restartChecks starts today over once', async () => {
   await day.runUntilIdle();
   assert.ok(day.lookups.length - after < 50, 'not restarted again (only tier 3 slices may continue)');
 });
+
+test('only the settings\' departments: searches drop other departments, and checks skip items known to be in them', async () => {
+  const catalog = {
+    'special_offers:Clearance': [{ id: 't1a', price: 4 }, { id: 't1shirt', price: 3 }],
+    'special_offers:Rollback': [],
+    all: Array.from({ length: 30 }, (_, i) => ({ id: `x${String(i).padStart(2, '0')}`, price: 5 })),
+  };
+  const day = makeDay({ start: '2026-11-02T11:00:00Z', catalog });
+  const search = day.source.searchPage.bind(day.source);
+  day.source.searchPage = async (q) => {
+    const r = await search(q);
+    return { ...r, products: r.products.map((p) => ({ ...p, category: p.id === 't1shirt' ? 'Clothing' : 'Toys' })) };
+  };
+  // x00..x04 were seen before in Clothing.
+  for (let i = 0; i < 5; i++) day.db.upsertItem.run('walmart', `x0${i}`, 'Shirt', null, 'Clothing');
+  await day.runUntilIdle();
+  assert.deepEqual(day.tiers.itemIds(1), ['t1a'], 'the Clothing find is left out of the list');
+  const tier3 = day.lookups.filter((l) => l.ids[0].startsWith('x'));
+  assert.ok(tier3.length > 0);
+  for (const l of tier3) {
+    assert.ok(l.ids.every((id) => !['x00', 'x01', 'x02', 'x03', 'x04'].includes(id)), 'known Clothing items are skipped');
+    assert.equal(new Set(l.ids).size, l.ids.length);
+  }
+  assert.ok(tier3.some((l) => l.ids.length === 20), 'batches stay full');
+});
+
+test('tier 3 batches wrap around at the end of the list without repeating within a batch', () => {
+  const { db, tiers } = newStores();
+  for (let i = 0; i < 30; i++) tiers.insertItem.run('walmart', 3, 'r', `x${String(i).padStart(2, '0')}`, 'Toys');
+  tiers.markBuilt(3, 'r');
+  db.upsertItem.run('walmart', 'x01', 'Shirt', null, 'Clothing');
+  const checker = new StoreChecker({ source: {}, db, tiers, loadConfig: () => ({ config: null, errors: [] }) });
+  const config = { departments: ['Toys'] };
+  const first = checker.tier3Ids('', config);
+  assert.equal(first.length, 20);
+  assert.ok(!first.includes('x01'));
+  const second = checker.tier3Ids(first.at(-1), config);
+  assert.deepEqual(second.slice(0, 9), Array.from({ length: 9 }, (_, i) => `x${21 + i}`));
+  assert.ok(second.length <= 20 && new Set(second).size === second.length);
+  assert.ok(second.slice(9).every((id) => id < first.at(-1)), 'after the end it starts over from the top');
+});

@@ -99,9 +99,10 @@ export class TierStore {
    * Run one search job: save what it found, then queue follow-ups (more
    * pages, or narrower searches when there are more than 1,000 results).
    * @param {{ searchPage }} source  WalmartLiveSource
+   * @param {{ keep?: (product) => boolean }} opts  e.g. only the departments in the settings
    * @returns {Promise<{ found: number, total: number }>}
    */
-  async runJob(run, job, source) {
+  async runJob(run, job, source, { keep = () => true } = {}) {
     let result;
     try {
       result = await source.searchPage({ query: job.query, filters: job.filters, lo: job.lo, hi: job.hi, start: job.start, sort: job.sort });
@@ -111,7 +112,9 @@ export class TierStore {
       this.db.prepare('DELETE FROM search_queue WHERE id = ?').run(job.id);
       return { found: 0, total: 0, skipped: err.message.slice(0, 120) };
     }
-    const { products, total } = result;
+    const { total } = result;
+    // Searches for one department also return items from others (e.g. clothing for "seasonal").
+    const products = result.products.filter(keep);
     this.db.exec('BEGIN');
     try {
       for (const p of products) {
@@ -177,7 +180,7 @@ export class TierStore {
   /** The next `limit` tier-3 items after `afterId` (in item-id order), for slices that continue across days. */
   tier3Batch(afterId, limit) {
     const run = this.builtRun(3);
-    if (!run) return [];
+    if (!run || limit <= 0) return [];
     return this.db.prepare(`SELECT item_id FROM tier_items WHERE retailer = ? AND tier = 3 AND run = ? AND item_id > ?
       ORDER BY item_id LIMIT ?`).all(this.retailer, run, afterId, limit).map((r) => r.item_id);
   }
