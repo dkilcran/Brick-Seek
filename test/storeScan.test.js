@@ -312,3 +312,12 @@ test('startup rebuilds deals still labeled by an older version', () => {
   db.ensureMarkdowns('walmart');
   assert.equal(db.markdownRows('walmart', ['573']).length, 0, 'a was-price alone is no longer a deal');
 });
+
+test('the typical price only uses current Walmart-sold prices', () => {
+  const db = new StoreScanDb(new PriceTracker().db);
+  db.recordStorePrices('walmart', 'A', [{ itemId: '1', price: 1, seller: 'Walmart.com', inStock: true }], '2026-11-04');
+  db.recordStorePrices('walmart', 'B', [{ itemId: '1', price: 6, seller: 'Chip Co', inStock: true }], '2026-11-04');
+  db.recordStorePrices('walmart', 'C', [{ itemId: '1', price: 6, seller: 'Walmart.com', inStock: true }], '2026-10-01');
+  db.refreshMarkdowns('walmart', { now: Date.parse('2026-11-04T12:00:00Z') });
+  assert.equal(db.markdownRows('walmart', ['A']).length, 0, 'one current Walmart price: nothing to compare with');
+});

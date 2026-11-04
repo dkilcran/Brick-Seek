@@ -11,6 +11,8 @@ const PRICE_DAYS = 14; // store prices older than this aren't shown, and history
 // "Calculated clearance": a store at least this much below the item's highest price at other stores.
 /** A store price at least this far below the item's typical price (or its own earlier price) is a markdown. */
 export const MARKDOWN_GAP = 0.1;
+/** Bump when the labeling rules change, so startup rebuilds store_markdowns with them. */
+const MARKDOWN_RULES = '2';
 // Price columns with title/image/department from store_items when the row has none.
 const PRICE_COLUMNS = `p.retailer, p.store_id, p.item_id, p.date, p.price, p.was_price, p.in_stock, p.seller,
   p.online_price, p.online_seller, p.clearance, p.source, p.url,
@@ -220,15 +222,18 @@ export class StoreScanDb {
   }
 
   /**
-   * Rebuild store_markdowns at startup if it's empty but prices exist, or if
-   * it still holds labels from an older version ('flag', 'was', 'calc').
+   * Rebuild store_markdowns at startup if it's empty but prices exist, if it
+   * still holds labels from an older version ('flag', 'was', 'calc'), or if
+   * the labeling rules changed (MARKDOWN_RULES).
    */
   ensureMarkdowns(retailer) {
     const has = this.db.prepare('SELECT 1 FROM store_markdowns WHERE retailer = ? LIMIT 1').get(retailer);
     const legacy = this.db.prepare(`SELECT 1 FROM store_markdowns WHERE retailer = ?
       AND kind NOT IN ('clearance', 'rollback', 'reduced', 'offer', 'markdown') LIMIT 1`).get(retailer);
     const prices = this.db.prepare('SELECT 1 FROM store_latest WHERE retailer = ? LIMIT 1').get(retailer);
-    if ((!has || legacy) && prices) this.refreshMarkdowns(retailer);
+    const rulesChanged = this.getMeta(`markdownRules:${retailer}`) !== MARKDOWN_RULES;
+    if ((!has || legacy || rulesChanged) && prices) this.refreshMarkdowns(retailer);
+    this.setMeta(`markdownRules:${retailer}`, MARKDOWN_RULES);
   }
 
   /**
@@ -510,17 +515,20 @@ export class StoreScanDb {
       this.db.prepare('DELETE FROM store_markdowns WHERE retailer = ?').run(retailer);
       this.db.prepare(`INSERT INTO store_markdowns (retailer, store_id, item_id, date, price, ref_price, was_price, in_stock, kind)
         WITH
-        -- Each item's price spread, read in index order (no sort). Only items whose
-        -- prices differ by at least the gap need a typical price (upper median).
-        spread AS (
-          SELECT item_id, MIN(price) lo, MAX(price) hi, COUNT(*) n
-          FROM store_latest INDEXED BY store_latest_by_item_price WHERE retailer = :retailer AND price > 0 GROUP BY item_id),
+        -- Each item's price spread over all saved prices, read in index order (no
+        -- sort): a cheap superset of the items whose current Walmart prices differ
+        -- by at least the gap. Only those need a typical price (upper median),
+        -- taken from current Walmart-sold prices only.
+        varying AS MATERIALIZED (
+          SELECT item_id FROM store_latest INDEXED BY store_latest_by_item_price
+          WHERE retailer = :retailer AND price > 0 GROUP BY item_id HAVING COUNT(*) >= 2 AND MIN(price) <= MAX(price) * (1 - :gap)),
         ranked AS (
-          SELECT p.item_id, p.price, s.n, ROW_NUMBER() OVER (PARTITION BY p.item_id ORDER BY p.price) rn
-          FROM spread s JOIN store_latest p INDEXED BY store_latest_by_item_price
-            ON p.retailer = :retailer AND p.item_id = s.item_id AND p.price > 0
-          WHERE s.n >= 2 AND s.lo <= s.hi * (1 - :gap)),
-        typ AS (SELECT item_id, price typical, n FROM ranked WHERE rn = n / 2 + 1),
+          SELECT p.item_id, p.price,
+            ROW_NUMBER() OVER (PARTITION BY p.item_id ORDER BY p.price) rn, COUNT(*) OVER (PARTITION BY p.item_id) n
+          FROM varying v CROSS JOIN store_latest p INDEXED BY store_latest_by_item_price
+            ON p.retailer = :retailer AND p.item_id = v.item_id AND p.price > 0
+          WHERE p.date >= :since AND lower(p.seller) IN ('walmart', 'walmart.com')),
+        typ AS (SELECT item_id, price typical, n FROM ranked WHERE n >= 2 AND rn = n / 2 + 1),
         offers AS (${offers}),
         labeled AS (
           SELECT c.store_id, c.item_id, c.date, c.price, c.was_price, c.in_stock, t.typical, t.n,
