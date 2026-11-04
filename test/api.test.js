@@ -168,3 +168,19 @@ test('full deal lists are uncapped and paged; the home page stays capped', async
   for (const d of home) { const b = (d.product.brand || d.product.name.split(' ')[0]).toLowerCase(); brands[b] = (brands[b] ?? 0) + 1; }
   assert.ok(Object.values(brands).every((n) => n <= 2), 'home clearance: at most 2 per brand');
 });
+
+test('deal lists sort by % off, $ off or price, keeping the section order for ties', async () => {
+  const { sortDeals } = await import('../src/api.js');
+  const deals = [
+    { id: 'a', discountPercent: 20, dollarsOff: 50, lowestPrice: 200 },
+    { id: 'b', discountPercent: 60, dollarsOff: 3, lowestPrice: 2 },
+    { id: 'c', discountPercent: 20, dollarsOff: 10, lowestPrice: 40 },
+  ];
+  const ids = (sort) => sortDeals(deals, sort).map((d) => d.id);
+  assert.deepEqual(ids('percent'), ['b', 'a', 'c']);
+  assert.deepEqual(ids('dollars'), ['a', 'c', 'b']);
+  assert.deepEqual(ids('price'), ['b', 'c', 'a']);
+  assert.deepEqual(ids('price-desc'), ['a', 'c', 'b']);
+  assert.deepEqual(ids('best'), ['a', 'b', 'c']);
+  assert.deepEqual(ids(undefined), ['a', 'b', 'c']);
+});

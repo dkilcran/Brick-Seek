@@ -106,6 +106,22 @@ async function localClearanceDeals(adapter, zip, { category, minDiscount = 0 } =
     .sort((a, b) => b.discountPercent - a.discountPercent);
 }
 
+/**
+ * Re-order a deal list: 'percent' (% off), 'dollars' ($ off), 'price' (low to
+ * high), 'price-desc'; anything else keeps the section's own order. Ties keep
+ * that order too.
+ */
+export function sortDeals(deals, sort) {
+  const by = {
+    percent: (d) => -(d.discountPercent ?? 0),
+    dollars: (d) => -(d.dollarsOff ?? 0),
+    price: (d) => d.lowestPrice ?? Infinity,
+    'price-desc': (d) => -(d.lowestPrice ?? -Infinity),
+  }[sort];
+  if (!by) return deals;
+  return deals.map((d, i) => [by(d), i, d]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]);
+}
+
 function clampInt(value, fallback, min, max) {
   const n = Number.parseInt(value, 10);
   if (Number.isNaN(n)) return fallback;
@@ -203,6 +219,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       } else {
         all = rankSection(section, await analyzeCandidates(adapter, opts), { ...opts, all: true });
       }
+      all = sortDeals(all, query.get('sort'));
       return { section, total: all.length, offset, deals: all.slice(offset, offset + limit), hasMore: offset + limit < all.length };
     }],
 

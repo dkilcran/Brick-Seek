@@ -152,8 +152,11 @@ async function homeView(query) {
     $results.innerHTML = '<div class="loading">Searching…</div>';
     try {
       const { products } = await api(`/api/${r.id}/search?q=${encodeURIComponent(q)}`);
+      const sort = query.get('sort') ?? 'best';
       $results.innerHTML = `<div class="section-title"><h2>Results for “${esc(q)}”</h2><span class="muted">${products.length} found</span></div>
-        ${products.length ? `<div class="grid">${products.map((p) => productCard(p, { zip: state.zip })).join('')}</div>` : '<div class="empty">No products matched. Try a different name, item number or UPC.</div>'}`;
+        ${products.length > 1 ? `<form class="toolbar" id="search-sort">${sortSelect('ssort', sort)}</form>` : ''}
+        ${products.length ? `<div class="grid">${sortProducts(products, sort).map((p) => productCard(p, { zip: state.zip })).join('')}</div>` : '<div class="empty">No products matched. Try a different name, item number or UPC.</div>'}`;
+      $results.querySelector('#search-sort')?.addEventListener('change', (e) => go('/', { retailer: r.id, q, sort: e.target.value }));
     } catch (err) {
       $results.innerHTML = `<div class="error">${esc(err.message)}</div>`;
     }
@@ -418,6 +421,32 @@ function priceChart(history) {
     </div>`;
 }
 
+const SORTS = [
+  ['best', 'Best match'],
+  ['percent', '% off'],
+  ['dollars', '$ off'],
+  ['price', 'Price: low to high'],
+  ['price-desc', 'Price: high to low'],
+];
+
+function sortSelect(id, current) {
+  return `<div class="field"><label for="${id}">Sort by</label><select id="${id}" name="sort">
+    ${SORTS.map(([v, label]) => `<option value="${v}" ${v === current ? 'selected' : ''}>${esc(label)}</option>`).join('')}</select></div>`;
+}
+
+/** Sort search results the same ways as the deal lists (discount against the shown was-price). */
+function sortProducts(products, sort) {
+  const off = (p) => (p.msrp > p.price ? p.msrp - p.price : 0);
+  const pct = (p) => (p.msrp > p.price ? off(p) / p.msrp : 0);
+  const by = {
+    percent: (p) => -pct(p),
+    dollars: (p) => -off(p),
+    price: (p) => p.price ?? Infinity,
+    'price-desc': (p) => -(p.price ?? -Infinity),
+  }[sort];
+  return by ? products.map((p, i) => [by(p), i, p]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]) : products;
+}
+
 const DEAL_SECTIONS = [
   ['top', 'Top deals'],
   ['drops', 'Price drops'],
@@ -431,12 +460,13 @@ async function dealsView(query) {
   const section = query.get('section') ?? 'top';
   const category = query.get('category') ?? '';
   const min = query.get('min') ?? '0';
+  const sort = query.get('sort') ?? 'best';
   loading('Finding deals…');
   let categories = [];
   try { ({ categories } = await api(`/api/${r.id}/categories`)); } catch { /* optional */ }
 
   const tab = ([id, label]) => {
-    const href = `#/deals?${new URLSearchParams({ retailer: r.id, section: id, ...(category ? { category } : {}), min })}`;
+    const href = `#/deals?${new URLSearchParams({ retailer: r.id, section: id, ...(category ? { category } : {}), min, sort })}`;
     return `<a class="chip ${id === section ? 'active' : ''}" href="${href}">${esc(label)}</a>`;
   };
   $app.innerHTML = `
@@ -448,6 +478,7 @@ async function dealsView(query) {
         ${categories.map((c) => `<option ${c === category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
       <div class="field"><label for="min">Minimum discount</label><select id="min" name="min">
         ${[0, 10, 20, 30, 40, 50, 60].map((m) => `<option value="${m}" ${String(m) === min ? 'selected' : ''}>${m}%+</option>`).join('')}</select></div>
+      ${sortSelect('sort', sort)}
     </form>
     <div id="deal-list"><div class="loading">Loading…</div></div>`;
 
@@ -455,7 +486,7 @@ async function dealsView(query) {
   const tools = $app.querySelector('#deal-tools');
   tools.addEventListener('change', () => {
     const data = new FormData(tools);
-    go('/deals', { retailer: r.id, section, category: data.get('category'), min: data.get('min') });
+    go('/deals', { retailer: r.id, section, category: data.get('category'), min: data.get('min'), sort: data.get('sort') });
   });
 
   const $list = $app.querySelector('#deal-list');
@@ -469,7 +500,7 @@ async function dealsView(query) {
   }
   // Every match, best first, 60 at a time.
   const PAGE = 60;
-  const params = new URLSearchParams({ section, minDiscount: min, limit: String(PAGE) });
+  const params = new URLSearchParams({ section, minDiscount: min, limit: String(PAGE), sort });
   if (category) params.set('category', category);
   if (state.zip) params.set('zip', state.zip);
   const loadPage = async (offset) => {

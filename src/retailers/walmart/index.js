@@ -146,7 +146,19 @@ export class WalmartAdapter extends RetailerAdapter {
       const product = await this.lookupProduct(query);
       return product ? [product] : [];
     }
-    return this.source.search(parsed.value, opts);
+    // Same discount references as the deal lists (Walmart's msrp is unreliable).
+    const refs = this.referenceMap();
+    const results = await this.source.search(parsed.value, opts);
+    if (!refs) return results;
+    return results.map((p) => this.withReference(p));
+  }
+
+  /** item_id -> deal reference price from the store checks, reused until the markdowns change. Null without store data. */
+  referenceMap() {
+    const db = this.storeData;
+    if (!db) return null;
+    if (this.refMap?.version !== db.markdownVersion) this.refMap = { version: db.markdownVersion, map: db.itemReferences(this.id) };
+    return this.refMap.map;
   }
 
   async lookupProduct(input) {
@@ -158,10 +170,18 @@ export class WalmartAdapter extends RetailerAdapter {
 
   async getProduct(id) {
     const stored = this.storedProduct(id);
-    if (stored) return stored;
+    if (stored) return this.withReference(stored);
     const product = await this.source.getById(id);
     if (product) this.tracker.record(this.id, product.id, product.price);
-    return product;
+    return product && this.withReference(product);
+  }
+
+  /** The product with its discount measured against store data instead of Walmart's msrp (when live). */
+  withReference(product) {
+    const refs = this.referenceMap();
+    if (!refs) return product;
+    const ref = refs.get(product.id);
+    return { ...product, msrp: ref > product.price ? ref : null, currentOfferPrice: null };
   }
 
   /**
@@ -305,7 +325,7 @@ export class WalmartAdapter extends RetailerAdapter {
     if (!db) return products;
     const key = `${this.source.poolStamp}|${db.markdownVersion}|${category ?? ''}|${products.length}`;
     if (this.refCache?.key === key) return this.refCache.output;
-    const refs = db.itemReferences(this.id);
+    const refs = this.referenceMap();
     const output = products.map((p) => {
       const ref = refs.get(p.id);
       return { ...p, msrp: ref > p.price ? ref : null, currentOfferPrice: null };
