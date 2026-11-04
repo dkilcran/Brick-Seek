@@ -14,14 +14,18 @@ import { WalmartLiveSource } from './liveSource.js';
 import { parseWalmartInput } from './identifiers.js';
 
 /**
- * A saved store price counts as marked down when Walmart flags it Clearance or
- * shows a higher was-price. Rows from the first SerpApi searches predate the
- * clearance column; those searches only returned Clearance listings.
+ * Deal labels for store prices (store_markdowns.kind). Clearance, Rollback and
+ * Reduced Price are Walmart's own; Markdown is ours (cheaper than the item's
+ * typical price at other stores, or than this store's earlier price). A
+ * was-price alone gets no label.
  */
-export function isMarkedDown(row) {
-  if (row.clearance === 1 || row.was_price > row.price) return true;
-  return row.clearance == null && row.source == null;
-}
+export const DEAL_LABELS = {
+  clearance: 'Clearance',
+  rollback: 'Rollback',
+  reduced: 'Reduced Price',
+  offer: 'Rollback / Reduced Price',
+  markdown: 'Markdown',
+};
 
 export class WalmartAdapter extends RetailerAdapter {
   constructor({ source, mode = 'demo', tracker = new PriceTracker() } = {}) {
@@ -99,6 +103,11 @@ export class WalmartAdapter extends RetailerAdapter {
     return 'walmart';
   }
 
+  /** walmart.com link for an item, with affiliate tracking when WALMART_PUBLISHER_ID is set. */
+  productUrl(itemId) {
+    return walmartProductUrl(itemId, this.source.publisherId);
+  }
+
   get name() {
     return 'Walmart';
   }
@@ -113,6 +122,8 @@ export class WalmartAdapter extends RetailerAdapter {
 
   get features() {
     return {
+      // Links to the retailer earn a commission (shown in the site's disclosure).
+      affiliateLinks: Boolean(this.source.publisherId),
       search: true,
       inventory: true,
       storeQuantities: this._mode === 'demo',
@@ -163,12 +174,12 @@ export class WalmartAdapter extends RetailerAdapter {
     const pooled = this.source.pool?.byId?.get?.(key);
     if (pooled?.seller?.isRetailer) return pooled;
     const tiered = this.tierStore?.product(key);
-    if (tiered) return tiered;
+    if (tiered) return { ...tiered, url: this.productUrl(key) };
     const info = this.storeData?.itemInfo?.(this.id, key);
     if (!info) return null;
     return {
       retailer: this.id, id: key, sku: key, upc: null, name: info.title ?? `Item ${key}`, brand: null,
-      category: info.department ?? null, imageUrl: info.image_url ?? null, url: walmartProductUrl(key),
+      category: info.department ?? null, imageUrl: info.image_url ?? null, url: this.productUrl(key),
       // Only store prices are known; the online offer wasn't looked up.
       price: null, msrp: null, seller: { name: 'Walmart.com', isRetailer: true },
       rating: null, reviewCount: null, specialOffer: null, inStockOnline: null, storeOnly: true,
@@ -206,12 +217,15 @@ export class WalmartAdapter extends RetailerAdapter {
       throw err;
     }
     this.checkTimes.push(now);
-    const { found } = await this.source.storeLookup([String(itemId)], String(storeId));
+    const { found, onlineOnly } = await this.source.storeLookup([String(itemId)], String(storeId));
+    if (onlineOnly?.length) this.storeData.dropItems(this.id, onlineOnly);
     const item = found[0];
     const hour = this.storeConfig()?.schedule?.productListHour ?? 4;
     const day = scheduleDayKey(new Date(now), hour);
     let result;
-    if (!item) {
+    if (onlineOnly?.length) {
+      result = { storeId: String(storeId), price: null, status: STOCK_STATUS.UNKNOWN, note: 'Walmart sells this online only, not in stores' };
+    } else if (!item) {
       result = { storeId: String(storeId), price: null, status: STOCK_STATUS.UNKNOWN, note: 'Walmart has no listing for this item at this store' };
     } else {
       this.storeData.recordStorePrices(this.id, String(storeId), [item], day);
@@ -245,6 +259,7 @@ export class WalmartAdapter extends RetailerAdapter {
     if (!db || !results.length) return;
     const rows = db.latestPrices(this.id, results.map((r) => r.store.id), { itemId: product.id });
     const byStore = new Map(rows.map((r) => [r.store_id, r]));
+    const deals = db.itemMarkdowns(this.id, product.id);
     for (const result of results) {
       const row = byStore.get(result.store.id);
       // The online price is only a guess at a store's price, so stores without a
@@ -257,7 +272,10 @@ export class WalmartAdapter extends RetailerAdapter {
       result.checked = true;
       result.price = row.price;
       result.status = row.in_stock === 1 ? STOCK_STATUS.IN_STOCK : row.in_stock === 0 ? STOCK_STATUS.OUT_OF_STOCK : result.status;
-      result.clearance = isMarkedDown(row);
+      const deal = deals.get(result.store.id);
+      result.label = DEAL_LABELS[deal?.kind] ?? null;
+      result.clearance = deal?.kind === 'clearance';
+      result.wasPrice = row.was_price > row.price ? row.was_price : null;
       result.seenOn = row.date;
     }
   }
@@ -316,15 +334,22 @@ export class WalmartAdapter extends RetailerAdapter {
     const db = this.storeData;
     if (!db) return [];
     const labels = new Map((this.storeConfig()?.stores ?? []).map((s) => [s.id, s.label]));
-    return db.walmartStoreOffers(this.id, itemId).map((r) => ({
-      storeId: r.store_id,
-      storeLabel: labels.get(r.store_id) ?? `Walmart #${r.store_id}`,
-      price: r.price,
-      wasPrice: r.was_price > r.price ? r.was_price : null,
-      inStock: r.in_stock === null ? null : r.in_stock === 1,
-      seenOn: r.date,
-      clearance: isMarkedDown(r),
-    }));
+    const deals = db.itemMarkdowns(this.id, itemId);
+    return db.walmartStoreOffers(this.id, itemId).map((r) => {
+      const deal = deals.get(r.store_id);
+      return {
+        storeId: r.store_id,
+        storeLabel: labels.get(r.store_id) ?? `Walmart #${r.store_id}`,
+        price: r.price,
+        wasPrice: r.was_price > r.price ? r.was_price : null,
+        // What a deal's discount is measured against (see refreshMarkdowns).
+        refPrice: deal?.ref_price > r.price ? deal.ref_price : null,
+        label: DEAL_LABELS[deal?.kind] ?? null,
+        inStock: r.in_stock === null ? null : r.in_stock === 1,
+        seenOn: r.date,
+        clearance: deal?.kind === 'clearance',
+      };
+    });
   }
 
   /** Marked-down items at checked stores near a ZIP. */
@@ -347,29 +372,32 @@ export class WalmartAdapter extends RetailerAdapter {
   readClearance(db, stores, { category }) {
     const storeById = new Map(stores.map((s) => [s.id, s]));
     const keep = this.departmentFilter() ?? (() => true);
-    // Precomputed markdowns (Walmart Clearance flag, below was-price, or calculated
-    // clearance: cheaper than the item's highest price at another store).
+    // Precomputed deals: Walmart's Clearance flag, Rollback or Reduced Price, or our
+    // Markdown (cheaper than the item's typical price, or this store's earlier price).
     return db.markdownRows(this.id, stores.map((s) => s.id))
       .filter((r) => r.in_stock !== 0)
       .filter((r) => (!category || r.department === category) && keep(r.department))
       .map((r) => {
-        // Discounts use Walmart's own "was" price for that store (strike-through
-        // price), else the highest price at another store. The default online
-        // offer is often another seller's or out of date.
-        const was = r.ref_price > r.price ? r.ref_price : null;
+        // Walmart's offers are measured against its was-price at that store; our
+        // markdowns against the item's typical price at other stores (or this
+        // store's earlier price). The default online offer is often another
+        // seller's or out of date, so it isn't used.
+        const ref = r.ref_price > r.price ? r.ref_price : null;
         const product = {
           retailer: this.id, id: r.item_id, sku: r.item_id, upc: null, name: r.title ?? `Item ${r.item_id}`,
-          brand: null, category: r.department, imageUrl: r.image_url, url: walmartProductUrl(r.item_id),
-          msrp: was ?? r.price, price: r.price,
+          brand: null, category: r.department, imageUrl: r.image_url, url: this.productUrl(r.item_id),
+          msrp: ref ?? r.price, price: r.price,
           seller: { name: 'Walmart.com', isRetailer: true },
-          rating: null, reviewCount: null, specialOffer: 'clearance', inStockOnline: null,
+          rating: null, reviewCount: null, specialOffer: r.kind, inStockOnline: null,
         };
         return {
           product,
           store: { ...storeById.get(r.store_id), seenOn: r.date },
           price: r.price,
           quantity: null,
-          discountPercent: was ? Math.round((1 - r.price / was) * 100) : 0,
+          kind: r.kind,
+          label: DEAL_LABELS[r.kind] ?? null,
+          discountPercent: ref ? Math.round((1 - r.price / ref) * 100) : 0,
         };
       });
   }

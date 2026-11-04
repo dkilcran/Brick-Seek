@@ -194,9 +194,18 @@ function dealSection(r, sec, category) {
   </section>`;
 }
 
+/** Badge style for a deal label or reason. */
+function badgeClass(label) {
+  if (label === 'Clearance') return 'clearance';
+  if (/^(Rollback|Reduced Price)/.test(label)) return 'rollback';
+  if (label === 'Markdown') return 'off';
+  if (label === 'In-store only') return 'instore';
+  return 'signal';
+}
+
 function dealCard(d) {
   const badges = (d.reasons ?? []).map((reason) =>
-    `<span class="badge ${reason === 'Clearance' ? 'clearance' : reason === 'Rollback' ? 'rollback' : reason === 'In-store only' ? 'instore' : 'signal'}">${esc(reason)}</span>`);
+    `<span class="badge ${badgeClass(reason)}">${esc(reason)}</span>`);
   const savings = d.dollarsOff >= 1
     ? `<span class="muted" style="font-size:13px">Save ${money(d.dollarsOff)}${d.onlineSeller ? ' vs other sellers online' : ''}</span>`
     : '';
@@ -248,23 +257,24 @@ async function itemView(retailerId, id, query) {
         <div class="price-row">
           <span class="price">${money(product.price)}</span><span class="muted">${product.storeOffers?.length ? 'at nearby stores' : 'online'}</span>
           ${product.inStockOnline === false ? '<span class="badge instore">In-store only</span>' : ''}
-          ${off ? `<span class="was">${money(product.msrp)}</span><span class="badge off">${off}% off MSRP</span>` : ''}
+          ${off ? `<span class="was">${money(product.msrp)}</span><span class="badge off">${off}% off${product.storeOffers?.length ? '' : ' MSRP'}</span>` : ''}
         </div>
         ${product.storeOffers?.length ? `<div class="muted" style="font-size:14px">Online: ${product.onlinePrice != null
           ? `${money(product.onlinePrice)}${product.onlineSeller ? ` from ${esc(product.onlineSeller)}` : ''}`
-          : `<a href="${esc(product.url)}" target="_blank" rel="noopener">see walmart.com</a>`}</div>` : ''}
+          : `<a href="${esc(product.url)}" target="_blank" rel="noopener sponsored">see walmart.com</a>`}</div>` : ''}
         ${product.storeOffers?.length ? `<div class="card" style="margin:12px 0">
           <strong>In store, sold by ${esc(r.name)}</strong>
           ${product.storeOffers.map((o) => `<div class="price-row" style="margin-top:6px">
             <span class="price">${money(o.price)}</span>
-            ${o.wasPrice ? `<span class="was">${money(o.wasPrice)}</span>` : ''}
+            ${o.label && o.refPrice ? `<span class="was">${money(o.refPrice)}</span>` : ''}
             <span>${esc(o.storeLabel)}</span>
-            <span class="badge clearance">Clearance</span>
+            ${o.label ? `<span class="badge ${badgeClass(o.label)}">${esc(o.label)}</span>` : ''}
+            ${!o.label && o.wasPrice ? `<span class="muted" style="font-size:13px">Walmart "was" ${money(o.wasPrice)}</span>` : ''}
             ${o.inStock === false ? '<span class="badge out_of_stock">Out of stock</span>' : ''}
             <span class="muted" style="font-size:13px">scanned ${esc(o.seenOn)}</span>
           </div>`).join('')}
         </div>` : ''}
-        <p><a href="${esc(product.url)}" target="_blank" rel="noopener">View on ${esc(r.name)}.com ↗</a></p>
+        <p><a href="${esc(product.url)}" target="_blank" rel="noopener sponsored">View on ${esc(r.name)}.com ↗</a></p>
       </div>
     </div>
     <div id="inventory"></div>
@@ -340,7 +350,7 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
     drawTable(currentFilter());
     try {
       const res = await api(`/api/${r.id}/products/${encodeURIComponent(product.id)}/check-store?store=${encodeURIComponent(storeId)}`);
-      Object.assign(row, { price: res.price, status: res.status, clearance: Boolean(res.clearance), seenOn: res.seenOn ?? row.seenOn, note: res.note ?? null, checked: res.price != null, justChecked: true });
+      Object.assign(row, { price: res.price, status: res.status, clearance: Boolean(res.clearance), label: res.clearance ? 'Clearance' : null, wasPrice: res.wasPrice ?? null, seenOn: res.seenOn ?? row.seenOn, note: res.note ?? null, checked: res.price != null, justChecked: true });
     } catch (err) {
       row.note = err.message;
     }
@@ -378,7 +388,8 @@ function priceCell(x, product, r) {
     ? `<button type="button" class="linkish" data-check-store="${esc(x.store.id)}">${label}</button>` : '');
   if (x.price == null) return check('Check store') || '—';
   const online = product.onlinePrice ?? (product.storeOffers?.length ? null : product.price);
-  return `<strong>${money(x.price)}</strong>${x.clearance ? ' <span class="badge clearance">Clearance</span>' : ''}${online != null && x.price < online - 0.01 && !x.clearance ? ' <span class="badge off">Below online</span>' : ''}${x.checked ? `<div style="font-size:12px">${check('Recheck')}</div>` : ''}`;
+  const label = x.label ?? (x.clearance ? 'Clearance' : null);
+  return `<strong>${money(x.price)}</strong>${label ? ` <span class="badge ${badgeClass(label)}">${esc(label)}</span>` : ''}${online != null && x.price < online - 0.01 && !label ? ' <span class="badge off">Below online</span>' : ''}${!label && x.wasPrice ? `<div class="muted" style="font-size:12px">Walmart "was" ${money(x.wasPrice)}</div>` : ''}${x.checked ? `<div style="font-size:12px">${check('Recheck')}</div>` : ''}`;
 }
 
 function priceChart(history) {
@@ -412,7 +423,7 @@ const DEAL_SECTIONS = [
   ['drops', 'Price drops'],
   ['lowest', 'Lowest ever'],
   ['bigticket', 'Big-ticket'],
-  ['clearance', 'Clearance near you'],
+  ['clearance', 'Store deals near you'],
 ];
 
 async function dealsView(query) {
@@ -528,6 +539,12 @@ async function boot() {
     return showError(err);
   }
   if (!state.retailers.length) return showError('No retailers configured.');
+  // Required disclosure once links carry affiliate tracking.
+  const paid = state.retailers.filter((x) => x.features?.affiliateLinks).map((x) => x.name);
+  if (paid.length) {
+    document.getElementById('affiliate-note').textContent =
+      `Clearance Tracker is independent and not run by ${paid.join(' or ')}. We may earn a commission when you buy through links on this site.`;
+  }
   window.addEventListener('hashchange', render);
   render();
 }

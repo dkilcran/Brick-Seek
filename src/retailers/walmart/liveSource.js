@@ -197,7 +197,8 @@ export class WalmartLiveSource {
       brand: item.brandName ?? null,
       category,
       imageUrl: item.largeImage ?? item.mediumImage ?? item.thumbnailImage ?? null,
-      url: item.productUrl ?? walmartProductUrl(item.itemId, this.publisherId),
+      // Built here rather than taken from Walmart, so every link has the affiliate tracking (or none).
+      url: walmartProductUrl(item.itemId, this.publisherId),
       msrp: realMsrp(item.msrp) ?? item.salePrice ?? null,
       price: item.salePrice ?? null,
       seller: {
@@ -548,10 +549,18 @@ export class WalmartLiveSource {
         imageUrl: p.imageUrl,
         url: p.url,
         category: p.category,
+        offerType: item.offerType ?? null,
       };
     });
     const seen = new Set(found.map((f) => f.itemId));
-    return { found, missing: ids.map(String).filter((id) => !seen.has(id)) };
+    // Walmart answers a store lookup for items it only sells online, with the
+    // online price; those aren't on any store's shelf.
+    const onlineOnly = found.filter((f) => f.offerType === 'ONLINE_ONLY').map((f) => f.itemId);
+    return {
+      found: found.filter((f) => f.offerType !== 'ONLINE_ONLY'),
+      missing: ids.map(String).filter((id) => !seen.has(id)),
+      onlineOnly,
+    };
   }
 
   /** Online (walmart.com) price and seller for item ids, 20 per lookup. */
@@ -654,6 +663,8 @@ export class WalmartLiveSource {
       try {
         const saved = this.poolStore?.load('walmart');
         if (saved) {
+          // Links follow the current publisher ID, which may have been set since the pool was saved.
+          for (const p of saved.products) p.url = walmartProductUrl(p.id, this.publisherId);
           this.pool = saved;
           this.applySavedChecks(saved.products);
           console.log(`walmart: loaded saved deal pool (${saved.products.length} items from ${new Date(saved.fetchedAt).toISOString()})`);

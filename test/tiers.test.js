@@ -239,7 +239,7 @@ test('only the settings\' departments: searches drop other departments, and chec
 
 test('tier 3 batches wrap around at the end of the list without repeating within a batch', () => {
   const { db, tiers } = newStores();
-  for (let i = 0; i < 30; i++) tiers.insertItem.run('walmart', 3, 'r', `x${String(i).padStart(2, '0')}`, 'Toys');
+  for (let i = 0; i < 30; i++) tiers.insertItem.run('walmart', 3, 'r', `x${String(i).padStart(2, '0')}`, 'Toys', null);
   tiers.markBuilt(3, 'r');
   db.upsertItem.run('walmart', 'x01', 'Shirt', null, 'Clothing');
   const checker = new StoreChecker({ source: {}, db, tiers, loadConfig: () => ({ config: null, errors: [] }) });

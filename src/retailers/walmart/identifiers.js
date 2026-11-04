@@ -19,7 +19,14 @@ export function parseWalmartInput(raw) {
   return { type: 'query', value: input };
 }
 
+/**
+ * Link to an item on walmart.com. With an Impact publisher ID (Walmart's
+ * affiliate program), it's Walmart's tracking link, in the exact form
+ * Walmart's API returns as productTrackingUrl:
+ * goto.walmart.com/c/{publisher}/568844/9383?veh=aff&sourceid=...&u={item page}.
+ */
 export function walmartProductUrl(itemId, publisherId) {
   const base = `https://www.walmart.com/ip/${encodeURIComponent(itemId)}`;
-  return publisherId ? `${base}?affiliates_ad_id=${encodeURIComponent(publisherId)}` : base;
+  if (!publisherId) return base;
+  return `https://goto.walmart.com/c/${encodeURIComponent(publisherId)}/568844/9383?veh=aff&sourceid=imp_000011112222333344&u=${encodeURIComponent(base)}`;
 }

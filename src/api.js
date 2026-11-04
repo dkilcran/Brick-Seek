@@ -42,7 +42,8 @@ function requireRetailerItem(adapter, product) {
       onlinePrice: product.price ?? null,
       onlineSeller: product.seller?.name ?? null,
       price: best.price,
-      msrp: best.wasPrice ?? best.price,
+      // A discount only for a labeled deal (Walmart's offer or our markdown), not a bare was-price.
+      msrp: best.label && best.refPrice ? best.refPrice : null,
       seller: { name: adapter.name, isRetailer: true },
       storeOffers,
     };
@@ -97,8 +98,10 @@ async function localClearanceDeals(adapter, zip, { category, minDiscount = 0 } =
       store: best.store,
       quantity: best.quantity,
       storesWithDeal: stores,
-      clearance: true,
-      reasons: ['Clearance'],
+      referencePrice: best.product.msrp > best.price ? best.product.msrp : null,
+      clearance: (best.kind ?? 'clearance') === 'clearance',
+      // Walmart's Clearance, Rollback or Reduced Price, or our Markdown (demo data: Clearance).
+      reasons: [best.label ?? 'Clearance'],
     }))
     .sort((a, b) => b.discountPercent - a.discountPercent);
 }

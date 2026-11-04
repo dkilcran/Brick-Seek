@@ -9,7 +9,8 @@ const SERPAPI_URL = 'https://serpapi.com';
 export const RESULTS_PER_PAGE = 40; // SerpApi Walmart search page size
 const PRICE_DAYS = 14; // store prices older than this aren't shown, and history is pruned
 // "Calculated clearance": a store at least this much below the item's highest price at other stores.
-export const CALC_CLEARANCE_GAP = 0.02;
+/** A store price at least this far below the item's typical price (or its own earlier price) is a markdown. */
+export const MARKDOWN_GAP = 0.1;
 // Price columns with title/image/department from store_items when the row has none.
 const PRICE_COLUMNS = `p.retailer, p.store_id, p.item_id, p.date, p.price, p.was_price, p.in_stock, p.seller,
   p.online_price, p.online_seller, p.clearance, p.source, p.url,
@@ -75,6 +76,8 @@ export class StoreScanDb {
     this.db = db;
     /** Bumps whenever store_markdowns is rebuilt, so pages can cache what they read from it. */
     this.markdownVersion = 0;
+    /** Markdown threshold (settings: markdownPercent); see refreshMarkdowns. */
+    this.markdownGap = MARKDOWN_GAP;
     db.exec(`
       CREATE TABLE IF NOT EXISTS store_scan_runs (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -172,20 +175,37 @@ export class StoreScanDb {
         online_price REAL, online_seller TEXT, clearance INTEGER, source TEXT,
         PRIMARY KEY (retailer, store_id, item_id)
       ) WITHOUT ROWID;
-      CREATE INDEX IF NOT EXISTS store_latest_by_item ON store_latest (retailer, item_id);
+      -- By item, then price: per-item lookups, and each item's price spread without a sort.
+      CREATE INDEX IF NOT EXISTS store_latest_by_item_price ON store_latest (retailer, item_id, price);
+      DROP INDEX IF EXISTS store_latest_by_item;
     `);
+    // The store's price before its last change, and when that was: a drop at
+    // one store shows up as a markdown even when other stores aren't checked.
+    const latestCols = db.prepare('PRAGMA table_info(store_latest)').all().map((c) => c.name);
+    if (!latestCols.includes('prev_price')) db.exec('ALTER TABLE store_latest ADD COLUMN prev_price REAL');
+    if (!latestCols.includes('prev_date')) db.exec('ALTER TABLE store_latest ADD COLUMN prev_date TEXT');
+    const changed = 'excluded.price IS NOT NULL AND store_latest.price IS NOT NULL AND excluded.price <> store_latest.price';
     this.upsertLatest = db.prepare(`INSERT INTO store_latest ${columns}
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (retailer, store_id, item_id) DO UPDATE SET date = excluded.date, ${updates.replaceAll('%T', 'store_latest')}
+      ON CONFLICT (retailer, store_id, item_id) DO UPDATE SET date = excluded.date,
+        prev_price = CASE WHEN ${changed} THEN store_latest.price ELSE store_latest.prev_price END,
+        prev_date = CASE WHEN ${changed} THEN store_latest.date ELSE store_latest.prev_date END,
+        ${updates.replaceAll('%T', 'store_latest')}
       WHERE excluded.date >= store_latest.date`);
     // Only the marked-down current prices, rebuilt by refreshMarkdowns(): what
     // "Clearance near you" and the daily candidate lists read, instead of
     // scanning every current price (11s at 800k rows).
+    // Rebuilt on every refresh, so an older layout is simply replaced.
+    const mdCols = db.prepare('PRAGMA table_info(store_markdowns)').all().map((c) => c.name);
+    if (mdCols.length && !mdCols.includes('was_price')) db.exec('DROP TABLE store_markdowns');
     db.exec(`
       CREATE TABLE IF NOT EXISTS store_markdowns (
         retailer TEXT NOT NULL, store_id TEXT NOT NULL, item_id TEXT NOT NULL, date TEXT NOT NULL,
-        price REAL NOT NULL, ref_price REAL, in_stock INTEGER,
-        kind TEXT NOT NULL, -- 'flag' (Walmart Clearance), 'was' (below was-price), 'calc' (cheaper than another store)
+        price REAL NOT NULL, ref_price REAL, was_price REAL, in_stock INTEGER,
+        -- 'clearance' (Walmart's flag at that store), 'rollback' / 'reduced' / 'offer' (Walmart's
+        -- Rollback or Reduced Price, with a was-price at that store), 'markdown' (ours: cheaper than
+        -- the item's typical price at other stores, or than this store's own earlier price)
+        kind TEXT NOT NULL,
         PRIMARY KEY (retailer, store_id, item_id)
       ) WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS store_markdowns_by_item ON store_markdowns (retailer, item_id);
@@ -330,7 +350,7 @@ export class StoreScanDb {
     // down at a store on a day if its latest price (seen by then) is, or a
     // marked-down history row up to that day has no newer row by that day.
     const WALMART_MARKED = `(clearance = 1 OR was_price > price) AND lower(seller) IN ('walmart', 'walmart.com')`;
-    const latestMarked = this.db.prepare(`SELECT 1 FROM store_latest INDEXED BY store_latest_by_item
+    const latestMarked = this.db.prepare(`SELECT 1 FROM store_latest INDEXED BY store_latest_by_item_price
       WHERE retailer = ? AND item_id = ? AND date <= ? AND ${WALMART_MARKED} LIMIT 1`);
     const markedRows = this.db.prepare(`SELECT store_id, date FROM store_prices INDEXED BY store_prices_by_item_date
       WHERE retailer = ? AND item_id = ? AND date <= ? AND ${WALMART_MARKED}`);
@@ -379,7 +399,7 @@ export class StoreScanDb {
    */
   markedDownCount(retailer, day) {
     return this.db.prepare(`SELECT COUNT(DISTINCT item_id) n FROM store_markdowns
-      WHERE retailer = ? AND date = ? AND kind IN ('flag', 'was')`).get(retailer, day).n;
+      WHERE retailer = ? AND date = ?`).get(retailer, day).n;
   }
 
   /**
@@ -435,33 +455,86 @@ export class StoreScanDb {
     });
   }
 
+  /** Forget items' store prices everywhere (e.g. Walmart sells them online only). History is kept. */
+  dropItems(retailer, ids) {
+    const latest = this.db.prepare('DELETE FROM store_latest WHERE retailer = ? AND item_id = ?');
+    const marks = this.db.prepare('DELETE FROM store_markdowns WHERE retailer = ? AND item_id = ?');
+    for (const id of ids) {
+      latest.run(retailer, String(id));
+      marks.run(retailer, String(id));
+    }
+    this.markdownVersion += 1;
+  }
+
+  /** Each store's deal label for an item: store_id -> { kind, ref_price }. */
+  itemMarkdowns(retailer, itemId) {
+    const rows = this.db.prepare('SELECT store_id, kind, ref_price FROM store_markdowns WHERE retailer = ? AND item_id = ?')
+      .all(retailer, String(itemId));
+    return new Map(rows.map((r) => [r.store_id, r]));
+  }
+
   candidateItems(retailer) {
     return this.db.prepare('SELECT DISTINCT item_id FROM store_markdowns WHERE retailer = ?').all(retailer).map((r) => r.item_id);
   }
 
   /**
-   * Rebuild store_markdowns from the current prices: Walmart-sold, priced, and
-   * flagged Clearance at that store, below that store's was-price, or
-   * "calculated clearance" (at least CALC_CLEARANCE_GAP below the item's
-   * highest current price at any store). ~1-2s at 800k prices; runs in the
-   * background a few times an hour while checks run.
+   * Rebuild store_markdowns from the current Walmart-sold prices. Each store
+   * price gets at most one label, in this order:
+   *  - clearance: Walmart's Clearance flag at that store;
+   *  - rollback / reduced: on today's Walmart Rollback or Reduced Price list
+   *    (tier 2) and below its was-price at that store;
+   *  - markdown (ours): at least MARKDOWN_GAP below the item's typical price
+   *    (the upper median of its current prices at all stores), or below this
+   *    store's own price before its last change (within `days`).
+   * A was-price alone isn't a deal: Walmart shows reference prices on items
+   * with no offer. ~1-2s at 800k prices; runs a few times an hour during checks.
    */
-  refreshMarkdowns(retailer, { days = PRICE_DAYS, now = Date.now() } = {}) {
+  refreshMarkdowns(retailer, { days = PRICE_DAYS, now = Date.now(), gap = this.markdownGap } = {}) {
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
+    const tier2Run = this.getMeta(`tierBuilt:${retailer}:2`);
+    const hasTiers = this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'tier_items'").get();
+    const offers = hasTiers && tier2Run
+      ? "SELECT item_id, MAX(COALESCE(offer, 'offer')) offer FROM tier_items WHERE retailer = :retailer AND tier = 2 AND run = :run GROUP BY item_id"
+      : 'SELECT NULL item_id, NULL offer WHERE 0';
     this.db.exec('BEGIN');
     try {
       this.db.prepare('DELETE FROM store_markdowns WHERE retailer = ?').run(retailer);
-      this.db.prepare(`INSERT INTO store_markdowns (retailer, store_id, item_id, date, price, ref_price, in_stock, kind)
-        WITH cur AS (
-          SELECT * FROM store_latest WHERE retailer = ? AND date >= ? AND price > 0 AND lower(seller) IN ('walmart', 'walmart.com')),
-        top AS (SELECT item_id, MAX(price) hi, COUNT(*) n FROM cur GROUP BY item_id)
-        SELECT c.retailer, c.store_id, c.item_id, c.date, c.price,
-          CASE WHEN c.was_price > c.price THEN c.was_price WHEN t.n >= 2 AND c.price < t.hi * ? THEN t.hi END,
-          c.in_stock,
-          CASE WHEN c.clearance = 1 THEN 'flag' WHEN c.was_price > c.price THEN 'was' ELSE 'calc' END
-        FROM cur c JOIN top t ON t.item_id = c.item_id
-        WHERE c.clearance = 1 OR c.was_price > c.price OR (t.n >= 2 AND c.price < t.hi * ?)`)
-        .run(retailer, since, 1 - CALC_CLEARANCE_GAP, 1 - CALC_CLEARANCE_GAP);
+      this.db.prepare(`INSERT INTO store_markdowns (retailer, store_id, item_id, date, price, ref_price, was_price, in_stock, kind)
+        WITH
+        -- Each item's price spread, read in index order (no sort). Only items whose
+        -- prices differ by at least the gap need a typical price (upper median).
+        spread AS (
+          SELECT item_id, MIN(price) lo, MAX(price) hi, COUNT(*) n
+          FROM store_latest INDEXED BY store_latest_by_item_price WHERE retailer = :retailer AND price > 0 GROUP BY item_id),
+        ranked AS (
+          SELECT p.item_id, p.price, s.n, ROW_NUMBER() OVER (PARTITION BY p.item_id ORDER BY p.price) rn
+          FROM spread s JOIN store_latest p INDEXED BY store_latest_by_item_price
+            ON p.retailer = :retailer AND p.item_id = s.item_id AND p.price > 0
+          WHERE s.n >= 2 AND s.lo <= s.hi * (1 - :gap)),
+        typ AS (SELECT item_id, price typical, n FROM ranked WHERE rn = n / 2 + 1),
+        offers AS (${offers}),
+        labeled AS (
+          SELECT c.store_id, c.item_id, c.date, c.price, c.was_price, c.in_stock, t.typical, t.n,
+            CASE WHEN c.prev_date >= :since AND c.prev_price > c.price THEN c.prev_price END prev,
+            CASE
+              WHEN c.clearance = 1 THEN 'clearance'
+              WHEN o.offer IS NOT NULL AND c.was_price > c.price THEN o.offer
+              WHEN c.price <= t.typical * (1 - :gap) THEN 'markdown'
+              WHEN c.prev_date >= :since AND c.price <= c.prev_price * (1 - :gap) THEN 'markdown'
+            END kind
+          FROM store_latest c LEFT JOIN typ t ON t.item_id = c.item_id LEFT JOIN offers o ON o.item_id = c.item_id
+          WHERE c.retailer = :retailer AND c.date >= :since AND c.price > 0 AND lower(c.seller) IN ('walmart', 'walmart.com'))
+        SELECT :retailer, store_id, item_id, date, price,
+          -- What the discount is measured against: Walmart's was-price for its own offers,
+          -- else the typical price at other stores, else this store's earlier price.
+          CASE
+            WHEN kind <> 'markdown' AND was_price > price THEN was_price
+            WHEN typical > price THEN typical
+            WHEN prev > price THEN prev
+          END,
+          CASE WHEN was_price > price THEN was_price END, in_stock, kind
+        FROM labeled WHERE kind IS NOT NULL`)
+        .run({ retailer, since, gap, ...(hasTiers && tier2Run ? { run: tier2Run } : {}) });
       this.db.exec('COMMIT');
       this.markdownVersion += 1;
     } catch (err) {
@@ -481,14 +554,14 @@ export class StoreScanDb {
 
   /** Store-level markdowns: Walmart's Clearance flag at some store, or calculated clearance. */
   storeLevelItems(retailer) {
-    return this.db.prepare(`SELECT DISTINCT item_id FROM store_markdowns WHERE retailer = ? AND kind IN ('flag', 'calc')`)
+    return this.db.prepare(`SELECT DISTINCT item_id FROM store_markdowns WHERE retailer = ? AND kind IN ('clearance', 'markdown')`)
       .all(retailer).map((r) => r.item_id);
   }
 
   /** Stores where the scan found Walmart itself selling an item (latest per store, last `days` days). */
   walmartStoreOffers(retailer, itemId, { days = PRICE_DAYS, now = Date.now() } = {}) {
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
-    return this.db.prepare(`SELECT ${PRICE_COLUMNS} FROM store_latest p INDEXED BY store_latest_by_item ${ITEM_JOIN}
+    return this.db.prepare(`SELECT ${PRICE_COLUMNS} FROM store_latest p INDEXED BY store_latest_by_item_price ${ITEM_JOIN}
       WHERE p.retailer = ? AND p.item_id = ? AND p.date >= ? AND lower(p.seller) IN ('walmart', 'walmart.com')
       ORDER BY p.price`).all(retailer, String(itemId), since);
   }
@@ -501,7 +574,7 @@ export class StoreScanDb {
     const row = this.db.prepare(`SELECT MIN(p.price) min_price, COUNT(*) stores, MAX(p.date) seen_on,
         COALESCE(MAX(p.title), i.title) title, COALESCE(MAX(p.image_url), i.image_url) image_url,
         COALESCE(MAX(p.department), i.department) department
-      FROM store_latest p INDEXED BY store_latest_by_item ${ITEM_JOIN}
+      FROM store_latest p INDEXED BY store_latest_by_item_price ${ITEM_JOIN}
       WHERE p.retailer = ? AND p.item_id = ? AND lower(p.seller) IN ('walmart', 'walmart.com')`).get(retailer, String(itemId));
     return row?.stores ? row : null;
   }

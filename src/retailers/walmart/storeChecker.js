@@ -149,6 +149,7 @@ export class StoreChecker {
   async step() {
     const { config, errors } = this.loadConfig();
     if (!config || errors.length || !config.stores.length) return false;
+    if (config.markdownGap != null) this.db.markdownGap = config.markdownGap;
     const state = this.ensureCycle(config);
     if (!state || state.phase === 'done') return false;
 
@@ -195,8 +196,9 @@ export class StoreChecker {
       }
       const storeId = seg.stores[Math.floor(state.offset / batches)];
       const b = state.offset % batches;
-      const { found } = await this.source.storeLookup(ids.slice(b * BATCH, b * BATCH + BATCH), storeId);
+      const { found, onlineOnly } = await this.source.storeLookup(ids.slice(b * BATCH, b * BATCH + BATCH), storeId);
       this.db.recordStorePrices(this.retailer, storeId, found, state.day);
+      if (onlineOnly?.length) this.db.dropItems(this.retailer, onlineOnly);
       this.state = { ...state, offset: state.offset + 1, lookups: state.lookups + 1, rows: state.rows + found.length };
       return true;
     }
@@ -246,8 +248,9 @@ export class StoreChecker {
         slice = { ids, storeIndex: 0 };
       }
       const storeId = daily[slice.storeIndex];
-      const { found } = await this.source.storeLookup(slice.ids, storeId);
+      const { found, onlineOnly } = await this.source.storeLookup(slice.ids, storeId);
       this.db.recordStorePrices(this.retailer, storeId, found, state.day);
+      if (onlineOnly?.length) this.db.dropItems(this.retailer, onlineOnly);
       this.state = {
         ...state, tier3Slice: { ...slice, storeIndex: slice.storeIndex + 1 },
         tier3Lookups: state.tier3Lookups + 1, rows: state.rows + found.length,

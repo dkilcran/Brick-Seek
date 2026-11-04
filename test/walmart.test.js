@@ -527,14 +527,6 @@ test('items Walmart sells in a scanned store are allowed even when a marketplace
   assert.equal(deal.product.price, 0.64);
 });
 
-test('isMarkedDown: Clearance flag, was-price, or an early clearance-only SerpApi row', async () => {
-  const { isMarkedDown } = await import('../src/retailers/walmart/index.js');
-  assert.equal(isMarkedDown({ clearance: 1, price: 5 }), true);
-  assert.equal(isMarkedDown({ clearance: 0, price: 5, was_price: 9 }), true);
-  assert.equal(isMarkedDown({ clearance: 0, price: 5, was_price: null, source: 'walmart-api' }), false);
-  assert.equal(isMarkedDown({ clearance: null, price: 5, source: null }), true, 'legacy SerpApi clearance search row');
-});
-
 test('daily stores every day, plus rotating stores taking turns', async () => {
   const { StoreChecker } = await import('../src/retailers/walmart/storeChecker.js');
   const config = {
@@ -679,8 +671,8 @@ test('deal lists show only the departments in the settings', async () => {
   const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
   const tracker = new PriceTracker();
   const db = new StoreScanDb(tracker.db);
-  const shirt = { itemId: '801', title: 'Shirt', price: 2, wasPrice: 9, inStock: true, seller: 'Walmart.com', category: 'Clothing' };
-  const lamp = { itemId: '802', title: 'Lamp', price: 4, wasPrice: 9, inStock: true, seller: 'Walmart.com', category: 'Home' };
+  const shirt = { itemId: '801', title: 'Shirt', price: 2, wasPrice: 9, clearance: true, inStock: true, seller: 'Walmart.com', category: 'Clothing' };
+  const lamp = { itemId: '802', title: 'Lamp', price: 4, wasPrice: 9, clearance: true, inStock: true, seller: 'Walmart.com', category: 'Home' };
   db.recordStorePrices('walmart', '573', [shirt, lamp], new Date().toISOString().slice(0, 10));
   db.refreshMarkdowns('walmart');
   const pool = [
@@ -724,4 +716,29 @@ test('Check store looks the item up at that store now, saves it, and reuses a re
   for (let i = 0; i < 117; i++) await adapter.checkStore(String(1000 + i), '573', { now });
   await assert.rejects(adapter.checkStore('5000', '573', { now }), (err) => err.status === 429);
   await adapter.checkStore('5000', '573', { now: now + 3600001 });
+});
+
+test('store lookups set aside items Walmart sells online only', async () => {
+  const live = new WalmartLiveSource({
+    consumerId: 'x', privateKey: generateKeyPairSync('rsa', { modulusLength: 1024 }).privateKey.export({ type: 'pkcs1', format: 'pem' }),
+    minIntervalMs: 0,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ items: [
+      { itemId: 1, name: 'Rug', salePrice: 31.51, strikeThroughPrice: 68, offerType: 'ONLINE_ONLY', sellerInfo: 'Walmart.com', stock: 'Available' },
+      { itemId: 2, name: 'Bowl', salePrice: 1, offerType: 'ONLINE_AND_STORE', sellerInfo: 'Walmart.com', stock: 'Available' },
+    ] }) }),
+  });
+  const res = await live.storeLookup(['1', '2', '3'], '573');
+  assert.deepEqual(res.found.map((f) => f.itemId), ['2']);
+  assert.deepEqual(res.onlineOnly, ['1']);
+  assert.deepEqual(res.missing, ['3']);
+});
+
+test('walmart.com links carry Walmart affiliate tracking once a publisher ID is set', async () => {
+  const { walmartProductUrl } = await import('../src/retailers/walmart/identifiers.js');
+  assert.equal(walmartProductUrl('24796626'), 'https://www.walmart.com/ip/24796626');
+  assert.equal(walmartProductUrl('24796626', '1234567'),
+    'https://goto.walmart.com/c/1234567/568844/9383?veh=aff&sourceid=imp_000011112222333344&u=https%3A%2F%2Fwww.walmart.com%2Fip%2F24796626');
+  const adapter = new WalmartAdapter({ source: { publisherId: '1234567' }, mode: 'live' });
+  assert.equal(adapter.features.affiliateLinks, true);
+  assert.match(adapter.productUrl('5'), /^https:\/\/goto\.walmart\.com\/c\/1234567\//);
 });

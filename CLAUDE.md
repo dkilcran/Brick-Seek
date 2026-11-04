@@ -33,6 +33,15 @@
   realistic test database before pushing; a 28s query got the site restarted.
 - `storeId` on `/items` is undocumented (docs list only `ids`, `upc`,
   `publisherId`), so it could change without notice.
+- **`/items` with `storeId` also answers for items sold online only**
+  (`offerType: "ONLINE_ONLY"`), with the online price at every store; those
+  are dropped. It has a `clearance` flag but no Rollback flag; Rollback and
+  Reduced Price come from the `/search` facet lists. `strikeThroughPrice` is
+  often just a reference "was" price on items with no offer, and `msrp` can
+  be below the sale price.
+- **Affiliate links**: Walmart's program runs on Impact. `productTrackingUrl`
+  is `goto.walmart.com/c/{publisherId}/568844/9383?veh=aff&sourceid=imp_000011112222333344&u={item url}`
+  (`|PUBID|` when no publisherId is sent); `walmartProductUrl` builds it.
 - **SerpApi** (paid, now off via `useSerpApi`): `engine=walmart` with `store_id`
   and facets finds store clearance; `engine=walmart_product` with `store_id`
   adds aisle and pickup availability. 250 searches/month on the free plan.

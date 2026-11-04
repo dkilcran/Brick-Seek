@@ -152,6 +152,7 @@
       "special_offers:Reduced Price"
     ]
   },
+  "markdownPercent": 10,
   "restartChecks": "2026-10-30 20:10",
   "filters": [
     "special_offers:Clearance",

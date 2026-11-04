@@ -69,6 +69,9 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
     if (!/^[a-z_]+:.+$/.test(f)) errors.push(`Filter ${JSON.stringify(f)} should look like "special_offers:Clearance"`);
   }
   // Search words per department (Walmart's search needs text); default: the department name.
+  // Markdown: a store price at least this many percent below the item's typical price.
+  const markdownPercent = raw.markdownPercent == null ? 10 : Number(raw.markdownPercent);
+  if (!(markdownPercent > 0 && markdownPercent < 100)) errors.push('"markdownPercent" should be a number between 0 and 100, like 10');
   const departmentQueries = raw.departmentQueries && typeof raw.departmentQueries === 'object' ? raw.departmentQueries : {};
   const discoveryMaxPages = raw.discoveryMaxPages == null ? 20 : Number(raw.discoveryMaxPages);
   if (!(Number.isInteger(discoveryMaxPages) && discoveryMaxPages >= 0)) errors.push('"discoveryMaxPages" should be a whole number, 0 or more');
@@ -90,6 +93,7 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
       baseFilters,
       tierFilters,
       departmentQueries,
+      markdownGap: markdownPercent > 0 && markdownPercent < 100 ? markdownPercent / 100 : 0.1,
       discoveryMaxPages: Number.isInteger(discoveryMaxPages) && discoveryMaxPages >= 0 ? discoveryMaxPages : 20,
       // SerpApi store searches (paid); off now that Walmart's free search does discovery.
       useSerpApi: raw.useSerpApi === true,

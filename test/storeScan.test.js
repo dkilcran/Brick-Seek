@@ -244,3 +244,51 @@ test('prune drops price history older than 14 days in chunks and keeps current p
   await db.prune(Date.parse('2026-11-04T12:00:00Z'));
   assert.deepEqual(db.db.prepare('SELECT item_id, date FROM store_prices').all().map((r) => `${r.item_id}:${r.date}`), ['1:2026-11-01']);
 });
+
+test('deal labels: Walmart Clearance, Rollback / Reduced Price, our Markdown; a was-price alone is not a deal', async () => {
+  const { TierStore } = await import('../src/retailers/walmart/tierLists.js');
+  const db = new StoreScanDb(new PriceTracker().db);
+  const tiers = new TierStore(db);
+  tiers.insertItem.run('walmart', 2, 'r2', 'roll', 'Toys', 'rollback');
+  tiers.insertItem.run('walmart', 2, 'r2', 'reduced', 'Toys', 'reduced');
+  tiers.markBuilt(2, 'r2');
+  const day = '2026-11-04';
+  const at = (store, rows) => db.recordStorePrices('walmart', store, rows.map((r) => ({ seller: 'Walmart.com', inStock: true, ...r })), day);
+  at('A', [
+    { itemId: 'clr', price: 3, wasPrice: 9, clearance: true },
+    { itemId: 'roll', price: 5, wasPrice: 8 },
+    { itemId: 'reduced', price: 6, wasPrice: 7 },
+    { itemId: 'wasOnly', price: 10, wasPrice: 30 }, // same price everywhere: Walmart's reference price
+    { itemId: 'cheap', price: 7 },
+    { itemId: 'slight', price: 9.5 },
+  ]);
+  for (const s of ['B', 'C']) {
+    at(s, [
+      { itemId: 'clr', price: 3, wasPrice: 9, clearance: true },
+      { itemId: 'wasOnly', price: 10, wasPrice: 30 },
+      { itemId: 'cheap', price: 10 },
+      { itemId: 'slight', price: 10 },
+    ]);
+  }
+  db.refreshMarkdowns('walmart', { now: Date.parse('2026-11-04T12:00:00Z') });
+  const rows = db.markdownRows('walmart', ['A']);
+  const kinds = Object.fromEntries(rows.map((r) => [r.item_id, [r.kind, r.ref_price]]));
+  assert.deepEqual(kinds, {
+    clr: ['clearance', 9],
+    roll: ['rollback', 8],
+    reduced: ['reduced', 7],
+    cheap: ['markdown', 10], // 30% below the typical price at other stores
+  });
+  assert.equal(db.markdownRows('walmart', ['B']).length, 1, 'only the Clearance item at B');
+
+  // A drop at one store, measured against its own earlier price.
+  db.recordStorePrices('walmart', 'D', [{ itemId: 'solo', price: 20, seller: 'Walmart.com', inStock: true }], '2026-11-01');
+  db.recordStorePrices('walmart', 'D', [{ itemId: 'solo', price: 15, seller: 'Walmart.com', inStock: true }], day);
+  db.refreshMarkdowns('walmart', { now: Date.parse('2026-11-04T12:00:00Z') });
+  assert.deepEqual(db.markdownRows('walmart', ['D']).map((r) => [r.item_id, r.kind, r.ref_price]), [['solo', 'markdown', 20]]);
+  assert.equal(db.itemMarkdowns('walmart', 'solo').get('D').kind, 'markdown');
+
+  // Online-only items are dropped from every store.
+  db.dropItems('walmart', ['clr']);
+  assert.equal(db.latestPrices('walmart', ['A', 'B', 'C'], { itemId: 'clr', now: Date.parse('2026-11-04T12:00:00Z') }).length, 0);
+});

@@ -3,7 +3,11 @@
 Ideas and fixes waiting to be worked on.
 
 **Done Nov 3:** 1 and 5 answered in chat; 4, 6 and 7 built and live.
-**Next:** 2 and 3 (Markdown label and how markdowns are measured), waiting on the owner's choice.
+**Done Nov 4:** 2 and 3 (deal labels and markdown measurement, see
+`config/README.md`); online-only items dropped from store results; affiliate
+links and disclosure built.
+**Waiting on the owner:** Walmart affiliate approval on Impact, then set
+`WALMART_PUBLISHER_ID` in Render to turn the tracking links and disclosure on.
 
 ## From the owner (Nov 2, 2026)
 

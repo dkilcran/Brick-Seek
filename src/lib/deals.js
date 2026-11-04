@@ -130,7 +130,7 @@ export const SECTIONS = Object.freeze({
   drops: { title: 'Price drops today', description: 'Cheaper than the last price we recorded.' },
   lowest: { title: 'Lowest price ever', description: 'At the lowest price we have recorded.' },
   bigticket: { title: 'Big-ticket deals', description: 'The most dollars off items over $100.' },
-  clearance: { title: 'Clearance near you', description: 'Marked down on the shelf at stores near your ZIP.' },
+  clearance: { title: 'Store deals near you', description: 'Clearance, Rollback, Reduced Price and Markdowns on the shelf at stores near your ZIP.' },
 });
 
 /**

@@ -11,6 +11,14 @@ export const PAGE = 25;
 export const CAP = 1000; // Walmart: "Start should be less than 1000"
 const FIRST_BANDS = [[0, 5], [5, 10], [10, 20], [20, 50], [50, 100], [100, 200], [200, 500], [500, 100000]];
 
+/** 'rollback' or 'reduced' from a job's special_offers filter (null for other filters). */
+function offerOf(filters) {
+  const f = filters.find((x) => x.startsWith('special_offers:'));
+  if (!f) return null;
+  const name = f.slice('special_offers:'.length).toLowerCase();
+  return name === 'rollback' ? 'rollback' : name === 'reduced price' ? 'reduced' : null;
+}
+
 export class TierStore {
   /** @param {import('./storeScan.js').StoreScanDb} store  shares its database and meta table */
   constructor(store, retailer = 'walmart') {
@@ -49,9 +57,13 @@ export class TierStore {
         PRIMARY KEY (retailer, item_id)
       ) WITHOUT ROWID;
     `);
+    // Which Walmart offer list found a tier 2 item: 'rollback' or 'reduced'.
+    if (!this.db.prepare('PRAGMA table_info(tier_items)').all().some((c) => c.name === 'offer')) {
+      this.db.exec('ALTER TABLE tier_items ADD COLUMN offer TEXT');
+    }
     this.insertJob = this.db.prepare(`INSERT INTO search_queue
       (retailer, run, tier, department, query, filters, lo, hi, sort, start) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    this.insertItem = this.db.prepare(`INSERT OR IGNORE INTO tier_items (retailer, tier, run, item_id, department) VALUES (?, ?, ?, ?, ?)`);
+    this.insertItem = this.db.prepare(`INSERT OR IGNORE INTO tier_items (retailer, tier, run, item_id, department, offer) VALUES (?, ?, ?, ?, ?, ?)`);
     this.upsertProduct = this.db.prepare(`INSERT INTO tier_products (retailer, item_id, run, data) VALUES (?, ?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET run = excluded.run, data = excluded.data`);
   }
@@ -118,7 +130,7 @@ export class TierStore {
     this.db.exec('BEGIN');
     try {
       for (const p of products) {
-        this.insertItem.run(this.retailer, job.tier, run, p.id, job.department);
+        this.insertItem.run(this.retailer, job.tier, run, p.id, job.department, offerOf(job.filters));
         if (job.tier <= 2) this.upsertProduct.run(this.retailer, p.id, run, JSON.stringify(p));
       }
       if (job.start === 1) this.planFollowUps(run, job, total);
