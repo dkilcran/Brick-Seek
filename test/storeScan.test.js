@@ -304,3 +304,11 @@ test('an older database (tier lists without the offer column) still rebuilds dea
   db.refreshMarkdowns('walmart', { now: Date.parse('2026-11-04T12:00:00Z') });
   assert.equal(db.markdownRows('walmart', ['573'])[0].kind, 'offer');
 });
+
+test('startup rebuilds deals still labeled by an older version', () => {
+  const db = new StoreScanDb(new PriceTracker().db);
+  db.recordStorePrices('walmart', '573', [{ itemId: '1', price: 3, wasPrice: 9, seller: 'Walmart.com', inStock: true }], new Date().toISOString().slice(0, 10));
+  db.db.prepare("INSERT INTO store_markdowns (retailer, store_id, item_id, date, price, kind) VALUES ('walmart', '573', '1', '2026-11-04', 3, 'was')").run();
+  db.ensureMarkdowns('walmart');
+  assert.equal(db.markdownRows('walmart', ['573']).length, 0, 'a was-price alone is no longer a deal');
+});

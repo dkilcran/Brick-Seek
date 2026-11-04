@@ -219,11 +219,16 @@ export class StoreScanDb {
     }
   }
 
-  /** Fill store_markdowns at startup if it's empty but prices exist (e.g. right after this table was added). */
+  /**
+   * Rebuild store_markdowns at startup if it's empty but prices exist, or if
+   * it still holds labels from an older version ('flag', 'was', 'calc').
+   */
   ensureMarkdowns(retailer) {
     const has = this.db.prepare('SELECT 1 FROM store_markdowns WHERE retailer = ? LIMIT 1').get(retailer);
+    const legacy = this.db.prepare(`SELECT 1 FROM store_markdowns WHERE retailer = ?
+      AND kind NOT IN ('clearance', 'rollback', 'reduced', 'offer', 'markdown') LIMIT 1`).get(retailer);
     const prices = this.db.prepare('SELECT 1 FROM store_latest WHERE retailer = ? LIMIT 1').get(retailer);
-    if (!has && prices) this.refreshMarkdowns(retailer);
+    if ((!has || legacy) && prices) this.refreshMarkdowns(retailer);
   }
 
   /**
