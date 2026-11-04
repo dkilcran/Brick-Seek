@@ -125,3 +125,6 @@ td.num { font-variant-numeric: tabular-nums; }
   th, td { padding: 10px 8px; }
   .hide-sm { display: none; }
 }
+
+.linkish { background: none; border: 0; padding: 0; color: var(--link, #0071dc); font: inherit; font-size: 13px; text-decoration: underline; cursor: pointer; }
+.linkish:disabled { color: var(--muted); cursor: default; }

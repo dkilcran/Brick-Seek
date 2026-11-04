@@ -38,6 +38,9 @@ function requireRetailerItem(adapter, product) {
     const best = storeOffers[0];
     return {
       ...product,
+      // The online offer, kept apart from the store price that leads the page.
+      onlinePrice: product.price ?? null,
+      onlineSeller: product.seller?.name ?? null,
       price: best.price,
       msrp: best.wasPrice ?? best.price,
       seller: { name: adapter.name, isRetailer: true },
@@ -146,6 +149,18 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
         results,
         checkedAt: new Date().toISOString(),
       };
+    }],
+
+    // Check one store now (the product page's "Check store"); see WalmartAdapter.checkStore.
+    ['GET', '/api/:retailer/products/:id/check-store', async ({ params, query }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      const storeId = query.get('store') ?? '';
+      if (!/^\d{1,6}$/.test(storeId)) throw new HttpError(400, 'store should be a store number');
+      if (!/^\d{1,15}$/.test(params.id)) throw new HttpError(400, 'Item id should be a number');
+      if (!adapter.checkStore) throw new HttpError(501, `${adapter.name} store checks aren't available`);
+      const result = await adapter.checkStore(params.id, storeId); // 429 when over the hourly cap
+      if (!result) throw new HttpError(501, 'Store checks need live mode');
+      return result;
     }],
 
     ['GET', '/api/:retailer/products/:id/history', async ({ params, query }) => {

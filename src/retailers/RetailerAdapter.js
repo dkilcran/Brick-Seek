@@ -164,6 +164,7 @@ export function summarizeAvailability(results) {
   const count = (s) => results.filter((r) => r.status === s).length;
   return {
     storesChecked: results.length,
+    storesPriced: priced.length,
     inStock: count(STOCK_STATUS.IN_STOCK),
     limited: count(STOCK_STATUS.LIMITED),
     outOfStock: count(STOCK_STATUS.OUT_OF_STOCK),

@@ -187,6 +187,47 @@ export class WalmartAdapter extends RetailerAdapter {
     return { product, results };
   }
 
+  /**
+   * Look up one item at one store now (Walmart's item lookup with storeId),
+   * save it, and return the store's price and stock. A check of the same
+   * store and item in the last 15 minutes is reused, and live checks are
+   * capped per hour so visitors can't crowd out the daily store checks.
+   */
+  async checkStore(itemId, storeId, { now = Date.now() } = {}) {
+    if (!this.source.storeLookup || !this.storeData) return null;
+    const key = `${storeId}|${itemId}`;
+    this.recentChecks ??= new Map();
+    const recent = this.recentChecks.get(key);
+    if (recent && now - recent.at < 15 * 60000) return { ...recent.result, reused: true };
+    this.checkTimes = (this.checkTimes ?? []).filter((t) => now - t < 3600000);
+    if (this.checkTimes.length >= 120) {
+      const err = new Error('Too many store checks right now; try again in a few minutes');
+      err.status = 429;
+      throw err;
+    }
+    this.checkTimes.push(now);
+    const { found } = await this.source.storeLookup([String(itemId)], String(storeId));
+    const item = found[0];
+    const hour = this.storeConfig()?.schedule?.productListHour ?? 4;
+    const day = scheduleDayKey(new Date(now), hour);
+    let result;
+    if (!item) {
+      result = { storeId: String(storeId), price: null, status: STOCK_STATUS.UNKNOWN, note: 'Walmart has no listing for this item at this store' };
+    } else {
+      this.storeData.recordStorePrices(this.id, String(storeId), [item], day);
+      result = item.isWalmart
+        ? {
+          storeId: String(storeId), price: item.price, wasPrice: item.wasPrice, clearance: item.clearance,
+          status: item.inStock === true ? STOCK_STATUS.IN_STOCK : item.inStock === false ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
+          seenOn: day, checked: true,
+        }
+        : { storeId: String(storeId), price: null, status: STOCK_STATUS.UNKNOWN, note: `Sold by ${item.seller ?? 'another seller'} here, not Walmart` };
+    }
+    if (this.recentChecks.size > 2000) this.recentChecks.clear();
+    this.recentChecks.set(key, { at: now, result });
+    return result;
+  }
+
   /** Saved store prices (free checks and SerpApi), when live. */
   get storeData() {
     return this.storeDb ?? this.storeScanner?.db ?? null;
@@ -206,7 +247,14 @@ export class WalmartAdapter extends RetailerAdapter {
     const byStore = new Map(rows.map((r) => [r.store_id, r]));
     for (const result of results) {
       const row = byStore.get(result.store.id);
-      if (!row || typeof row.price !== 'number') continue;
+      // The online price is only a guess at a store's price, so stores without a
+      // saved store price show none (the page offers "Check store").
+      if (!row || typeof row.price !== 'number') {
+        result.price = null;
+        result.checked = false;
+        continue;
+      }
+      result.checked = true;
       result.price = row.price;
       result.status = row.in_stock === 1 ? STOCK_STATUS.IN_STOCK : row.in_stock === 0 ? STOCK_STATUS.OUT_OF_STOCK : result.status;
       result.clearance = isMarkedDown(row);

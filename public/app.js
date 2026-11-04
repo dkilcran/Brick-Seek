@@ -250,6 +250,9 @@ async function itemView(retailerId, id, query) {
           ${product.inStockOnline === false ? '<span class="badge instore">In-store only</span>' : ''}
           ${off ? `<span class="was">${money(product.msrp)}</span><span class="badge off">${off}% off MSRP</span>` : ''}
         </div>
+        ${product.storeOffers?.length ? `<div class="muted" style="font-size:14px">Online: ${product.onlinePrice != null
+          ? `${money(product.onlinePrice)}${product.onlineSeller ? ` from ${esc(product.onlineSeller)}` : ''}`
+          : `<a href="${esc(product.url)}" target="_blank" rel="noopener">see walmart.com</a>`}</div>` : ''}
         ${product.storeOffers?.length ? `<div class="card" style="margin:12px 0">
           <strong>In store, sold by ${esc(r.name)}</strong>
           ${product.storeOffers.map((o) => `<div class="price-row" style="margin-top:6px">
@@ -295,7 +298,7 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
   const showQty = r.features.storeQuantities;
   $el.innerHTML = `
     <div class="stats">
-      <div class="stat"><div class="label">Stores checked</div><div class="value">${s.storesChecked}</div></div>
+      <div class="stat"><div class="label">Store prices</div><div class="value">${s.storesPriced ?? s.storesChecked} of ${s.storesChecked}</div></div>
       <div class="stat"><div class="label">In stock</div><div class="value" style="color:var(--ok)">${s.inStock + s.limited}</div></div>
       <div class="stat"><div class="label">Lowest price</div><div class="value">${money(s.lowestPrice)}</div></div>
       <div class="stat"><div class="label">Clearance stores</div><div class="value" style="color:var(--brand)">${s.clearanceStores}</div></div>
@@ -308,7 +311,9 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
         <option value="price" ${sort === 'price' ? 'selected' : ''}>Lowest price</option></select></div>
       <div class="field"><label for="f2">Show</label><select id="f2" name="filter">
         <option value="all">All stores</option><option value="available">Available only</option></select></div>
+      ${r.mode === 'live' ? '<div class="field"><label>&nbsp;</label><button class="btn" type="button" id="check-all">Check all stores</button></div>' : ''}
     </form>
+    <div class="muted" id="check-progress" style="font-size:13px;min-height:18px"></div>
     <div id="store-table"></div>`;
 
   const drawTable = (filter) => {
@@ -319,12 +324,45 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
         <td><div class="store-name">${esc(x.store.name)}</div>${x.store.phone ? `<div class="muted" style="font-size:13px">${esc(x.store.phone)}</div>` : ''}</td>
         <td class="hide-sm">${esc([x.store.address, x.store.city, x.store.state, x.store.zip].filter(Boolean).join(', '))}</td>
         <td class="num">${x.store.distanceMiles != null ? `${x.store.distanceMiles} mi` : '—'}</td>
-        <td class="num"><strong>${money(x.price)}</strong>${x.clearance ? ' <span class="badge clearance">Clearance</span>' : ''}${x.price != null && x.price < product.price - 0.01 && !x.clearance ? ' <span class="badge off">Below online</span>' : ''}</td>
-        <td><span class="badge ${esc(x.status)}">${STATUS_LABEL[x.status] ?? esc(x.status)}${showQty && x.quantity ? ` · ${x.quantity}` : ''}</span>${x.seenOn ? `<div class="muted" style="font-size:12px">Store price scanned ${esc(x.seenOn)}</div>` : ''}</td>
+        <td class="num">${priceCell(x, product, r)}</td>
+        <td><span class="badge ${esc(x.status)}">${STATUS_LABEL[x.status] ?? esc(x.status)}${showQty && x.quantity ? ` · ${x.quantity}` : ''}</span>${x.seenOn ? `<div class="muted" style="font-size:12px">Store price ${x.justChecked ? 'checked just now' : `scanned ${esc(x.seenOn)}`}</div>` : ''}${x.note ? `<div class="muted" style="font-size:12px">${esc(x.note)}</div>` : ''}</td>
         ${showQty ? `<td class="hide-sm">${esc(x.aisle ?? '—')}</td>` : ''}
       </tr>`).join('')}</tbody></table></div>` : '<div class="empty card">No stores match. Try a wider radius.</div>';
   };
   drawTable('all');
+  const currentFilter = () => $el.querySelector('#f2').value;
+
+  // "Check store": look the item up at that store now and update its row.
+  const checkOne = async (storeId) => {
+    const row = inv.results.find((x) => x.store.id === storeId);
+    if (!row) return;
+    row.checking = true;
+    drawTable(currentFilter());
+    try {
+      const res = await api(`/api/${r.id}/products/${encodeURIComponent(product.id)}/check-store?store=${encodeURIComponent(storeId)}`);
+      Object.assign(row, { price: res.price, status: res.status, clearance: Boolean(res.clearance), seenOn: res.seenOn ?? row.seenOn, note: res.note ?? null, checked: res.price != null, justChecked: true });
+    } catch (err) {
+      row.note = err.message;
+    }
+    row.checking = false;
+    drawTable(currentFilter());
+  };
+  $el.querySelector('#store-table').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-check-store]');
+    if (btn) checkOne(btn.dataset.checkStore);
+  });
+  const $all = $el.querySelector('#check-all');
+  $all?.addEventListener('click', async () => {
+    $all.disabled = true;
+    const stores = inv.results.map((x) => x.store.id);
+    const $progress = $el.querySelector('#check-progress');
+    for (const [i, id] of stores.entries()) {
+      $progress.textContent = `Checking store ${i + 1} of ${stores.length}…`;
+      await checkOne(id);
+    }
+    $progress.textContent = `Checked ${stores.length} stores.`;
+    $all.disabled = false;
+  });
 
   const tools = $el.querySelector('#inv-tools');
   tools.addEventListener('change', (e) => {
@@ -332,6 +370,15 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
     const data = new FormData(tools);
     go(`/r/${r.id}/item/${product.id}`, { zip: inv.zip, radius: data.get('radius'), sort: data.get('sort') });
   });
+}
+
+function priceCell(x, product, r) {
+  if (x.checking) return '<span class="muted">Checking…</span>';
+  const check = (label) => (r.mode === 'live'
+    ? `<button type="button" class="linkish" data-check-store="${esc(x.store.id)}">${label}</button>` : '');
+  if (x.price == null) return check('Check store') || '—';
+  const online = product.onlinePrice ?? (product.storeOffers?.length ? null : product.price);
+  return `<strong>${money(x.price)}</strong>${x.clearance ? ' <span class="badge clearance">Clearance</span>' : ''}${online != null && x.price < online - 0.01 && !x.clearance ? ' <span class="badge off">Below online</span>' : ''}${x.checked ? `<div style="font-size:12px">${check('Recheck')}</div>` : ''}`;
 }
 
 function priceChart(history) {

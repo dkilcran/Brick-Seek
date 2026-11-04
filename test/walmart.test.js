@@ -696,3 +696,32 @@ test('deal lists show only the departments in the settings', async () => {
   assert.deepEqual((await adapter.getDealCandidates()).map((p) => p.id), ['802', '803']);
   assert.deepEqual(await adapter.getCategories(), ['Home']);
 });
+
+test('Check store looks the item up at that store now, saves it, and reuses a recent check', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const tracker = new PriceTracker();
+  const db = new StoreScanDb(tracker.db);
+  const calls = [];
+  const source = {
+    async storeLookup(ids, storeId) {
+      calls.push(`${storeId}:${ids}`);
+      if (storeId === '9') return { found: [], missing: ids };
+      if (storeId === '8') return { found: [{ itemId: ids[0], price: 4, seller: 'Rug Co', isWalmart: false }], missing: [] };
+      return { found: [{ itemId: ids[0], price: 6.5, wasPrice: 9, clearance: true, inStock: true, seller: 'Walmart.com', isWalmart: true }], missing: [] };
+    },
+  };
+  const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
+  adapter.storeDb = db;
+  const now = Date.parse('2026-11-04T18:00:00Z');
+  const res = await adapter.checkStore('123', '573', { now });
+  assert.deepEqual([res.price, res.clearance, res.status], [6.5, true, 'in_stock']);
+  assert.equal(db.latestPrices('walmart', ['573'], { itemId: '123', now }).length, 1, 'saved like a scheduled check');
+  assert.equal((await adapter.checkStore('123', '573', { now: now + 60000 })).reused, true);
+  assert.equal(calls.length, 1);
+  assert.match((await adapter.checkStore('123', '9', { now })).note, /no listing/);
+  assert.equal((await adapter.checkStore('123', '8', { now })).price, null, 'another seller\'s price is not shown');
+  // At most 120 live checks an hour.
+  for (let i = 0; i < 117; i++) await adapter.checkStore(String(1000 + i), '573', { now });
+  await assert.rejects(adapter.checkStore('5000', '573', { now }), (err) => err.status === 429);
+  await adapter.checkStore('5000', '573', { now: now + 3600001 });
+});
