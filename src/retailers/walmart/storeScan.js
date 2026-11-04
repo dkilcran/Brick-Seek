@@ -492,9 +492,13 @@ export class StoreScanDb {
   refreshMarkdowns(retailer, { days = PRICE_DAYS, now = Date.now(), gap = this.markdownGap } = {}) {
     const since = new Date(now - days * 86400000).toISOString().slice(0, 10);
     const tier2Run = this.getMeta(`tierBuilt:${retailer}:2`);
-    const hasTiers = this.db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'tier_items'").get();
+    // The tier lists may not exist yet, or (right after an upgrade, before TierStore
+    // starts) may not have their offer column yet.
+    const tierCols = this.db.prepare('PRAGMA table_info(tier_items)').all().map((c) => c.name);
+    const hasTiers = tierCols.length > 0;
+    const offer = tierCols.includes('offer') ? "COALESCE(offer, 'offer')" : "'offer'";
     const offers = hasTiers && tier2Run
-      ? "SELECT item_id, MAX(COALESCE(offer, 'offer')) offer FROM tier_items WHERE retailer = :retailer AND tier = 2 AND run = :run GROUP BY item_id"
+      ? `SELECT item_id, MAX(${offer}) offer FROM tier_items WHERE retailer = :retailer AND tier = 2 AND run = :run GROUP BY item_id`
       : 'SELECT NULL item_id, NULL offer WHERE 0';
     this.db.exec('BEGIN');
     try {

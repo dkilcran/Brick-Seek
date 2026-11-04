@@ -292,3 +292,15 @@ test('deal labels: Walmart Clearance, Rollback / Reduced Price, our Markdown; a 
   db.dropItems('walmart', ['clr']);
   assert.equal(db.latestPrices('walmart', ['A', 'B', 'C'], { itemId: 'clr', now: Date.parse('2026-11-04T12:00:00Z') }).length, 0);
 });
+
+test('an older database (tier lists without the offer column) still rebuilds deals at startup', () => {
+  const raw = new PriceTracker().db;
+  raw.exec(`CREATE TABLE tier_items (retailer TEXT NOT NULL, tier INTEGER NOT NULL, run TEXT NOT NULL, item_id TEXT NOT NULL,
+    department TEXT NOT NULL, PRIMARY KEY (retailer, tier, run, item_id)) WITHOUT ROWID`);
+  raw.exec("INSERT INTO tier_items VALUES ('walmart', 2, 'r2', '1', 'Toys')");
+  const db = new StoreScanDb(raw);
+  db.setMeta('tierBuilt:walmart:2', 'r2');
+  db.recordStorePrices('walmart', '573', [{ itemId: '1', price: 3, wasPrice: 9, seller: 'Walmart.com', inStock: true }], '2026-11-04');
+  db.refreshMarkdowns('walmart', { now: Date.parse('2026-11-04T12:00:00Z') });
+  assert.equal(db.markdownRows('walmart', ['573'])[0].kind, 'offer');
+});
