@@ -63,7 +63,14 @@ Each store price gets at most one label, in this order:
    Price list (tier 2), with a was-price at that store.
 3. **Markdown** (ours): at least `markdownPercent` below the item's highest
    valid store price: the highest current Walmart-sold price at any store, or
-   that store's own earlier price if higher.
+   that store's own earlier price if higher. A store price above the item's
+   list price (Walmart's MSRP, or the highest was-price at any store) isn't
+   valid, and Walmart's own online price caps the reference.
+
+A store price above Walmart's own online price gets no label: it's cheaper
+online. Walmart's online price comes from the daily searches (Walmart-sold
+items only) and, for deal items the searches missed, a daily online lookup
+that only keeps prices where Walmart is the online seller.
 
 A was-price alone is not a deal (Walmart shows "was" prices on items with no
 offer); the page shows it as information only. Walmart's offers are measured

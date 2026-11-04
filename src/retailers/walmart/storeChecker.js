@@ -142,6 +142,10 @@ export class StoreChecker {
       { name: 'clearance and calculated clearance at other stores', stores: others, ids: () => [
         ...new Set([...t1(), ...this.db.storeLevelItems(this.retailer)]),
       ] },
+      // Walmart's own online price for items with a deal at some store: a store
+      // price above it isn't a deal (see refreshMarkdowns). One lookup per 20 items.
+      { name: 'online prices for deal items', stores: ['online'], online: true,
+        ids: () => this.db.itemsNeedingOnlinePrice(this.retailer, state.day) },
     ];
   }
 
@@ -176,6 +180,7 @@ export class StoreChecker {
       const segs = this.segments(state, config);
       const seg = segs[state.segment];
       if (!seg) {
+        this.db.refreshMarkdowns(this.retailer); // with today's online prices
         this.state = { ...state, phase: this.tier3Phase(state, config), checksDoneAt: this.now().toISOString() };
         return true;
       }
@@ -196,6 +201,16 @@ export class StoreChecker {
       }
       const storeId = seg.stores[Math.floor(state.offset / batches)];
       const b = state.offset % batches;
+      if (seg.online) {
+        const batch = ids.slice(b * BATCH, b * BATCH + BATCH);
+        const online = await this.source.onlinePrices(batch);
+        for (const id of batch) {
+          const o = online.get(String(id));
+          this.db.saveOnlinePrice(this.retailer, id, o?.isWalmart ? o.price : null, state.day);
+        }
+        this.state = { ...state, offset: state.offset + 1, lookups: state.lookups + 1 };
+        return true;
+      }
       const { found, onlineOnly } = await this.source.storeLookup(ids.slice(b * BATCH, b * BATCH + BATCH), storeId);
       this.db.recordStorePrices(this.retailer, storeId, found, state.day);
       if (onlineOnly?.length) this.db.dropItems(this.retailer, onlineOnly);

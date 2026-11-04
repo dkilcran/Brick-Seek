@@ -131,6 +131,8 @@ export class TierStore {
     try {
       for (const p of products) {
         this.insertItem.run(this.retailer, job.tier, run, p.id, job.department, offerOf(job.filters));
+        // The search only returns Walmart-sold items, so its price is Walmart's online price.
+        if (p.seller?.isRetailer !== false && p.price > 0) this.store.saveOnlinePrice(this.retailer, p.id, p.price, run.slice(0, 10));
         if (job.tier <= 2) this.upsertProduct.run(this.retailer, p.id, run, JSON.stringify(p));
       }
       if (job.start === 1) this.planFollowUps(run, job, total);

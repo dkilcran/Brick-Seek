@@ -331,3 +331,30 @@ test('markdowns are measured against the highest valid store price, not the medi
   const rows = db.markdownRows('walmart', ['A', 'B', 'C', 'D']).map((r) => [r.store_id, r.kind, r.ref_price]).sort();
   assert.deepEqual(rows, [['A', 'markdown', 10], ['B', 'markdown', 10], ['C', 'markdown', 10]], 'half off the highest store price');
 });
+
+test('valid store prices: none above the list price, and Walmart\'s online price caps the reference', () => {
+  const db = new StoreScanDb(new PriceTracker().db);
+  const day = '2026-11-04';
+  const now = Date.parse('2026-11-04T12:00:00Z');
+  const at = (store, itemId, price, extra = {}) =>
+    db.recordStorePrices('walmart', store, [{ itemId, price, seller: 'Walmart.com', inStock: true, ...extra }], day);
+  // Mortal Kombat: $69 list price; $105.68 at some stores isn't a valid reference.
+  for (const s of ['A', 'B']) at(s, 'mk', 29.83, { listPrice: 69 });
+  for (const s of ['C', 'D']) at(s, 'mk', 105.68, { listPrice: 69 });
+  // Olipop: no list price, $15.76 online at Walmart; one store at $91.54.
+  for (const s of ['A', 'B', 'C']) at(s, 'soda', 15.76);
+  at('D', 'soda', 91.54);
+  db.saveOnlinePrice('walmart', 'soda', 15.76, day);
+  // A real markdown: $10 at two stores and online, $6 at one.
+  at('A', 'lamp', 6); at('B', 'lamp', 10); at('C', 'lamp', 10);
+  db.saveOnlinePrice('walmart', 'lamp', 10, day);
+  // Clearance at a store but cheaper online: not a deal.
+  at('A', 'mug', 5, { clearance: true, wasPrice: 9 });
+  db.saveOnlinePrice('walmart', 'mug', 4, day);
+  // Online price from a marketplace seller isn't saved as Walmart's (null): no cap.
+  at('A', 'rug', 20); at('B', 'rug', 40);
+  db.saveOnlinePrice('walmart', 'rug', null, day);
+  db.refreshMarkdowns('walmart', { now });
+  const rows = db.markdownRows('walmart', ['A', 'B', 'C', 'D']).map((r) => `${r.store_id}:${r.item_id}:${r.kind}:${r.ref_price}`).sort();
+  assert.deepEqual(rows, ['A:lamp:markdown:10', 'A:rug:markdown:40']);
+});

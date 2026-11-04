@@ -39,6 +39,9 @@
   Reduced Price come from the `/search` facet lists. `strikeThroughPrice` is
   often just a reference "was" price on items with no offer, and `msrp` can
   be below the sale price.
+- **Walmart's own online price**: `/search` with `retailer_type:Walmart` returns
+  Walmart-sold online prices; `/items` without `storeId` only when its seller
+  is Walmart (else it's a marketplace offer). Store prices above it aren't deals.
 - **Affiliate links**: Walmart's program runs on Impact. `productTrackingUrl`
   is `goto.walmart.com/c/{publisherId}/568844/9383?veh=aff&sourceid=imp_000011112222333344&u={item url}`
   (`|PUBID|` when no publisherId is sent); `walmartProductUrl` builds it.

@@ -82,6 +82,12 @@ function makeDay({ start, catalog, config: extra = {} }) {
     },
     pool: null,
     setPool(products) { this.pool = products; },
+    onlineLookups: [],
+    async onlinePrices(ids) {
+      this.onlineLookups.push([...ids]);
+      clock = new Date(clock.getTime() + 60000);
+      return new Map(ids.map((id) => [String(id), { price: 99, isWalmart: true }]));
+    },
     async storeLookup(ids, storeId) {
       lookups.push({ storeId, ids: [...ids], at: clock.toISOString() });
       clock = new Date(clock.getTime() + 60000); // each lookup takes a minute
@@ -115,8 +121,8 @@ function makeDay({ start, catalog, config: extra = {} }) {
 }
 
 const CATALOG = {
-  'special_offers:Clearance': [{ id: 't1a', price: 4 }, { id: 't1b', price: 6 }],
-  'special_offers:Rollback': [{ id: 't2a', price: 7 }, { id: 't1a', price: 4 }],
+  'special_offers:Clearance': [{ id: 't1a', price: 5 }, { id: 't1b', price: 6 }],
+  'special_offers:Rollback': [{ id: 't2a', price: 7 }, { id: 't1a', price: 5 }],
   all: Array.from({ length: 50 }, (_, i) => ({ id: `x${i}`, price: 5 })),
 };
 
@@ -144,6 +150,9 @@ test('a full day runs in the agreed order', async () => {
   assert.deepEqual(seq.slice(0, 3), t1Calls);
   assert.deepEqual(seq.slice(3, 6), t2Calls);
   assert.deepEqual(seq.slice(6, 6 + others.length).map((x) => x.split(':')[0]), others, 'clearance at the other stores');
+  // Walmart's online price comes from today's search, so no extra lookups for these.
+  assert.equal(day.source.onlineLookups.length, 0);
+  assert.equal(day.db.db.prepare("SELECT online_price FROM store_items WHERE item_id = 't1a'").get().online_price, 5);
   // Monday + no tier 3 list yet: built after checks, then slices at the daily stores only, until 8pm.
   assert.equal(day.tiers.count(3), 50);
   const tier3 = day.lookups.filter((l) => l.ids[0].startsWith('x'));
@@ -171,6 +180,8 @@ test('recent markdowns from tier 3 join the next day\'s checks, and calculated c
   assert.ok(recent.length > 0, 'x7 (a markdown found through tier 3) is checked at the full-check stores');
   const otherStoreCalls = day.lookups.filter((l) => l.ids.includes('x9') && !day.checker.state.probeStores.includes(l.storeId));
   assert.ok(otherStoreCalls.length > 0, 'calculated clearance (x9) is checked at the other stores');
+  // Deal items the day's search didn't price get Walmart's online price looked up.
+  assert.ok(day.source.onlineLookups.flat().includes('x9'));
 });
 
 test('tiers 1 and 2 always finish, even past 8pm; tier 3 waits for tomorrow', async () => {

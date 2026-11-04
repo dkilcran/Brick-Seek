@@ -550,6 +550,7 @@ export class WalmartLiveSource {
         url: p.url,
         category: p.category,
         offerType: item.offerType ?? null,
+        listPrice: realMsrp(item.msrp), // Walmart's list price (msrp), when it gives one
       };
     });
     const seen = new Set(found.map((f) => f.itemId));
@@ -572,7 +573,7 @@ export class WalmartLiveSource {
         const data = await this.request('/items', { ids: batch.join(',') }, { cache: false });
         for (const item of data?.items ?? []) {
           const p = this.toProduct(item, { fromLookup: true });
-          out.set(p.id, { price: p.price, msrp: p.msrp, seller: p.seller.name, inStockOnline: p.inStockOnline });
+          out.set(p.id, { price: p.price, msrp: p.msrp, seller: p.seller.name, isWalmart: p.seller.isRetailer === true, inStockOnline: p.inStockOnline });
         }
       } catch (err) {
         if (!/not found/i.test(err.message)) throw err;

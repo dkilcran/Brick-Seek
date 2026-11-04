@@ -12,7 +12,7 @@ const PRICE_DAYS = 14; // store prices older than this aren't shown, and history
 /** A store price at least this far below the item's highest valid store price (or its own earlier price) is a markdown. */
 export const MARKDOWN_GAP = 0.1;
 /** Bump when the labeling rules change, so startup rebuilds store_markdowns with them. */
-const MARKDOWN_RULES = '3';
+const MARKDOWN_RULES = '4';
 // Price columns with title/image/department from store_items when the row has none.
 const PRICE_COLUMNS = `p.retailer, p.store_id, p.item_id, p.date, p.price, p.was_price, p.in_stock, p.seller,
   p.online_price, p.online_seller, p.clearance, p.source, p.url,
@@ -151,6 +151,16 @@ export class StoreScanDb {
         PRIMARY KEY (retailer, zip)
       ) WITHOUT ROWID;
     `);
+    // Item-level prices for judging store prices: Walmart's list price (msrp) and
+    // Walmart's own online price (only when Walmart is the online seller).
+    const itemCols = db.prepare('PRAGMA table_info(store_items)').all().map((c) => c.name);
+    if (!itemCols.includes('msrp')) db.exec('ALTER TABLE store_items ADD COLUMN msrp REAL');
+    if (!itemCols.includes('online_price')) db.exec('ALTER TABLE store_items ADD COLUMN online_price REAL');
+    if (!itemCols.includes('online_date')) db.exec('ALTER TABLE store_items ADD COLUMN online_date TEXT');
+    this.setListPrice = db.prepare(`INSERT INTO store_items (retailer, item_id, msrp) VALUES (?, ?, ?)
+      ON CONFLICT (retailer, item_id) DO UPDATE SET msrp = excluded.msrp`);
+    this.setOnline = db.prepare(`INSERT INTO store_items (retailer, item_id, online_price, online_date) VALUES (?, ?, ?, ?)
+      ON CONFLICT (retailer, item_id) DO UPDATE SET online_price = excluded.online_price, online_date = excluded.online_date`);
     this.upsertItem = db.prepare(`INSERT INTO store_items (retailer, item_id, title, image_url, department) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET title = COALESCE(excluded.title, store_items.title),
         image_url = COALESCE(excluded.image_url, store_items.image_url), department = COALESCE(excluded.department, store_items.department)`);
@@ -325,6 +335,7 @@ export class StoreScanDb {
     try {
       for (const r of rows) {
         this.upsertItem.run(retailer, String(r.itemId), r.title ?? null, r.imageUrl ?? null, r.category ?? null);
+        if (r.listPrice > 0) this.setListPrice.run(retailer, String(r.itemId), r.listPrice);
         // Lean rows: title/image/department live in store_items; the URL comes from the item id.
         this.savePrice(retailer, storeId, String(r.itemId), date, r.price ?? null, r.wasPrice ?? null,
           r.inStock == null ? null : r.inStock ? 1 : 0, r.seller ?? null, null, null,
@@ -465,6 +476,21 @@ export class StoreScanDb {
     });
   }
 
+  /**
+   * Walmart's own online price for an item on `date`; null when Walmart isn't
+   * the online seller (a marketplace price says nothing about Walmart's).
+   */
+  saveOnlinePrice(retailer, itemId, price, date) {
+    this.setOnline.run(retailer, String(itemId), price > 0 ? price : null, date);
+  }
+
+  /** Items with a deal at some store whose online price wasn't checked on `day`. */
+  itemsNeedingOnlinePrice(retailer, day) {
+    return this.db.prepare(`SELECT DISTINCT m.item_id FROM store_markdowns m
+      LEFT JOIN store_items i ON i.retailer = m.retailer AND i.item_id = m.item_id
+      WHERE m.retailer = ? AND (i.online_date IS NULL OR i.online_date < ?)`).all(retailer, day).map((r) => r.item_id);
+  }
+
   /** Forget items' store prices everywhere (e.g. Walmart sells them online only). History is kept. */
   dropItems(retailer, ids) {
     const latest = this.db.prepare('DELETE FROM store_latest WHERE retailer = ? AND item_id = ?');
@@ -502,8 +528,12 @@ export class StoreScanDb {
    *    (tier 2) and below its was-price at that store;
    *  - markdown (ours): at least MARKDOWN_GAP below the item's highest valid
    *    store price (current, Walmart-sold, at any store, or this store's own
-   *    price before its last change within `days`). The discount is measured
-   *    against that highest price.
+   *    price before its last change within `days`), where a price above the
+   *    item's list price (msrp or highest was-price) isn't valid, and the
+   *    reference is capped at Walmart's own online price. The discount is
+   *    measured against that reference.
+   * A store price above Walmart's own online price gets no label at all:
+   * buying online is cheaper.
    * A was-price alone isn't a deal: Walmart shows reference prices on items
    * with no offer. ~1-2s at 800k prices; runs a few times an hour during checks.
    */
@@ -530,28 +560,49 @@ export class StoreScanDb {
         varying AS MATERIALIZED (
           SELECT item_id FROM store_latest INDEXED BY store_latest_by_item_price
           WHERE retailer = :retailer AND price > 0 GROUP BY item_id HAVING COUNT(*) >= 2 AND MIN(price) <= MAX(price) * (1 - :gap)),
+        -- A store price above the item's list price (Walmart's msrp, or the highest
+        -- was-price at any store) isn't a valid reference.
+        items AS MATERIALIZED (
+          SELECT v.item_id, NULLIF(MAX(COALESCE(i.msrp, 0), COALESCE((
+            SELECT MAX(w.was_price) FROM store_latest w INDEXED BY store_latest_by_item_price
+            WHERE w.retailer = :retailer AND w.item_id = v.item_id AND w.date >= :since AND lower(w.seller) IN ('walmart', 'walmart.com')), 0)), 0) ceiling
+          FROM varying v LEFT JOIN store_items i ON i.retailer = :retailer AND i.item_id = v.item_id),
         top AS (
           SELECT p.item_id, MAX(p.price) high, COUNT(*) n
-          FROM varying v CROSS JOIN store_latest p INDEXED BY store_latest_by_item_price
+          FROM items v CROSS JOIN store_latest p INDEXED BY store_latest_by_item_price
             ON p.retailer = :retailer AND p.item_id = v.item_id AND p.price > 0
-          WHERE p.date >= :since AND lower(p.seller) IN ('walmart', 'walmart.com')
+          WHERE p.date >= :since AND lower(p.seller) IN ('walmart', 'walmart.com') AND (v.ceiling IS NULL OR p.price <= v.ceiling)
           GROUP BY p.item_id HAVING COUNT(*) >= 2),
         offers AS (${offers}),
-        -- The highest valid store price: the highest current Walmart price at any
-        -- store, or this store's own earlier price if that's higher.
-        priced AS (
-          SELECT c.store_id, c.item_id, c.date, c.price, c.was_price, c.in_stock, c.clearance, o.offer,
-            MAX(COALESCE(t.high, 0), CASE WHEN c.prev_date >= :since THEN COALESCE(c.prev_price, 0) ELSE 0 END) high
+        -- Rows that could get a label (before the online-price checks).
+        cand AS (
+          SELECT c.store_id, c.item_id, c.date, c.price, c.was_price, c.in_stock, c.clearance, o.offer, t.high top_high,
+            CASE WHEN c.prev_date >= :since AND c.prev_price > c.price THEN c.prev_price END prev
           FROM store_latest c LEFT JOIN top t ON t.item_id = c.item_id LEFT JOIN offers o ON o.item_id = c.item_id
-          WHERE c.retailer = :retailer AND c.date >= :since AND c.price > 0 AND lower(c.seller) IN ('walmart', 'walmart.com')),
+          WHERE c.retailer = :retailer AND c.date >= :since AND c.price > 0 AND lower(c.seller) IN ('walmart', 'walmart.com')
+            AND (c.clearance = 1 OR (o.offer IS NOT NULL AND c.was_price > c.price) OR c.price <= t.high * (1 - :gap)
+              OR (c.prev_date >= :since AND c.price <= c.prev_price * (1 - :gap)))),
+        -- Walmart's own online price (recent) and the item's list price.
+        priced AS (
+          SELECT c.*, CASE WHEN i.online_date >= :since AND i.online_price > 0 THEN i.online_price END online,
+            NULLIF(MAX(COALESCE(i.msrp, 0), COALESCE(c.was_price, 0)), 0) ceiling
+          FROM cand c LEFT JOIN store_items i ON i.retailer = :retailer AND i.item_id = c.item_id),
+        -- The highest valid store price (any store's, or this store's own earlier
+        -- price, within the list price), capped at Walmart's online price.
+        reffed AS (
+          SELECT *, MIN(
+            MAX(COALESCE(top_high, 0), CASE WHEN prev <= COALESCE(ceiling, prev) THEN prev ELSE 0 END),
+            COALESCE(online, 1e18)) high
+          FROM priced),
         labeled AS (
           SELECT *,
             CASE
+              WHEN online IS NOT NULL AND price > online THEN NULL -- cheaper online: not a deal
               WHEN clearance = 1 THEN 'clearance'
               WHEN offer IS NOT NULL AND was_price > price THEN offer
               WHEN price <= high * (1 - :gap) THEN 'markdown'
             END kind
-          FROM priced)
+          FROM reffed)
         SELECT :retailer, store_id, item_id, date, price,
           -- What the discount is measured against: Walmart's was-price for its own
           -- offers, else (and for Markdowns) the highest valid store price.
