@@ -288,7 +288,30 @@ export class WalmartAdapter extends RetailerAdapter {
       this.recordedStamp = this.source.poolStamp;
     }
     const keep = this.departmentFilter();
-    return keep ? products.filter((p) => keep(p.category)) : products;
+    const kept = keep ? products.filter((p) => keep(p.category)) : products;
+    return this.withStoreReferences(kept, opts.category);
+  }
+
+  /**
+   * Walmart's msrp and "best offer" prices are unreliable (a $0.98 stuffing
+   * mix listed at $1,149.99), so with store data, deals are measured only
+   * against what the store checks found: Walmart's was-price for its own
+   * Clearance / Rollback / Reduced Price offer at a store, or the item's
+   * highest valid store price (see refreshMarkdowns). Items with neither get
+   * no discount. Reused until the pool or the markdowns change.
+   */
+  withStoreReferences(products, category = '') {
+    const db = this.storeData;
+    if (!db) return products;
+    const key = `${this.source.poolStamp}|${db.markdownVersion}|${category ?? ''}|${products.length}`;
+    if (this.refCache?.key === key) return this.refCache.output;
+    const refs = db.itemReferences(this.id);
+    const output = products.map((p) => {
+      const ref = refs.get(p.id);
+      return { ...p, msrp: ref > p.price ? ref : null, currentOfferPrice: null };
+    });
+    this.refCache = { key, output };
+    return output;
   }
 
   /**
@@ -304,7 +327,10 @@ export class WalmartAdapter extends RetailerAdapter {
 
   /** Changes whenever the deal pool does; used to cache ranking. */
   get dealPoolStamp() {
-    return this.source.rankStamp ?? this.source.poolStamp;
+    // Discounts come from the markdown table too, so a rebuild re-ranks.
+    const base = this.source.rankStamp ?? this.source.poolStamp;
+    if (base == null) return null;
+    return this.storeData ? `${base}.${this.storeData.markdownVersion}` : base;
   }
 
   /** True while the deal pool is still loading after a restart. */

@@ -742,3 +742,23 @@ test('walmart.com links carry Walmart affiliate tracking once a publisher ID is 
   assert.equal(adapter.features.affiliateLinks, true);
   assert.match(adapter.productUrl('5'), /^https:\/\/goto\.walmart\.com\/c\/1234567\//);
 });
+
+test('home page discounts use store data, not Walmart\'s msrp', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const tracker = new PriceTracker();
+  const db = new StoreScanDb(tracker.db);
+  const day = new Date().toISOString().slice(0, 10);
+  db.recordStorePrices('walmart', 'A', [{ itemId: 'fish', price: 1, seller: 'Walmart.com', inStock: true }], day);
+  db.recordStorePrices('walmart', 'B', [{ itemId: 'fish', price: 2.5, seller: 'Walmart.com', inStock: true }], day);
+  db.refreshMarkdowns('walmart');
+  const pool = [
+    { id: 'stuffing', category: 'Food', price: 0.98, msrp: 1149.99, currentOfferPrice: 5, seller: { isRetailer: true } },
+    { id: 'fish', category: 'Food', price: 1, msrp: 10, seller: { isRetailer: true } },
+  ];
+  const adapter = new WalmartAdapter({ source: { dealCandidates: async () => pool, poolStamp: 1 }, mode: 'live', tracker });
+  adapter.storeDb = db;
+  const [stuffing, fish] = await adapter.getDealCandidates();
+  assert.equal(stuffing.msrp, null, 'no store data: no discount');
+  assert.equal(stuffing.currentOfferPrice, null);
+  assert.equal(fish.msrp, 2.5, 'the highest store price');
+});

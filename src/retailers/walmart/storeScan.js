@@ -476,6 +476,13 @@ export class StoreScanDb {
     this.markdownVersion += 1;
   }
 
+  /** Each item's highest deal reference price at any store (was-price or highest store price): item_id -> price. */
+  itemReferences(retailer) {
+    const rows = this.db.prepare('SELECT item_id, MAX(ref_price) ref FROM store_markdowns WHERE retailer = ? AND ref_price > 0 GROUP BY item_id')
+      .all(retailer);
+    return new Map(rows.map((r) => [r.item_id, r.ref]));
+  }
+
   /** Each store's deal label for an item: store_id -> { kind, ref_price }. */
   itemMarkdowns(retailer, itemId) {
     const rows = this.db.prepare('SELECT store_id, kind, ref_price FROM store_markdowns WHERE retailer = ? AND item_id = ?')
