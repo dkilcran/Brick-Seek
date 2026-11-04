@@ -16,7 +16,7 @@ import { parseWalmartInput } from './identifiers.js';
 /**
  * Deal labels for store prices (store_markdowns.kind). Clearance, Rollback and
  * Reduced Price are Walmart's own; Markdown is ours (cheaper than the item's
- * typical price at other stores, or than this store's earlier price). A
+ * highest valid store price, including this store's earlier price). A
  * was-price alone gets no label.
  */
 export const DEAL_LABELS = {
@@ -373,13 +373,13 @@ export class WalmartAdapter extends RetailerAdapter {
     const storeById = new Map(stores.map((s) => [s.id, s]));
     const keep = this.departmentFilter() ?? (() => true);
     // Precomputed deals: Walmart's Clearance flag, Rollback or Reduced Price, or our
-    // Markdown (cheaper than the item's typical price, or this store's earlier price).
+    // Markdown (cheaper than the item's highest valid store price).
     return db.markdownRows(this.id, stores.map((s) => s.id))
       .filter((r) => r.in_stock !== 0)
       .filter((r) => (!category || r.department === category) && keep(r.department))
       .map((r) => {
         // Walmart's offers are measured against its was-price at that store; our
-        // markdowns against the item's typical price at other stores (or this
+        // markdowns against the item's highest valid store price (including this
         // store's earlier price). The default online offer is often another
         // seller's or out of date, so it isn't used.
         const ref = r.ref_price > r.price ? r.ref_price : null;

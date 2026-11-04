@@ -9,10 +9,10 @@ const SERPAPI_URL = 'https://serpapi.com';
 export const RESULTS_PER_PAGE = 40; // SerpApi Walmart search page size
 const PRICE_DAYS = 14; // store prices older than this aren't shown, and history is pruned
 // "Calculated clearance": a store at least this much below the item's highest price at other stores.
-/** A store price at least this far below the item's typical price (or its own earlier price) is a markdown. */
+/** A store price at least this far below the item's highest valid store price (or its own earlier price) is a markdown. */
 export const MARKDOWN_GAP = 0.1;
 /** Bump when the labeling rules change, so startup rebuilds store_markdowns with them. */
-const MARKDOWN_RULES = '2';
+const MARKDOWN_RULES = '3';
 // Price columns with title/image/department from store_items when the row has none.
 const PRICE_COLUMNS = `p.retailer, p.store_id, p.item_id, p.date, p.price, p.was_price, p.in_stock, p.seller,
   p.online_price, p.online_seller, p.clearance, p.source, p.url,
@@ -206,7 +206,7 @@ export class StoreScanDb {
         price REAL NOT NULL, ref_price REAL, was_price REAL, in_stock INTEGER,
         -- 'clearance' (Walmart's flag at that store), 'rollback' / 'reduced' / 'offer' (Walmart's
         -- Rollback or Reduced Price, with a was-price at that store), 'markdown' (ours: cheaper than
-        -- the item's typical price at other stores, or than this store's own earlier price)
+        -- the item's highest valid price at any store, including this store's own earlier price)
         kind TEXT NOT NULL,
         PRIMARY KEY (retailer, store_id, item_id)
       ) WITHOUT ROWID;
@@ -493,9 +493,10 @@ export class StoreScanDb {
    *  - clearance: Walmart's Clearance flag at that store;
    *  - rollback / reduced: on today's Walmart Rollback or Reduced Price list
    *    (tier 2) and below its was-price at that store;
-   *  - markdown (ours): at least MARKDOWN_GAP below the item's typical price
-   *    (the upper median of its current prices at all stores), or below this
-   *    store's own price before its last change (within `days`).
+   *  - markdown (ours): at least MARKDOWN_GAP below the item's highest valid
+   *    store price (current, Walmart-sold, at any store, or this store's own
+   *    price before its last change within `days`). The discount is measured
+   *    against that highest price.
    * A was-price alone isn't a deal: Walmart shows reference prices on items
    * with no offer. ~1-2s at 800k prices; runs a few times an hour during checks.
    */
@@ -517,37 +518,39 @@ export class StoreScanDb {
         WITH
         -- Each item's price spread over all saved prices, read in index order (no
         -- sort): a cheap superset of the items whose current Walmart prices differ
-        -- by at least the gap. Only those need a typical price (upper median),
+        -- by at least the gap. Only those need their highest valid store price,
         -- taken from current Walmart-sold prices only.
         varying AS MATERIALIZED (
           SELECT item_id FROM store_latest INDEXED BY store_latest_by_item_price
           WHERE retailer = :retailer AND price > 0 GROUP BY item_id HAVING COUNT(*) >= 2 AND MIN(price) <= MAX(price) * (1 - :gap)),
-        ranked AS (
-          SELECT p.item_id, p.price,
-            ROW_NUMBER() OVER (PARTITION BY p.item_id ORDER BY p.price) rn, COUNT(*) OVER (PARTITION BY p.item_id) n
+        top AS (
+          SELECT p.item_id, MAX(p.price) high, COUNT(*) n
           FROM varying v CROSS JOIN store_latest p INDEXED BY store_latest_by_item_price
             ON p.retailer = :retailer AND p.item_id = v.item_id AND p.price > 0
-          WHERE p.date >= :since AND lower(p.seller) IN ('walmart', 'walmart.com')),
-        typ AS (SELECT item_id, price typical, n FROM ranked WHERE n >= 2 AND rn = n / 2 + 1),
+          WHERE p.date >= :since AND lower(p.seller) IN ('walmart', 'walmart.com')
+          GROUP BY p.item_id HAVING COUNT(*) >= 2),
         offers AS (${offers}),
+        -- The highest valid store price: the highest current Walmart price at any
+        -- store, or this store's own earlier price if that's higher.
+        priced AS (
+          SELECT c.store_id, c.item_id, c.date, c.price, c.was_price, c.in_stock, c.clearance, o.offer,
+            MAX(COALESCE(t.high, 0), CASE WHEN c.prev_date >= :since THEN COALESCE(c.prev_price, 0) ELSE 0 END) high
+          FROM store_latest c LEFT JOIN top t ON t.item_id = c.item_id LEFT JOIN offers o ON o.item_id = c.item_id
+          WHERE c.retailer = :retailer AND c.date >= :since AND c.price > 0 AND lower(c.seller) IN ('walmart', 'walmart.com')),
         labeled AS (
-          SELECT c.store_id, c.item_id, c.date, c.price, c.was_price, c.in_stock, t.typical, t.n,
-            CASE WHEN c.prev_date >= :since AND c.prev_price > c.price THEN c.prev_price END prev,
+          SELECT *,
             CASE
-              WHEN c.clearance = 1 THEN 'clearance'
-              WHEN o.offer IS NOT NULL AND c.was_price > c.price THEN o.offer
-              WHEN c.price <= t.typical * (1 - :gap) THEN 'markdown'
-              WHEN c.prev_date >= :since AND c.price <= c.prev_price * (1 - :gap) THEN 'markdown'
+              WHEN clearance = 1 THEN 'clearance'
+              WHEN offer IS NOT NULL AND was_price > price THEN offer
+              WHEN price <= high * (1 - :gap) THEN 'markdown'
             END kind
-          FROM store_latest c LEFT JOIN typ t ON t.item_id = c.item_id LEFT JOIN offers o ON o.item_id = c.item_id
-          WHERE c.retailer = :retailer AND c.date >= :since AND c.price > 0 AND lower(c.seller) IN ('walmart', 'walmart.com'))
+          FROM priced)
         SELECT :retailer, store_id, item_id, date, price,
-          -- What the discount is measured against: Walmart's was-price for its own offers,
-          -- else the typical price at other stores, else this store's earlier price.
+          -- What the discount is measured against: Walmart's was-price for its own
+          -- offers, else (and for Markdowns) the highest valid store price.
           CASE
             WHEN kind <> 'markdown' AND was_price > price THEN was_price
-            WHEN typical > price THEN typical
-            WHEN prev > price THEN prev
+            WHEN high > price THEN high
           END,
           CASE WHEN was_price > price THEN was_price END, in_stock, kind
         FROM labeled WHERE kind IS NOT NULL`)

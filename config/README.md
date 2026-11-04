@@ -50,7 +50,7 @@ crowded $1 band is read sorted both ways.
 | `departmentQueries` | Search words per department (Walmart's search needs text). Departments not listed use their own name. |
 | `baseFilters` | Filters on every search: `retailer_type:Walmart` (sold by Walmart), `fulfillment_method:In-store` (carried in stores). |
 | `tiers` | The deal filters for tier 1 and tier 2; each is its own search pass. |
-| `markdownPercent` | A store price at least this many percent below the item's typical price at the other stores (or below that store's own earlier price) is labeled **Markdown**. Default 10. |
+| `markdownPercent` | A store price at least this many percent below the item's highest valid store price (current, sold by Walmart, at any store, or that store's own earlier price) is labeled **Markdown**. Default 10. |
 | `restartChecks` | Change this to any new value to restart today's cycle right away. |
 | `useSerpApi` | `false`: SerpApi isn't used. `true` turns the old paid SerpApi searches back on (needs `SERPAPI_KEY`), with `filters`, `searchTerms`, `discoveryStores`, `maxPages`, `monthlySearchBudget`, `fullSweep` and `inspect`. |
 
@@ -61,12 +61,14 @@ Each store price gets at most one label, in this order:
 1. **Clearance**: Walmart's Clearance flag at that store.
 2. **Rollback** / **Reduced Price**: on today's Walmart Rollback or Reduced
    Price list (tier 2), with a was-price at that store.
-3. **Markdown** (ours): at least `markdownPercent` below the item's typical
-   price (median) across stores, or below that store's own earlier price.
+3. **Markdown** (ours): at least `markdownPercent` below the item's highest
+   valid store price: the highest current Walmart-sold price at any store, or
+   that store's own earlier price if higher.
 
 A was-price alone is not a deal (Walmart shows "was" prices on items with no
 offer); the page shows it as information only. Walmart's offers are measured
-against its was-price; Markdowns against the typical or earlier price.
+against its was-price (or the highest store price when there's none);
+Markdowns against the highest valid store price.
 
 Progress: `/api/walmart/store-check`. Markdowns per tier and department:
 `/api/walmart/discovery-stats`.

@@ -277,7 +277,7 @@ test('deal labels: Walmart Clearance, Rollback / Reduced Price, our Markdown; a 
     clr: ['clearance', 9],
     roll: ['rollback', 8],
     reduced: ['reduced', 7],
-    cheap: ['markdown', 10], // 30% below the typical price at other stores
+    cheap: ['markdown', 10], // 30% below the highest price at other stores
   });
   assert.equal(db.markdownRows('walmart', ['B']).length, 1, 'only the Clearance item at B');
 
@@ -313,11 +313,21 @@ test('startup rebuilds deals still labeled by an older version', () => {
   assert.equal(db.markdownRows('walmart', ['573']).length, 0, 'a was-price alone is no longer a deal');
 });
 
-test('the typical price only uses current Walmart-sold prices', () => {
+test('the highest store price only counts current Walmart-sold prices', () => {
   const db = new StoreScanDb(new PriceTracker().db);
   db.recordStorePrices('walmart', 'A', [{ itemId: '1', price: 1, seller: 'Walmart.com', inStock: true }], '2026-11-04');
   db.recordStorePrices('walmart', 'B', [{ itemId: '1', price: 6, seller: 'Chip Co', inStock: true }], '2026-11-04');
   db.recordStorePrices('walmart', 'C', [{ itemId: '1', price: 6, seller: 'Walmart.com', inStock: true }], '2026-10-01');
   db.refreshMarkdowns('walmart', { now: Date.parse('2026-11-04T12:00:00Z') });
   assert.equal(db.markdownRows('walmart', ['A']).length, 0, 'one current Walmart price: nothing to compare with');
+});
+
+test('markdowns are measured against the highest valid store price, not the median', () => {
+  const db = new StoreScanDb(new PriceTracker().db);
+  const day = '2026-11-04';
+  const at = (store, price) => db.recordStorePrices('walmart', store, [{ itemId: '1', price, seller: 'Walmart.com', inStock: true }], day);
+  at('A', 5); at('B', 5); at('C', 5); at('D', 10);
+  db.refreshMarkdowns('walmart', { now: Date.parse('2026-11-04T12:00:00Z') });
+  const rows = db.markdownRows('walmart', ['A', 'B', 'C', 'D']).map((r) => [r.store_id, r.kind, r.ref_price]).sort();
+  assert.deepEqual(rows, [['A', 'markdown', 10], ['B', 'markdown', 10], ['C', 'markdown', 10]], 'half off the highest store price');
 });
