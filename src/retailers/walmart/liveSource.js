@@ -481,8 +481,9 @@ export class WalmartLiveSource {
     if (lo != null && hi != null) params['facet.range'] = `price:[${lo} TO ${hi}]`;
     if (sort) Object.assign(params, { sort: 'price', order: sort });
     const data = await this.request('/search', params, { cache: false });
+    // Walmart's own filters miss some: marketplace sellers and online-only items get through.
     const products = (data?.items ?? [])
-      .filter((item) => item?.itemId && isWalmartSeller(item, { fromLookup: true }))
+      .filter((item) => item?.itemId && isWalmartSeller(item, { fromLookup: true }) && item.offerType !== 'ONLINE_ONLY')
       .map((item) => this.toProduct(item, { fromLookup: true }));
     return { products, total: Number(data?.totalResults) || 0 };
   }

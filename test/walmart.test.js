@@ -798,3 +798,17 @@ test('product search pages through every Walmart in-store result, then adds item
   assert.equal(second.nextStart, null);
   assert.deepEqual(second.products.map((p) => p.id), [...all.slice(25).map((p) => p.id), '18140512295'], 'saved matches after the last page');
 });
+
+test('search pages drop marketplace and online-only items even when Walmart\'s filters let them through', async () => {
+  const live = new WalmartLiveSource({
+    consumerId: 'x', privateKey: generateKeyPairSync('rsa', { modulusLength: 1024 }).privateKey.export({ type: 'pkcs1', format: 'pem' }),
+    minIntervalMs: 0,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ totalResults: 3, items: [
+      { itemId: 1, name: 'Laptop A', salePrice: 500, sellerInfo: 'Walmart.com', offerType: 'ONLINE_AND_STORE' },
+      { itemId: 2, name: 'Laptop B', salePrice: 842.9, sellerInfo: 'GAMES FOR LESS', marketplace: true, offerType: 'ONLINE_ONLY' },
+      { itemId: 3, name: 'Laptop C', salePrice: 600, sellerInfo: 'Walmart.com', offerType: 'ONLINE_ONLY' },
+    ] }) }),
+  });
+  const { products } = await live.searchPage({ query: 'laptop', filters: ['retailer_type:Walmart'] });
+  assert.deepEqual(products.map((p) => p.id), ['1']);
+});
