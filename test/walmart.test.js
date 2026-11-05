@@ -775,7 +775,7 @@ test('one store list: the 15 nearest stores plus farther ones with a saved price
   assert.equal(inv.results.at(-1).store.rank, 26);
 });
 
-test('product search lists items the store checks know, then Walmart\'s search', async () => {
+test('product search lists Walmart\'s search, then items the store checks know that it missed', async () => {
   const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
   const tracker = new PriceTracker();
   const db = new StoreScanDb(tracker.db);
@@ -785,5 +785,5 @@ test('product search lists items the store checks know, then Walmart\'s search',
   const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
   adapter.storeDb = db;
   const results = await adapter.searchProducts('hp omnibook 5');
-  assert.deepEqual(results.map((p) => p.id), ['18140512295', '18103522734']);
+  assert.deepEqual(results.map((p) => p.id), ['18103522734', '18140512295']);
 });

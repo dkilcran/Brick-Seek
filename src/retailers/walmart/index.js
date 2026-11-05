@@ -146,14 +146,14 @@ export class WalmartAdapter extends RetailerAdapter {
       const product = await this.lookupProduct(query);
       return product ? [product] : [];
     }
-    // Items our store checks know first (Walmart's search can list the same
-    // product under another item number), then Walmart's search.
+    // Walmart's search (its relevance order), then items our store checks know
+    // that it missed: it can list the same product under another item number.
     const limit = opts.limit ?? 25;
-    const saved = (this.storeData?.searchItems(this.id, parsed.value, { limit }) ?? [])
-      .map((id) => this.storedProduct(id)).filter(Boolean).slice(0, limit);
     const results = await this.source.search(parsed.value, opts);
-    const seen = new Set(saved.map((p) => p.id));
-    return [...saved, ...results.filter((p) => !seen.has(p.id))].map((p) => this.withReference(p));
+    const seen = new Set(results.map((p) => p.id));
+    const saved = (this.storeData?.searchItems(this.id, parsed.value, { limit }) ?? [])
+      .filter((id) => !seen.has(id)).map((id) => this.storedProduct(id)).filter(Boolean).slice(0, limit);
+    return [...results, ...saved].map((p) => this.withReference(p));
   }
 
   /** item_id -> deal reference price from the store checks, reused until the markdowns change. Null without store data. */
