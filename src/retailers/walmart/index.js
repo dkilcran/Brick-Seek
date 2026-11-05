@@ -140,20 +140,38 @@ export class WalmartAdapter extends RetailerAdapter {
   }
 
   async searchProducts(query, opts = {}) {
+    return (await this.searchPaged(query, opts)).products;
+  }
+
+  /**
+   * One page (25) of product search results: only items Walmart itself sells
+   * in stores, in Walmart's relevance order, up to Walmart's 1,000-result
+   * limit. On the last page, items our store checks know that match the words
+   * are added (Walmart's search doesn't always list them).
+   * @returns {Promise<{ products: object[], total: number, nextStart: number|null }>}
+   */
+  async searchPaged(query, { start = 1 } = {}) {
     const parsed = parseWalmartInput(query);
-    if (parsed.type === 'empty') return [];
+    if (parsed.type === 'empty') return { products: [], total: 0, nextStart: null };
     if (parsed.type !== 'query') {
       const product = await this.lookupProduct(query);
-      return product ? [product] : [];
+      return { products: product ? [product] : [], total: product ? 1 : 0, nextStart: null };
     }
-    // Walmart's search (its relevance order), then items our store checks know
-    // that it missed: it can list the same product under another item number.
-    const limit = opts.limit ?? 25;
-    const results = await this.source.search(parsed.value, opts);
-    const seen = new Set(results.map((p) => p.id));
-    const saved = (this.storeData?.searchItems(this.id, parsed.value, { limit }) ?? [])
-      .filter((id) => !seen.has(id)).map((id) => this.storedProduct(id)).filter(Boolean).slice(0, limit);
-    return [...results, ...saved].map((p) => this.withReference(p));
+    if (!this.source.searchPage) {
+      const products = await this.source.search(parsed.value, {});
+      return { products, total: products.length, nextStart: null };
+    }
+    const filters = this.storeConfig()?.baseFilters ?? ['retailer_type:Walmart', 'fulfillment_method:In-store'];
+    const { products, total } = await this.source.searchPage({ query: parsed.value, filters, start });
+    const next = start + 25;
+    const nextStart = products.length && next < 1000 && next <= total ? next : null;
+    let saved = [];
+    if (nextStart === null) {
+      const seen = new Set(products.map((p) => p.id));
+      saved = (this.storeData?.searchItems(this.id, parsed.value, { limit: 25 }) ?? [])
+        .filter((id) => !seen.has(id)).map((id) => this.storedProduct(id)).filter(Boolean).slice(0, 25);
+    }
+    return { products: [...products, ...saved].map((p) => this.withReference(p)), total, nextStart };
   }
 
   /** item_id -> deal reference price from the store checks, reused until the markdowns change. Null without store data. */

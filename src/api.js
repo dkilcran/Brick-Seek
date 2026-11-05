@@ -156,9 +156,14 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const adapter = requireRetailer(registry, params.retailer);
       const q = (query.get('q') ?? '').trim();
       if (!q) throw new HttpError(400, 'Query parameter "q" is required');
+      // Paged (25 at a time) where the retailer supports it; nextStart asks for more.
+      if (adapter.searchPaged) {
+        const page = await adapter.searchPaged(q, { start: clampInt(query.get('start'), 1, 1, 999) });
+        return { retailer: adapter.id, query: q, products: page.products.filter(isSoldByRetailer), total: page.total, nextStart: page.nextStart };
+      }
       const products = (await adapter.searchProducts(q, { limit: clampInt(query.get('limit'), 25, 1, 50) }))
         .filter(isSoldByRetailer);
-      return { retailer: adapter.id, query: q, products };
+      return { retailer: adapter.id, query: q, products, total: products.length, nextStart: null };
     }],
 
     ['GET', '/api/:retailer/products/:id', async ({ params }) => {

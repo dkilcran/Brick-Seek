@@ -775,15 +775,26 @@ test('one store list: the 15 nearest stores plus farther ones with a saved price
   assert.equal(inv.results.at(-1).store.rank, 26);
 });
 
-test('product search lists Walmart\'s search, then items the store checks know that it missed', async () => {
+test('product search pages through every Walmart in-store result, then adds items the store checks know', async () => {
   const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
   const tracker = new PriceTracker();
   const db = new StoreScanDb(tracker.db);
   db.recordStorePrices('walmart', '573', [{ itemId: '18140512295', title: 'HP OmniBook 5 16 inch Laptop', price: 599, seller: 'Walmart.com', inStock: true }], new Date().toISOString().slice(0, 10));
-  const fromWalmart = { id: '18103522734', name: 'HP OmniBook 5 16 inch Laptop', price: 799, seller: { name: 'Walmart.com', isRetailer: true } };
-  const source = { search: async () => [fromWalmart] };
+  const all = Array.from({ length: 30 }, (_, i) => ({ id: String(500 + i), name: `HP Laptop ${i}`, price: 300, seller: { name: 'Walmart.com', isRetailer: true } }));
+  const calls = [];
+  const source = {
+    async searchPage({ query, filters, start }) {
+      calls.push({ query, filters, start });
+      return { products: all.slice(start - 1, start - 1 + 25), total: all.length };
+    },
+  };
   const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
   adapter.storeDb = db;
-  const results = await adapter.searchProducts('hp omnibook 5');
-  assert.deepEqual(results.map((p) => p.id), ['18103522734', '18140512295']);
+  const first = await adapter.searchPaged('hp laptop');
+  assert.equal(first.products.length, 25);
+  assert.equal(first.nextStart, 26);
+  assert.deepEqual(calls[0].filters, ['retailer_type:Walmart', 'fulfillment_method:In-store'], 'only Walmart-sold, in stores');
+  const second = await adapter.searchPaged('hp laptop', { start: 26 });
+  assert.equal(second.nextStart, null);
+  assert.deepEqual(second.products.map((p) => p.id), [...all.slice(25).map((p) => p.id), '18140512295'], 'saved matches after the last page');
 });

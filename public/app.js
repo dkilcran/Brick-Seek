@@ -151,12 +151,45 @@ async function homeView(query) {
     const $results = $app.querySelector('#results');
     $results.innerHTML = '<div class="loading">Searching…</div>';
     try {
-      const { products } = await api(`/api/${r.id}/search?q=${encodeURIComponent(q)}`);
+      // 25 at a time; "Load more" fetches the next page until every result is shown.
       const sort = query.get('sort') ?? 'best';
-      $results.innerHTML = `<div class="section-title"><h2>Results for “${esc(q)}”</h2><span class="muted">${products.length} found</span></div>
-        ${products.length > 1 ? `<form class="toolbar" id="search-sort">${sortSelect('ssort', sort)}</form>` : ''}
-        ${products.length ? `<div class="grid">${sortProducts(products, sort).map((p) => productCard(p, { zip: state.zip })).join('')}</div>` : '<div class="empty">No products matched. Try a different name, item number or UPC.</div>'}`;
-      $results.querySelector('#search-sort')?.addEventListener('change', (e) => go('/', { retailer: r.id, q, sort: e.target.value }));
+      const loaded = [];
+      const seen = new Set();
+      let page = await api(`/api/${r.id}/search?q=${encodeURIComponent(q)}`);
+      const add = (products) => { for (const p of products) if (!seen.has(p.id)) { seen.add(p.id); loaded.push(p); } };
+      add(page.products);
+      if (!loaded.length) {
+        $results.innerHTML = '<div class="empty">No products matched. Try a different name, item number or UPC.</div>';
+        return;
+      }
+      $results.innerHTML = `<div class="section-title"><h2>Results for “${esc(q)}”</h2><span class="muted" id="found"></span></div>
+        <form class="toolbar" id="search-sort">${sortSelect('ssort', sort)}</form>
+        <div class="grid" id="result-grid"></div>
+        <div style="text-align:center;margin-top:20px"><button class="btn secondary" id="more-results" type="button" hidden>Load more</button></div>`;
+      const $grid = $results.querySelector('#result-grid');
+      const $more = $results.querySelector('#more-results');
+      const draw = () => {
+        // Sorting applies to everything loaded so far.
+        $grid.innerHTML = sortProducts(loaded, sort).map((p) => productCard(p, { zip: state.zip })).join('');
+        $results.querySelector('#found').textContent = page.nextStart
+          ? `Showing ${loaded.length} of about ${page.total}` : `${loaded.length} found`;
+        $more.hidden = !page.nextStart;
+      };
+      draw();
+      $results.querySelector('#search-sort').addEventListener('change', (e) => go('/', { retailer: r.id, q, sort: e.target.value }));
+      $more.addEventListener('click', async () => {
+        $more.disabled = true;
+        $more.textContent = 'Loading…';
+        try {
+          page = await api(`/api/${r.id}/search?q=${encodeURIComponent(q)}&start=${page.nextStart}`);
+          add(page.products);
+          draw();
+        } catch (err) {
+          $results.querySelector('#found').textContent = err.message;
+        }
+        $more.disabled = false;
+        $more.textContent = 'Load more';
+      });
     } catch (err) {
       $results.innerHTML = `<div class="error">${esc(err.message)}</div>`;
     }
