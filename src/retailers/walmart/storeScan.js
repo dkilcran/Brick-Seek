@@ -491,6 +491,19 @@ export class StoreScanDb {
       WHERE m.retailer = ? AND (i.online_date IS NULL OR i.online_date < ?)`).all(retailer, day).map((r) => r.item_id);
   }
 
+  /**
+   * Items with a current Walmart store price whose title has every word of
+   * `query` (any order, any case). For the product search.
+   */
+  searchItems(retailer, query, { limit = 25 } = {}) {
+    const words = String(query).toLowerCase().split(/\s+/).filter((w) => w.length > 0).slice(0, 8);
+    if (!words.length) return [];
+    const like = words.map(() => 'lower(i.title) LIKE ?').join(' AND ');
+    return this.db.prepare(`SELECT i.item_id FROM store_items i
+      WHERE i.retailer = ? AND i.title IS NOT NULL AND ${like} LIMIT ?`)
+      .all(retailer, ...words.map((w) => `%${w.replace(/[%_]/g, '')}%`), limit * 4).map((r) => r.item_id);
+  }
+
   /** Forget items' store prices everywhere (e.g. Walmart sells them online only). History is kept. */
   dropItems(retailer, ids) {
     const latest = this.db.prepare('DELETE FROM store_latest WHERE retailer = ? AND item_id = ?');

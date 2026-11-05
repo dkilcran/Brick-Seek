@@ -515,10 +515,7 @@ test('items Walmart sells in a scanned store are allowed even when a marketplace
   await assert.rejects(call('/api/walmart/products/999'), /sold by Rug Co/, 'no store offer: still rejected');
 
   // Stock check: unscanned stores don't show the marketplace seller's price as a store price.
-  source.inventory = async (p) => [
-    { store: { id: '573', name: 'Lee' }, price: p.price, status: 'unknown', clearance: false },
-    { store: { id: '1094', name: 'Raytown' }, price: p.price, status: 'unknown', clearance: false },
-  ];
+  source.stores = async () => [{ retailer: 'walmart', id: '573', name: 'Lee' }, { retailer: 'walmart', id: '1094', name: 'Raytown' }];
   const inv = await adapter.checkInventory('673610207', '64081');
   assert.deepEqual(inv.results.map((r) => r.price), [0.64, null]);
 
@@ -761,4 +758,32 @@ test('home page discounts use store data, not Walmart\'s msrp', async () => {
   assert.equal(stuffing.msrp, null, 'no store data: no discount');
   assert.equal(stuffing.currentOfferPrice, null);
   assert.equal(fish.msrp, 2.5, 'the highest store price');
+});
+
+test('one store list: the 15 nearest stores plus farther ones with a saved price, nearest first', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const tracker = new PriceTracker();
+  const db = new StoreScanDb(tracker.db);
+  const nearby = Array.from({ length: 30 }, (_, i) => ({ retailer: 'walmart', id: String(100 + i), name: `Store ${i}` }));
+  db.recordStorePrices('walmart', '125', [{ itemId: '1', title: 'Lamp', price: 4, seller: 'Walmart.com', inStock: true }], new Date().toISOString().slice(0, 10));
+  const source = { stores: async () => nearby, getById: async () => null };
+  const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
+  adapter.storeDb = db;
+  const inv = await adapter.checkInventory('1', '64081');
+  assert.deepEqual(inv.results.map((r) => r.store.id), [...nearby.slice(0, 15).map((s) => s.id), '125']);
+  assert.equal(inv.results.at(-1).price, 4);
+  assert.equal(inv.results.at(-1).store.rank, 26);
+});
+
+test('product search lists items the store checks know, then Walmart\'s search', async () => {
+  const { StoreScanDb } = await import('../src/retailers/walmart/storeScan.js');
+  const tracker = new PriceTracker();
+  const db = new StoreScanDb(tracker.db);
+  db.recordStorePrices('walmart', '573', [{ itemId: '18140512295', title: 'HP OmniBook 5 16 inch Laptop', price: 599, seller: 'Walmart.com', inStock: true }], new Date().toISOString().slice(0, 10));
+  const fromWalmart = { id: '18103522734', name: 'HP OmniBook 5 16 inch Laptop', price: 799, seller: { name: 'Walmart.com', isRetailer: true } };
+  const source = { search: async () => [fromWalmart] };
+  const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
+  adapter.storeDb = db;
+  const results = await adapter.searchProducts('hp omnibook 5');
+  assert.deepEqual(results.map((p) => p.id), ['18140512295', '18103522734']);
 });

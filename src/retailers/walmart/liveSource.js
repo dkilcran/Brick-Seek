@@ -270,7 +270,12 @@ export class WalmartLiveSource {
   }
 
   async search(query, { limit = 25 } = {}) {
-    const data = await this.request('/search', { query, numItems: Math.min(limit, 25) });
+    // Only items Walmart itself sells in stores: unfiltered, the first page is
+    // mostly marketplace sellers (all 25 for "HP OmniBook 5"), which we drop.
+    const data = await this.request('/search', {
+      query, numItems: Math.min(limit, 25), facet: 'on',
+      'facet.filter': ['retailer_type:Walmart', 'fulfillment_method:In-store'],
+    });
     const products = (data?.items ?? []).map((i) => this.toProduct(i, { fromLookup: false }));
     this.applySavedChecks(products);
     await this.checkItems(products.filter((p) => p.seller.isRetailer === null));

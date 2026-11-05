@@ -106,6 +106,24 @@ async function localClearanceDeals(adapter, zip, { category, minDiscount = 0 } =
     .sort((a, b) => b.discountPercent - a.discountPercent);
 }
 
+/** Store deal types on the Deals page, by the deal label they keep. */
+const STORE_TYPES = {
+  'store-clearance': ['Clearance'],
+  'store-rollback': ['Rollback', 'Rollback / Reduced Price'],
+  'store-reduced': ['Reduced Price', 'Rollback / Reduced Price'],
+  'store-markdown': ['Markdown'],
+};
+
+/** Deals whose product name has every word of `q` (any order, any case). */
+export function filterByText(deals, q) {
+  const words = String(q ?? '').toLowerCase().split(/\s+/).filter(Boolean);
+  if (!words.length) return deals;
+  return deals.filter((d) => {
+    const name = `${d.product.name ?? ''} ${d.product.brand ?? ''} ${d.product.id}`.toLowerCase();
+    return words.every((w) => name.includes(w));
+  });
+}
+
 /**
  * Re-order a deal list: 'percent' (% off), 'dollars' ($ off), 'price' (low to
  * high), 'price-desc'; anything else keeps the section's own order. Ties keep
@@ -158,7 +176,8 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const results = [...result.results].sort((a, b) =>
         sort === 'price'
           ? (a.price ?? Infinity) - (b.price ?? Infinity)
-          : (a.store.distanceMiles ?? Infinity) - (b.store.distanceMiles ?? Infinity),
+          // Walmart gives no distances, only nearest-first order (store.rank).
+          : (a.store.distanceMiles ?? a.store.rank ?? Infinity) - (b.store.distanceMiles ?? b.store.rank ?? Infinity),
       );
       return {
         product,
@@ -201,8 +220,14 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
     // One section: top | drops | lowest | bigticket | clearance (needs zip)
     ['GET', '/api/:retailer/deals', async ({ params, query }) => {
       const adapter = requireRetailer(registry, params.retailer);
-      const section = query.get('section') ?? 'top';
-      if (!SECTIONS[section]) throw new HttpError(400, `Unknown section "${section}"`);
+      // One or more deal types, comma-separated: the online sections (top, drops,
+      // lowest, bigticket) and the store deal labels near a ZIP (clearance =
+      // every store deal; or store-clearance, store-rollback, store-reduced,
+      // store-markdown). Lists are merged in that order, each item once.
+      const sections = (query.get('section') ?? 'top').split(',').map((s) => s.trim()).filter(Boolean);
+      for (const s of sections) {
+        if (!SECTIONS[s] && !STORE_TYPES[s]) throw new HttpError(400, `Unknown section "${s}"`);
+      }
       const opts = {
         category: query.get('category') || undefined,
         minDiscount: clampInt(query.get('minDiscount'), 0, 0, 100),
@@ -210,17 +235,30 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       // Full lists: every match, best first, no per-category or per-brand caps; paged.
       const limit = clampInt(query.get('limit'), 50, 1, 100);
       const offset = clampInt(query.get('offset'), 0, 0, 100000);
-      let all;
-      if (section === 'clearance') {
-        if (!adapter.features.localClearance) {
-          throw new HttpError(501, `${adapter.name} doesn't publish store-level prices yet`);
+      let storeDeals = null;
+      let analyzed = null;
+      const seen = new Set();
+      let all = [];
+      for (const s of sections) {
+        let list;
+        if (s === 'clearance' || STORE_TYPES[s]) {
+          if (!adapter.features.localClearance) {
+            throw new HttpError(501, `${adapter.name} doesn't publish store-level prices yet`);
+          }
+          storeDeals ??= await localClearanceDeals(adapter, requireZip(query.get('zip')), opts);
+          list = s === 'clearance' ? storeDeals : storeDeals.filter((d) => STORE_TYPES[s].includes(d.reasons[0]));
+        } else {
+          analyzed ??= await analyzeCandidates(adapter, opts);
+          list = rankSection(s, analyzed, { ...opts, all: true });
         }
-        all = await localClearanceDeals(adapter, requireZip(query.get('zip')), opts);
-      } else {
-        all = rankSection(section, await analyzeCandidates(adapter, opts), { ...opts, all: true });
+        for (const d of list) {
+          if (seen.has(d.product.id)) continue;
+          seen.add(d.product.id);
+          all.push(d);
+        }
       }
-      all = sortDeals(all, query.get('sort'));
-      return { section, total: all.length, offset, deals: all.slice(offset, offset + limit), hasMore: offset + limit < all.length };
+      all = sortDeals(filterByText(all, query.get('q')), query.get('sort'));
+      return { section: sections.join(','), total: all.length, offset, deals: all.slice(offset, offset + limit), hasMore: offset + limit < all.length };
     }],
 
     // Every section at once, for the home page.

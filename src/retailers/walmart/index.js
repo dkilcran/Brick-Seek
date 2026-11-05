@@ -146,11 +146,14 @@ export class WalmartAdapter extends RetailerAdapter {
       const product = await this.lookupProduct(query);
       return product ? [product] : [];
     }
-    // Same discount references as the deal lists (Walmart's msrp is unreliable).
-    const refs = this.referenceMap();
+    // Items our store checks know first (Walmart's search can list the same
+    // product under another item number), then Walmart's search.
+    const limit = opts.limit ?? 25;
+    const saved = (this.storeData?.searchItems(this.id, parsed.value, { limit }) ?? [])
+      .map((id) => this.storedProduct(id)).filter(Boolean).slice(0, limit);
     const results = await this.source.search(parsed.value, opts);
-    if (!refs) return results;
-    return results.map((p) => this.withReference(p));
+    const seen = new Set(saved.map((p) => p.id));
+    return [...saved, ...results.filter((p) => !seen.has(p.id))].map((p) => this.withReference(p));
   }
 
   /** item_id -> deal reference price from the store checks, reused until the markdowns change. Null without store data. */
@@ -213,7 +216,20 @@ export class WalmartAdapter extends RetailerAdapter {
   async checkInventory(productId, zip, opts = {}) {
     const product = await this.getProduct(productId);
     if (!product) return null;
-    const results = await this.source.inventory(product, zip, opts);
+    let results;
+    if (this.storeData && this.source.stores) {
+      // One list: Walmart's 15 stores nearest the ZIP (nearest first), plus any
+      // other store among its 50 nearest where we have this item's price (e.g.
+      // the tracked stores near work), so the page has a single store list.
+      const nearby = await this.source.stores(zip, { limit: 50 });
+      const priced = new Set(this.storeData.latestPrices(this.id, nearby.map((s) => s.id), { itemId: product.id }).map((r) => r.store_id));
+      results = nearby
+        .map((store, i) => ({ ...store, rank: i + 1 }))
+        .filter((s) => s.rank <= 15 || priced.has(s.id))
+        .map((store) => ({ store, price: null, quantity: null, status: STOCK_STATUS.UNKNOWN, aisle: null, clearance: false }));
+    } else {
+      results = await this.source.inventory(product, zip, opts);
+    }
     this.applyScannedPrices(product, results);
     return { product, results };
   }

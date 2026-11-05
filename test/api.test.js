@@ -184,3 +184,29 @@ test('deal lists sort by % off, $ off or price, keeping the section order for ti
   assert.deepEqual(ids('best'), ['a', 'b', 'c']);
   assert.deepEqual(ids(undefined), ['a', 'b', 'c']);
 });
+
+test('deal text search needs every word, in any order and case', async () => {
+  const { filterByText } = await import('../src/api.js');
+  const deals = [
+    { product: { id: '1', name: 'HP OmniBook 5 16 inch Laptop' } },
+    { product: { id: '2', name: 'HP 14-inch Chromebook' } },
+    { product: { id: '3', name: 'LEGO Speed Champions', brand: 'LEGO' } },
+  ];
+  assert.deepEqual(filterByText(deals, 'laptop hp').map((d) => d.product.id), ['1']);
+  assert.deepEqual(filterByText(deals, 'HP').map((d) => d.product.id), ['1', '2']);
+  assert.deepEqual(filterByText(deals, '').length, 3);
+});
+
+test('several deal types at once: merged, each item once, and searchable', async () => {
+  const top = await get('/api/walmart/deals?section=top&limit=100');
+  const drops = await get('/api/walmart/deals?section=drops&limit=100');
+  const both = await get('/api/walmart/deals?section=top,drops,store-clearance&zip=72712&limit=100');
+  assert.equal(both.status, 200);
+  const ids = both.body.deals.map((d) => d.product.id);
+  assert.equal(new Set(ids).size, ids.length, 'no repeats');
+  for (const d of [...top.body.deals, ...drops.body.deals]) assert.ok(ids.includes(d.product.id));
+  const word = top.body.deals[0].product.name.split(' ')[0];
+  const found = await get(`/api/walmart/deals?section=top&q=${encodeURIComponent(word)}&limit=100`);
+  assert.ok(found.body.total >= 1 && found.body.deals.every((d) => d.product.name.toLowerCase().includes(word.toLowerCase())));
+  assert.equal((await get('/api/walmart/deals?section=top,nope')).status, 400);
+});

@@ -265,7 +265,7 @@ async function itemView(retailerId, id, query) {
         ${product.storeOffers?.length ? `<div class="muted" style="font-size:14px">Online: ${product.onlinePrice != null
           ? `${money(product.onlinePrice)}${product.onlineSeller ? ` from ${esc(product.onlineSeller)}` : ''}`
           : `<a href="${esc(product.url)}" target="_blank" rel="noopener sponsored">see walmart.com</a>`}</div>` : ''}
-        ${product.storeOffers?.length ? `<div class="card" style="margin:12px 0">
+        ${product.storeOffers?.length && !inv ? `<div class="card" style="margin:12px 0">
           <strong>In store, sold by ${esc(r.name)}</strong>
           ${product.storeOffers.map((o) => `<div class="price-row" style="margin-top:6px">
             <span class="price">${money(o.price)}</span>
@@ -309,6 +309,8 @@ async function itemView(retailerId, id, query) {
 function renderInventory($el, r, product, inv, { radius, sort }) {
   const s = inv.summary;
   const showQty = r.features.storeQuantities;
+  // Walmart gives no store distances (the list is nearest first), so radius and distance only show when known.
+  const hasDistance = inv.results.some((x) => x.store.distanceMiles != null);
   $el.innerHTML = `
     <div class="stats">
       <div class="stat"><div class="label">Store prices</div><div class="value">${s.storesPriced ?? s.storesChecked} of ${s.storesChecked}</div></div>
@@ -318,9 +320,9 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
     </div>
     <div class="section-title"><h2>Stores near ${esc(inv.zip)}</h2><span class="muted">Checked ${new Date(inv.checkedAt).toLocaleTimeString()}</span></div>
     <form class="toolbar" id="inv-tools">
-      <div class="field"><label for="r2">Radius</label><select id="r2" name="radius">${[10, 25, 50, 100].map((m) => `<option value="${m}" ${String(m) === String(radius) ? 'selected' : ''}>${m} mi</option>`).join('')}</select></div>
+      ${hasDistance ? `<div class="field"><label for="r2">Radius</label><select id="r2" name="radius">${[10, 25, 50, 100].map((m) => `<option value="${m}" ${String(m) === String(radius) ? 'selected' : ''}>${m} mi</option>`).join('')}</select></div>` : ''}
       <div class="field"><label for="s2">Sort by</label><select id="s2" name="sort">
-        <option value="distance" ${sort === 'distance' ? 'selected' : ''}>Distance</option>
+        <option value="distance" ${sort === 'distance' ? 'selected' : ''}>${hasDistance ? 'Distance' : 'Nearest first'}</option>
         <option value="price" ${sort === 'price' ? 'selected' : ''}>Lowest price</option></select></div>
       <div class="field"><label for="f2">Show</label><select id="f2" name="filter">
         <option value="all">All stores</option><option value="available">Available only</option></select></div>
@@ -332,11 +334,11 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
   const drawTable = (filter) => {
     const rows = inv.results.filter((x) => filter !== 'available' || x.status === 'in_stock' || x.status === 'limited');
     $el.querySelector('#store-table').innerHTML = rows.length ? `<div class="table-scroll"><table>
-      <thead><tr><th>Store</th><th class="hide-sm">Address</th><th>Distance</th><th>Price</th><th>Availability</th>${showQty ? '<th class="hide-sm">Aisle</th>' : ''}</tr></thead>
+      <thead><tr><th>Store</th><th class="hide-sm">Address</th>${hasDistance ? '<th>Distance</th>' : ''}<th>Price</th><th>Availability</th>${showQty ? '<th class="hide-sm">Aisle</th>' : ''}</tr></thead>
       <tbody>${rows.map((x) => `<tr>
         <td><div class="store-name">${esc(x.store.name)}</div>${x.store.phone ? `<div class="muted" style="font-size:13px">${esc(x.store.phone)}</div>` : ''}</td>
         <td class="hide-sm">${esc([x.store.address, x.store.city, x.store.state, x.store.zip].filter(Boolean).join(', '))}</td>
-        <td class="num">${x.store.distanceMiles != null ? `${x.store.distanceMiles} mi` : '—'}</td>
+        ${hasDistance ? `<td class="num">${x.store.distanceMiles != null ? `${x.store.distanceMiles} mi` : '—'}</td>` : ''}
         <td class="num">${priceCell(x, product, r)}</td>
         <td><span class="badge ${esc(x.status)}">${STATUS_LABEL[x.status] ?? esc(x.status)}${showQty && x.quantity ? ` · ${x.quantity}` : ''}</span>${x.seenOn ? `<div class="muted" style="font-size:12px">Store price ${x.justChecked ? 'checked just now' : `scanned ${esc(x.seenOn)}`}</div>` : ''}${x.note ? `<div class="muted" style="font-size:12px">${esc(x.note)}</div>` : ''}</td>
         ${showQty ? `<td class="hide-sm">${esc(x.aisle ?? '—')}</td>` : ''}
@@ -381,7 +383,7 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
   tools.addEventListener('change', (e) => {
     if (e.target.name === 'filter') return drawTable(e.target.value);
     const data = new FormData(tools);
-    go(`/r/${r.id}/item/${product.id}`, { zip: inv.zip, radius: data.get('radius'), sort: data.get('sort') });
+    go(`/r/${r.id}/item/${product.id}`, { zip: inv.zip, radius: data.get('radius') ?? radius, sort: data.get('sort') });
   });
 }
 
@@ -447,33 +449,50 @@ function sortProducts(products, sort) {
   return by ? products.map((p, i) => [by(p), i, p]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]) : products;
 }
 
-const DEAL_SECTIONS = [
+// Deal types on the Deals page; pick any combination. The store ones need a ZIP.
+const DEAL_TYPES = [
   ['top', 'Top deals'],
   ['drops', 'Price drops'],
   ['lowest', 'Lowest ever'],
   ['bigticket', 'Big-ticket'],
-  ['clearance', 'Store deals near you'],
+];
+const STORE_DEAL_TYPES = [
+  ['store-clearance', 'Clearance'],
+  ['store-rollback', 'Rollback'],
+  ['store-reduced', 'Reduced Price'],
+  ['store-markdown', 'Markdown'],
 ];
 
 async function dealsView(query) {
   const r = selectRetailer(query.get('retailer') ?? state.retailer?.id);
-  const section = query.get('section') ?? 'top';
+  // "clearance" (all store deals, e.g. from the home page) means every store type.
+  const picked = new Set((query.get('section') ?? 'top').split(',').flatMap((s) => (s === 'clearance' ? STORE_DEAL_TYPES.map(([id]) => id) : [s])));
+  const types = [...DEAL_TYPES, ...(r.features.localClearance ? STORE_DEAL_TYPES : [])];
+  for (const id of picked) if (!types.some(([t]) => t === id)) picked.delete(id);
+  if (!picked.size) picked.add('top');
   const category = query.get('category') ?? '';
   const min = query.get('min') ?? '0';
   const sort = query.get('sort') ?? 'best';
+  const text = query.get('q') ?? '';
   loading('Finding deals…');
   let categories = [];
   try { ({ categories } = await api(`/api/${r.id}/categories`)); } catch { /* optional */ }
 
-  const tab = ([id, label]) => {
-    const href = `#/deals?${new URLSearchParams({ retailer: r.id, section: id, ...(category ? { category } : {}), min, sort })}`;
-    return `<a class="chip ${id === section ? 'active' : ''}" href="${href}">${esc(label)}</a>`;
+  const params = (extra) => ({ retailer: r.id, section: [...picked].join(','), ...(category ? { category } : {}), min, sort, ...(text ? { q: text } : {}), ...extra });
+  // Each chip toggles its type on or off (at least one stays on).
+  const chip = ([id, label]) => {
+    const next = new Set(picked);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    const href = next.size ? `#/deals?${new URLSearchParams(params({ section: [...next].join(',') }))}` : '';
+    return `<a class="chip ${picked.has(id) ? 'active' : ''}" ${href ? `href="${href}"` : ''} aria-pressed="${picked.has(id)}">${esc(label)}</a>`;
   };
   $app.innerHTML = `
-    <section class="hero"><h1>${esc(r.name)} deals</h1><p>Only items sold by ${esc(r.name)} itself, never marketplace sellers.</p></section>
+    <section class="hero"><h1>${esc(r.name)} deals</h1><p>Only items sold by ${esc(r.name)} itself, never marketplace sellers. Pick any combination of deal types.</p></section>
     ${retailerTabs(r.id)}
-    <div class="chips" style="justify-content:center">${DEAL_SECTIONS.map(tab).join('')}</div>
+    <div class="chips" style="justify-content:center">${DEAL_TYPES.map(chip).join('')}</div>
+    ${r.features.localClearance ? `<div class="chips" style="justify-content:center"><span class="muted" style="align-self:center;font-size:13px">At stores near you:</span>${STORE_DEAL_TYPES.map(chip).join('')}</div>` : ''}
     <form class="toolbar" id="deal-tools" style="justify-content:center">
+      <div class="field"><label for="dq">Search deals</label><input id="dq" name="q" type="search" value="${esc(text)}" placeholder="e.g. laptop, LEGO, coffee"></div>
       <div class="field"><label for="cat">Category</label><select id="cat" name="category"><option value="">All categories</option>
         ${categories.map((c) => `<option ${c === category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
       <div class="field"><label for="min">Minimum discount</label><select id="min" name="min">
@@ -482,30 +501,36 @@ async function dealsView(query) {
     </form>
     <div id="deal-list"><div class="loading">Loading…</div></div>`;
 
-  bindRetailerTabs((id) => go('/deals', { retailer: id, section }));
+  bindRetailerTabs((id) => go('/deals', { retailer: id }));
   const tools = $app.querySelector('#deal-tools');
-  tools.addEventListener('change', () => {
+  const apply = () => {
     const data = new FormData(tools);
-    go('/deals', { retailer: r.id, section, category: data.get('category'), min: data.get('min'), sort: data.get('sort') });
-  });
+    go('/deals', params({ category: data.get('category'), min: data.get('min'), sort: data.get('sort'), q: String(data.get('q') ?? '').trim() }));
+  };
+  tools.addEventListener('change', (e) => { if (e.target.name !== 'q') apply(); });
+  tools.addEventListener('submit', (e) => { e.preventDefault(); apply(); });
 
   const $list = $app.querySelector('#deal-list');
-  if (section === 'clearance' && !r.features.localClearance) {
-    $list.innerHTML = `<div class="card empty">${esc(r.name)} doesn't publish store-level prices, so this needs another data source.</div>`;
-    return;
-  }
-  if (section === 'clearance' && !state.zip) {
-    $list.innerHTML = '<div class="card empty">Enter your ZIP code at the top of the page to see shelf markdowns at nearby stores.</div>';
-    return;
+  // Store deal types need a ZIP; without one, only the online types are listed.
+  let sections = [...picked];
+  let zipNote = '';
+  if (!state.zip && sections.some((s) => s.startsWith('store-'))) {
+    sections = sections.filter((s) => !s.startsWith('store-'));
+    zipNote = '<div class="card empty">Enter your ZIP code at the top of the page to see deals at nearby stores.</div>';
+    if (!sections.length) {
+      $list.innerHTML = zipNote;
+      return;
+    }
   }
   // Every match, best first, 60 at a time.
   const PAGE = 60;
-  const params = new URLSearchParams({ section, minDiscount: min, limit: String(PAGE), sort });
-  if (category) params.set('category', category);
-  if (state.zip) params.set('zip', state.zip);
+  const query2 = new URLSearchParams({ section: sections.join(','), minDiscount: min, limit: String(PAGE), sort });
+  if (category) query2.set('category', category);
+  if (text) query2.set('q', text);
+  if (state.zip) query2.set('zip', state.zip);
   const loadPage = async (offset) => {
-    params.set('offset', String(offset));
-    return api(`/api/${r.id}/deals?${params}`);
+    query2.set('offset', String(offset));
+    return api(`/api/${r.id}/deals?${query2}`);
   };
   try {
     const first = await loadPage(0);
@@ -513,7 +538,7 @@ async function dealsView(query) {
       $list.innerHTML = '<div class="empty">No deals match those filters yet. Price drop and lowest-ever deals appear as the app records prices day to day.</div>';
       return;
     }
-    $list.innerHTML = `<p class="muted" id="deal-count"></p><div class="grid" id="deal-grid"></div>
+    $list.innerHTML = `${zipNote}<p class="muted" id="deal-count"></p><div class="grid" id="deal-grid"></div>
       <div style="text-align:center;margin-top:20px"><button class="btn secondary" id="load-more" type="button" hidden>Load more</button></div>`;
     const $grid = $list.querySelector('#deal-grid');
     const $more = $list.querySelector('#load-more');
