@@ -1,6 +1,10 @@
 // Single-page UI. Talks only to the retailer-agnostic /api/:retailer/* routes.
 
-const $app = document.getElementById('app');
+// Each page draws into its own container (see render), so a page that finishes
+// loading after the visitor has moved on writes into a detached element.
+const $root = document.getElementById('app');
+let $app = $root;
+const viewRoot = () => $app;
 const $zip = document.getElementById('zip-input');
 const $banner = document.getElementById('mode-banner');
 
@@ -97,6 +101,7 @@ const looksLikeItem = (text) => /walmart\.com\/ip\//i.test(text) || /^[\d\s-]{5,
 
 /** Product search: every Walmart item (online and in stores), 25 at a time. */
 async function searchView(query) {
+  const $app = viewRoot();
   const r = selectRetailer(query.get('retailer') ?? state.retailer?.id);
   const q = query.get('q') ?? '';
   const sort = query.get('sort') ?? 'best';
@@ -211,6 +216,7 @@ function allDealCard(c) {
  * items sold in stores). Filters live in the URL.
  */
 async function allDealsView(mode, query) {
+  const $app = viewRoot();
   const r = selectRetailer(query.get('retailer') ?? state.retailer?.id);
   const path = mode === 'stores' ? '/stores' : '/';
   const where = mode === 'stores' ? ['stores'] : (query.get('where') ?? 'online,stores').split(',').filter(Boolean);
@@ -346,6 +352,7 @@ function badgeClass(label) {
 }
 
 async function itemView(retailerId, id, query) {
+  const $app = viewRoot();
   const r = selectRetailer(retailerId);
   const zip = query.get('zip') || state.zip;
   const radius = query.get('radius') ?? '50';
@@ -363,7 +370,8 @@ async function itemView(retailerId, id, query) {
       ({ product } = await api(`/api/${r.id}/products/${encodeURIComponent(id)}`));
     }
   } catch (err) {
-    return showError(err);
+    $app.innerHTML = `<div class="error">${esc(err.message ?? err)}</div>`;
+    return;
   }
 
   const off = pctOff(product.price, product.msrp);
@@ -577,6 +585,9 @@ function sortProducts(products, sort) {
 // ---------- router ----------
 async function render() {
   const { parts, query } = parseHash();
+  const mine = document.createElement('div');
+  $app = mine;
+  $root.replaceChildren(mine);
   const page = parts[0] === 'stores' ? 'stores' : parts[0] === 'search' || parts[0] === 'r' ? 'other' : 'all';
   document.querySelectorAll('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === page));
   window.scrollTo(0, 0);
@@ -588,7 +599,7 @@ async function render() {
     if (parts[0] === 'deals') return go('/', {});
     return await allDealsView('all', query);
   } catch (err) {
-    showError(err);
+    mine.innerHTML = `<div class="error">${esc(err.message ?? err)}</div>`;
   }
 }
 
