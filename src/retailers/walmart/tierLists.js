@@ -199,6 +199,24 @@ export class TierStore {
       ORDER BY item_id LIMIT ?`).all(this.retailer, run, afterId, limit).map((r) => r.item_id);
   }
 
+  /**
+   * Walmart's online deal label for each item on today's lists: 'clearance'
+   * (tier 1), else 'rollback' / 'reduced' (tier 2; 'offer' when unknown).
+   * @returns {Map<string, string>}
+   */
+  offers() {
+    const out = new Map();
+    const t2 = this.builtRun(2);
+    if (t2) {
+      for (const r of this.db.prepare('SELECT item_id, offer FROM tier_items WHERE retailer = ? AND tier = 2 AND run = ?').iterate(this.retailer, t2)) {
+        if (!out.has(r.item_id) || r.offer) out.set(r.item_id, r.offer ?? 'offer');
+      }
+    }
+    const t1 = this.builtRun(1);
+    if (t1) for (const id of this.itemIds(1)) out.set(id, 'clearance');
+    return out;
+  }
+
   /** One saved tier 1/2 product (Walmart-sold, from today's search), or null. */
   product(itemId) {
     const row = this.db.prepare('SELECT data FROM tier_products WHERE retailer = ? AND item_id = ?').get(this.retailer, String(itemId));

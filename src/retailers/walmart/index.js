@@ -9,6 +9,7 @@ import { TierStore } from './tierLists.js';
 import { FeedMeasure } from './feedMeasure.js';
 import { scheduleDayKey } from '../../lib/scanSchedule.js';
 import { walmartProductUrl } from './identifiers.js';
+import { discount } from '../../lib/allDeals.js';
 import { STOCK_STATUS } from '../RetailerAdapter.js';
 import { WalmartDemoSource } from './demoSource.js';
 import { WalmartLiveSource } from './liveSource.js';
@@ -434,6 +435,84 @@ export class WalmartAdapter extends RetailerAdapter {
         clearance: deal?.kind === 'clearance',
       };
     });
+  }
+
+  /**
+   * All Deals cards (see lib/allDeals.js), unfiltered: Walmart.com deals from
+   * today's Clearance / Rollback / Reduced Price lists (Walmart as the online
+   * seller), and the best store deal near `zip` (every tracked store without
+   * one). Reused for 5 minutes, or until the deals change.
+   */
+  async allDealCards({ zip } = {}) {
+    const db = this.storeData;
+    if (!db || !this.tierStore) return [];
+    const key = `${zip ?? ''}|${db.markdownVersion}|${this.source.poolStamp}|${Math.floor(Date.now() / 300000)}`;
+    if (this.cardCache?.key === key) return this.cardCache.cards;
+    const keep = this.departmentFilter() ?? (() => true);
+    const cards = new Map();
+    const card = (id, base) => {
+      if (!cards.has(id)) cards.set(id, { product: base, online: null, store: null, soldOnline: false, soldInStores: false });
+      return cards.get(id);
+    };
+
+    // Store deals: the cheapest deal per item at the stores near the ZIP.
+    const scanned = new Set(db.scannedStores(this.id));
+    const stores = zip
+      ? (await this.source.stores(zip, { limit: 50 })).filter((s) => scanned.has(s.id))
+      : (this.storeConfig()?.stores ?? []).map((s) => ({ retailer: this.id, id: s.id, name: s.label ?? `Walmart #${s.id}` }));
+    const counts = new Map();
+    for (const r of this.readClearance(db, stores, {})) {
+      counts.set(r.product.id, (counts.get(r.product.id) ?? 0) + 1);
+      const c = card(r.product.id, {
+        retailer: this.id, id: r.product.id, name: r.product.name, imageUrl: r.product.imageUrl, category: r.product.category, url: r.product.url,
+      });
+      if (!c.store || r.price < c.store.price) {
+        const ref = r.product.msrp > r.price ? r.product.msrp : null;
+        c.store = { price: r.price, refPrice: ref, kind: r.kind, label: r.label, store: r.store, seenOn: r.store?.seenOn ?? null, ...discount(r.price, ref) };
+      }
+      c.soldInStores = true;
+    }
+    for (const [id, n] of counts) cards.get(id).store.storesWithDeal = n;
+
+    // Walmart.com deals: items on today's lists, priced by the online lookup
+    // (or, before today's lookup, by the morning search).
+    const offers = this.tierStore.offers();
+    const info = db.onlineInfo(this.id, [...offers.keys(), ...cards.keys()]);
+    for (const [id, kind] of offers) {
+      const i = info.get(id);
+      const pooled = this.source.pool?.byId?.get?.(id) ?? this.tierStore.product(id);
+      const looked = Boolean(i?.online_lookup_date);
+      const price = looked ? i.online_price : (i?.online_price ?? pooled?.price ?? null);
+      if (!(price > 0)) continue; // not Walmart's online offer
+      const name = pooled?.name ?? i?.title;
+      if (!name || !keep(pooled?.category ?? i?.department)) continue;
+      const c = card(id, {
+        retailer: this.id, id, name, imageUrl: pooled?.imageUrl ?? i?.image_url ?? null,
+        category: pooled?.category ?? i?.department ?? null, url: this.productUrl(id),
+      });
+      const was = looked ? i.online_was : null;
+      c.online = { price, wasPrice: was, kind, label: DEAL_LABELS[kind], ...discount(price, was) };
+    }
+    // Where each item is sold, from the online lookup when there is one.
+    for (const [id, c] of cards) {
+      const i = info.get(id);
+      const onlineOnly = i?.online_only === 1;
+      c.soldOnline = onlineOnly || i?.online_available === 1 || (i?.online_available == null && Boolean(c.online));
+      // The lists and store checks only cover items carried in stores.
+      c.soldInStores = !onlineOnly || Boolean(c.store);
+    }
+    const out = [...cards.values()];
+    this.cardCache = { key, cards: out };
+    return out;
+  }
+
+  /** Walmart.com's deal for one item (for the product page), or null. */
+  onlineDeal(itemId) {
+    const kind = this.tierStore?.offers().get(String(itemId));
+    if (!kind || !this.storeData) return null;
+    const i = this.storeData.onlineInfo(this.id, [itemId]).get(String(itemId));
+    if (!(i?.online_price > 0)) return null;
+    return { price: i.online_price, wasPrice: i.online_was, kind, label: DEAL_LABELS[kind], onlineOnly: i.online_only === 1, ...discount(i.online_price, i.online_was) };
   }
 
   /** Marked-down items at checked stores near a ZIP. */

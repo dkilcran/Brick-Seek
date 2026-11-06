@@ -157,6 +157,16 @@ export class StoreScanDb {
     if (!itemCols.includes('msrp')) db.exec('ALTER TABLE store_items ADD COLUMN msrp REAL');
     if (!itemCols.includes('online_price')) db.exec('ALTER TABLE store_items ADD COLUMN online_price REAL');
     if (!itemCols.includes('online_date')) db.exec('ALTER TABLE store_items ADD COLUMN online_date TEXT');
+    // From the daily online lookup (Walmart as the online seller only): Walmart.com's
+    // was-price, whether it's online only / available online, and when it was looked up.
+    for (const [col, type] of [['online_was', 'REAL'], ['online_only', 'INTEGER'], ['online_available', 'INTEGER'], ['online_lookup_date', 'TEXT']]) {
+      if (!itemCols.includes(col)) db.exec(`ALTER TABLE store_items ADD COLUMN ${col} ${type}`);
+    }
+    this.setOnlineLookup = db.prepare(`INSERT INTO store_items
+      (retailer, item_id, online_price, online_date, online_was, online_only, online_available, online_lookup_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT (retailer, item_id) DO UPDATE SET online_price = excluded.online_price, online_date = excluded.online_date,
+        online_was = excluded.online_was, online_only = excluded.online_only, online_available = excluded.online_available,
+        online_lookup_date = excluded.online_lookup_date`);
     this.setListPrice = db.prepare(`INSERT INTO store_items (retailer, item_id, msrp) VALUES (?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET msrp = excluded.msrp`);
     this.setOnline = db.prepare(`INSERT INTO store_items (retailer, item_id, online_price, online_date) VALUES (?, ?, ?, ?)
@@ -484,11 +494,43 @@ export class StoreScanDb {
     this.setOnline.run(retailer, String(itemId), price > 0 ? price : null, date);
   }
 
-  /** Items with a deal at some store whose online price wasn't checked on `day`. */
-  itemsNeedingOnlinePrice(retailer, day) {
-    return this.db.prepare(`SELECT DISTINCT m.item_id FROM store_markdowns m
-      LEFT JOIN store_items i ON i.retailer = m.retailer AND i.item_id = m.item_id
-      WHERE m.retailer = ? AND (i.online_date IS NULL OR i.online_date < ?)`).all(retailer, day).map((r) => r.item_id);
+  /**
+   * Save the online lookup of an item: Walmart.com's price and was-price when
+   * Walmart is the online seller (else no price: a marketplace offer), and
+   * whether Walmart sells it online only / has it available online.
+   * @param {{ isWalmart: boolean, price?: number, wasPrice?: number, onlineOnly?: boolean, availableOnline?: boolean }|undefined} o
+   */
+  saveOnlineLookup(retailer, itemId, o, date) {
+    const walmart = o?.isWalmart === true;
+    this.setOnlineLookup.run(retailer, String(itemId), walmart && o.price > 0 ? o.price : null, date,
+      walmart && o.wasPrice > o.price ? o.wasPrice : null,
+      o ? (o.onlineOnly ? 1 : 0) : null, walmart ? (o.availableOnline ? 1 : 0) : null, date);
+  }
+
+  /**
+   * Items needing today's online lookup: those with a deal at some store, plus
+   * `extraIds` (Walmart's Clearance, Rollback and Reduced Price lists).
+   */
+  itemsNeedingOnlinePrice(retailer, day, extraIds = []) {
+    const marked = this.db.prepare('SELECT DISTINCT item_id FROM store_markdowns WHERE retailer = ?').all(retailer).map((r) => r.item_id);
+    const looked = this.db.prepare('SELECT online_lookup_date d FROM store_items WHERE retailer = ? AND item_id = ?');
+    return [...new Set([...marked, ...extraIds.map(String)])].filter((id) => !(looked.get(retailer, id)?.d >= day));
+  }
+
+  /**
+   * Walmart.com deal details for items: online price and was-price (Walmart as
+   * seller), online-only / available-online flags, and item details.
+   * @returns {Map<string, object>}
+   */
+  onlineInfo(retailer, ids) {
+    const get = this.db.prepare(`SELECT item_id, title, image_url, department, online_price, online_was, online_only, online_available,
+      online_lookup_date FROM store_items WHERE retailer = ? AND item_id = ?`);
+    const out = new Map();
+    for (const id of ids) {
+      const r = get.get(retailer, String(id));
+      if (r) out.set(String(id), r);
+    }
+    return out;
   }
 
   /**

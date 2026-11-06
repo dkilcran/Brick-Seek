@@ -3,6 +3,7 @@
 import { isValidZip } from './lib/geo.js';
 import { summarizeAvailability, isSoldByRetailer } from './retailers/RetailerAdapter.js';
 import { analyzeDeal, diversify, isEligible, rankSection, SECTIONS } from './lib/deals.js';
+import { filterCards, sortCards } from './lib/allDeals.js';
 import { DEFAULT_SCAN_CONFIG_PATH, describeScanConfig, loadScanConfig } from './lib/scanConfig.js';
 
 export class HttpError extends Error {
@@ -168,7 +169,34 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
 
     ['GET', '/api/:retailer/products/:id', async ({ params }) => {
       const adapter = requireRetailer(registry, params.retailer);
-      return { product: requireRetailerItem(adapter, await adapter.getProduct(params.id)) };
+      const product = requireRetailerItem(adapter, await adapter.getProduct(params.id));
+      return { product: { ...product, onlineDeal: adapter.onlineDeal?.(product.id) ?? null } };
+    }],
+
+    // The All Deals list: one card per item, with Walmart.com's deal and the best
+    // store deal near the ZIP. where = online,stores (where the item is sold);
+    // labels = clearance,rollback,reduced,markdown,drop,lowest; paged.
+    ['GET', '/api/:retailer/all-deals', async ({ params, query }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.allDealCards) throw new HttpError(501, `${adapter.name} doesn't have All Deals yet`);
+      const zip = query.get('zip') || undefined;
+      if (zip) requireZip(zip);
+      const list = (name) => (query.get(name) ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+      const num = (name) => { const n = Number.parseFloat(query.get(name)); return Number.isFinite(n) ? n : undefined; };
+      // Price-history badges (dropped since our last recorded price, lowest seen) for online prices.
+      const history = new Map((await analyzeCandidates(adapter)).map((d) => [d.product.id, d]));
+      const cards = (await adapter.allDealCards({ zip })).map((c) => {
+        const h = history.get(c.product.id);
+        return h ? { ...c, dropPercent: h.dropPercent, atLowest: h.atLowest } : c;
+      });
+      const all = sortCards(filterCards(cards, {
+        where: list('where'), labels: list('labels'), q: query.get('q') ?? '', category: query.get('category') || undefined,
+        minPrice: num('minPrice'), maxPrice: num('maxPrice'), minDiscount: clampInt(query.get('minDiscount'), 0, 0, 100),
+      }), query.get('sort') ?? 'best');
+      const limit = clampInt(query.get('limit'), 60, 1, 100);
+      const offset = clampInt(query.get('offset'), 0, 0, 100000);
+      const categories = [...new Set(cards.map((c) => c.product.category).filter(Boolean))].sort();
+      return { total: all.length, offset, deals: all.slice(offset, offset + limit), hasMore: offset + limit < all.length, categories };
     }],
 
     ['GET', '/api/:retailer/products/:id/inventory', async ({ params, query }) => {

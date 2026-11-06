@@ -582,7 +582,13 @@ export class WalmartLiveSource {
         const data = await this.request('/items', { ids: batch.join(',') }, { cache: false });
         for (const item of data?.items ?? []) {
           const p = this.toProduct(item, { fromLookup: true });
-          out.set(p.id, { price: p.price, msrp: p.msrp, seller: p.seller.name, isWalmart: p.seller.isRetailer === true, inStockOnline: p.inStockOnline });
+          const strike = Number(item.strikeThroughPrice);
+          out.set(p.id, {
+            price: p.price, msrp: p.msrp, seller: p.seller.name, isWalmart: p.seller.isRetailer === true, inStockOnline: p.inStockOnline,
+            wasPrice: strike > (p.price ?? 0) ? strike : null, // Walmart.com's was-price (online deals)
+            onlineOnly: item.offerType === 'ONLINE_ONLY',
+            availableOnline: item.availableOnline === true,
+          });
         }
       } catch (err) {
         if (!/not found/i.test(err.message)) throw err;

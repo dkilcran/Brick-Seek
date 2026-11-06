@@ -142,10 +142,11 @@ export class StoreChecker {
       { name: 'clearance and calculated clearance at other stores', stores: others, ids: () => [
         ...new Set([...t1(), ...this.db.storeLevelItems(this.retailer)]),
       ] },
-      // Walmart's own online price for items with a deal at some store: a store
-      // price above it isn't a deal (see refreshMarkdowns). One lookup per 20 items.
+      // Walmart.com's price and was-price for items with a deal at some store (a
+      // store price above it isn't a deal; see refreshMarkdowns) and for Walmart's
+      // Clearance / Rollback / Reduced Price lists (the online deals). 20 per lookup.
       { name: 'online prices for deal items', stores: ['online'], online: true,
-        ids: () => this.db.itemsNeedingOnlinePrice(this.retailer, state.day) },
+        ids: () => this.db.itemsNeedingOnlinePrice(this.retailer, state.day, [...t1(), ...t2()]) },
     ];
   }
 
@@ -205,8 +206,7 @@ export class StoreChecker {
         const batch = ids.slice(b * BATCH, b * BATCH + BATCH);
         const online = await this.source.onlinePrices(batch);
         for (const id of batch) {
-          const o = online.get(String(id));
-          this.db.saveOnlinePrice(this.retailer, id, o?.isWalmart ? o.price : null, state.day);
+          this.db.saveOnlineLookup(this.retailer, id, online.get(String(id)), state.day);
         }
         this.state = { ...state, offset: state.offset + 1, lookups: state.lookups + 1 };
         return true;

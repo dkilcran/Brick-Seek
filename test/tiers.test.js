@@ -150,9 +150,9 @@ test('a full day runs in the agreed order', async () => {
   assert.deepEqual(seq.slice(0, 3), t1Calls);
   assert.deepEqual(seq.slice(3, 6), t2Calls);
   assert.deepEqual(seq.slice(6, 6 + others.length).map((x) => x.split(':')[0]), others, 'clearance at the other stores');
-  // Walmart's online price comes from today's search, so no extra lookups for these.
-  assert.equal(day.source.onlineLookups.length, 0);
-  assert.equal(day.db.db.prepare("SELECT online_price FROM store_items WHERE item_id = 't1a'").get().online_price, 5);
+  // Walmart.com's price and was-price for the online deal lists (and store deal items), once a day.
+  assert.deepEqual(day.source.onlineLookups.flat().sort(), ['t1a', 't1b', 't2a']);
+  assert.equal(day.db.db.prepare("SELECT online_price FROM store_items WHERE item_id = 't1a'").get().online_price, 99);
   // Monday + no tier 3 list yet: built after checks, then slices at the daily stores only, until 8pm.
   assert.equal(day.tiers.count(3), 50);
   const tier3 = day.lookups.filter((l) => l.ids[0].startsWith('x'));
