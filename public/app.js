@@ -239,7 +239,8 @@ async function allDealsView(mode, query) {
     </section>
     <form class="toolbar deal-toolbar" id="deal-tools">
       <div class="field grow"><label for="dq">Search deals or look up an item</label>
-        <input id="dq" name="q" type="search" value="${esc(q)}" placeholder="e.g. laptop, LEGO, or an item # / UPC / link"></div>
+        <div class="search-row"><input id="dq" name="q" type="search" value="${esc(q)}" placeholder="e.g. laptop, LEGO, or an item # / UPC / link">
+        <button class="btn" type="submit">Search</button></div></div>
       ${mode === 'all' ? `<details class="field multi" id="where"><summary><span class="label">Where</span>${where.length === 2 ? 'Online and in stores' : where[0] === 'online' ? 'Sold Online' : 'Sold In Stores'}</summary>
         <label><input type="checkbox" name="where" value="online" ${where.includes('online') ? 'checked' : ''}> Sold Online</label>
         <label><input type="checkbox" name="where" value="stores" ${where.includes('stores') ? 'checked' : ''}> Sold In Stores</label>
