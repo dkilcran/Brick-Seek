@@ -497,7 +497,8 @@ export class WalmartAdapter extends RetailerAdapter {
     for (const [id, c] of cards) {
       const i = info.get(id);
       const onlineOnly = i?.online_only === 1;
-      c.soldOnline = onlineOnly || i?.online_available === 1 || (i?.online_available == null && Boolean(c.online));
+      // Unknown until the online lookup says otherwise: only a known "not online" is store-only.
+      c.soldOnline = onlineOnly || i?.online_available !== 0;
       // The lists and store checks only cover items carried in stores.
       c.soldInStores = !onlineOnly || Boolean(c.store);
     }

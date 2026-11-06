@@ -75,4 +75,14 @@ test('Walmart builds cards from the online lookups and store deals', async () =>
   assert.deepEqual([byId.clr.online.label, byId.clr.online.percentOff, byId.clr.soldOnline, byId.clr.soldInStores], ['Clearance', 33, true, false]);
   assert.deepEqual([byId.rb.online.label, byId.rb.store.label, byId.rb.store.price, byId.rb.soldInStores], ['Rollback', 'Rollback', 15, true]);
   assert.equal(adapter.onlineDeal('rb').wasPrice, 25);
+  // A store deal with no online lookup yet isn't called store-only.
+  db.recordStorePrices('walmart', '573', [{ itemId: 'shelf', title: 'Lamp', price: 3, clearance: true, seller: 'Walmart.com', inStock: true }], day);
+  db.refreshMarkdowns('walmart');
+  adapter.cardCache = null;
+  let shelf = (await adapter.allDealCards()).find((c) => c.product.id === 'shelf');
+  assert.equal(shelf.soldOnline, true);
+  db.saveOnlineLookup('walmart', 'shelf', { isWalmart: true, price: 5, onlineOnly: false, availableOnline: false }, day);
+  adapter.cardCache = null;
+  shelf = (await adapter.allDealCards()).find((c) => c.product.id === 'shelf');
+  assert.equal(shelf.soldOnline, false, 'the lookup says it is not sold online');
 });
