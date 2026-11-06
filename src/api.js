@@ -382,6 +382,14 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
     }],
 
     // Diagnostics: raw Walmart affiliate lookup for one item, and saved SerpApi inspections.
+    // One-off measurement of Walmart's bulk deal feeds vs our lists; ?start=1 starts it.
+    ['GET', '/api/:retailer/debug/feed-measure', async ({ params, query }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.feedMeasure) throw new HttpError(501, 'Live mode only');
+      const started = query.get('start') === '1' ? adapter.feedMeasure.start({ storeId: query.get('store') || '573' }) : false;
+      return { started, ...adapter.feedMeasure.status() };
+    }],
+
     ['GET', '/api/:retailer/debug/item/:id', async ({ params, query }) => {
       const adapter = requireRetailer(registry, params.retailer);
       if (!adapter.source?.rawItem) throw new HttpError(501, 'Live mode only');

@@ -6,6 +6,7 @@ import { DEFAULT_SCAN_CONFIG_PATH, loadScanConfig } from '../../lib/scanConfig.j
 import { SerpApiClient, StoreScanDb, StoreScanner } from './storeScan.js';
 import { StoreChecker } from './storeChecker.js';
 import { TierStore } from './tierLists.js';
+import { FeedMeasure } from './feedMeasure.js';
 import { scheduleDayKey } from '../../lib/scanSchedule.js';
 import { walmartProductUrl } from './identifiers.js';
 import { STOCK_STATUS } from '../RetailerAdapter.js';
@@ -79,6 +80,7 @@ export class WalmartAdapter extends RetailerAdapter {
       adapter.loadStoreConfig = loadConfig;
       adapter.tierStore = new TierStore(storeDb);
       adapter.storeChecker = new StoreChecker({ source, db: storeDb, tiers: adapter.tierStore, loadConfig });
+      adapter.feedMeasure = new FeedMeasure({ source, db: storeDb, tiers: adapter.tierStore, loadConfig });
       // SerpApi store searches only when turned on in the settings (useSerpApi).
       if (env.SERPAPI_KEY && loadConfig().config?.useSerpApi) {
         adapter.storeScanner = new StoreScanner({
