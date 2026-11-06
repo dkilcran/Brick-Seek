@@ -382,12 +382,17 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
     }],
 
     // Diagnostics: raw Walmart affiliate lookup for one item, and saved SerpApi inspections.
-    // One-off measurement of Walmart's bulk deal feeds vs our lists; ?start=1 starts it.
+    // One-off measurement of Walmart's bulk feeds vs our lists: ?start=1 runs it
+    // now, ?at=<ISO time> schedules it (kept across restarts).
     ['GET', '/api/:retailer/debug/feed-measure', async ({ params, query }) => {
       const adapter = requireRetailer(registry, params.retailer);
       if (!adapter.feedMeasure) throw new HttpError(501, 'Live mode only');
-      const started = query.get('start') === '1' ? adapter.feedMeasure.start({ storeId: query.get('store') || '573' }) : false;
-      return { started, ...adapter.feedMeasure.status() };
+      const storeId = /^\d{1,6}$/.test(query.get('store') ?? '') ? query.get('store') : '573';
+      let scheduled = null;
+      const at = query.get('at');
+      if (at && !Number.isNaN(Date.parse(at))) scheduled = adapter.feedMeasure.schedule({ at: new Date(at).toISOString(), storeId });
+      else if (query.get('start') === '1') scheduled = adapter.feedMeasure.schedule({ storeId });
+      return { scheduled, ...adapter.feedMeasure.status() };
     }],
 
     ['GET', '/api/:retailer/debug/item/:id', async ({ params, query }) => {

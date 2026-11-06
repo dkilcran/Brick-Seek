@@ -1,142 +1,201 @@
-// One-off measurement: how much do Walmart's bulk deal feeds (/paginated/items
-// with specialOffer and category) hold beyond our search-built tier lists?
-// Pages through Clearance and Rollback for each configured department, checks
-// the possible Walmart items at one store, and compares with the tier lists.
-// Runs in the background through the same throttled client as everything else.
+// One-off measurements of Walmart's bulk feeds (/paginated/items) against our
+// search-built tier lists:
+//  - deals: the Clearance, Rollback and Reduced Price feeds for each configured
+//    department; possible Walmart items are checked at one store and compared
+//    with tiers 1-3.
+//  - tier3: the unfiltered department feeds (everything), capped per
+//    department; a sample is checked at the store and compared with tier 3.
+// Runs in the background through the same throttled client as everything else,
+// waits through rate limits, and can be scheduled (the plan is saved, so a
+// restart re-runs an unfinished measurement).
 
-const OFFERS = ['clearance', 'rollback'];
+const DEAL_OFFERS = ['clearance', 'rollback', 'reduced'];
 const BATCH = 20;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export class FeedMeasure {
   /**
    * @param {{ source, db: import('./storeScan.js').StoreScanDb, tiers: import('./tierLists.js').TierStore, loadConfig }} opts
    */
-  constructor({ source, db, tiers, loadConfig, retailer = 'walmart' }) {
-    Object.assign(this, { source, db, tiers, loadConfig, retailer });
-    this.state = db.getMeta(`feedMeasure:${retailer}`) ?? null;
+  constructor({ source, db, tiers, loadConfig, retailer = 'walmart', rateLimitWaitMs = 60000, autoResume = true }) {
+    Object.assign(this, { source, db, tiers, loadConfig, retailer, rateLimitWaitMs });
+    this.key = `feedMeasure:${retailer}`;
+    this.state = db.getMeta(this.key) ?? null;
     this.running = false;
+    this.timer = null;
+    // A saved plan that hasn't finished runs at its time (or now, if that's past).
+    const plan = db.getMeta(`${this.key}:plan`);
+    if (autoResume && plan) this.schedule(plan);
   }
 
   status() {
-    return { running: this.running, ...(this.state ?? { phase: 'not started' }) };
+    return {
+      running: this.running,
+      scheduledFor: this.db.getMeta(`${this.key}:plan`)?.at ?? null,
+      ...(this.state ?? { phase: 'not started' }),
+    };
   }
 
-  /** Start unless already running. */
-  start({ storeId = '573', maxPagesPerFeed = 50, maxLookups = 300 } = {}) {
+  /** Run at `at` (ISO time; default now). Saved, so a restart keeps the plan. */
+  schedule({ at = new Date().toISOString(), storeId = '573' } = {}) {
+    const plan = { at, storeId };
+    this.db.setMeta(`${this.key}:plan`, plan);
+    clearTimeout(this.timer);
+    const wait = Math.max(0, Date.parse(at) - Date.now());
+    this.timer = setTimeout(() => this.start(plan), wait);
+    this.timer.unref?.();
+    return plan;
+  }
+
+  start({ storeId = '573' } = {}) {
     if (this.running) return false;
     this.running = true;
-    this.run({ storeId, maxPagesPerFeed, maxLookups })
+    this.run({ storeId })
+      .then(() => this.db.setMeta(`${this.key}:plan`, null))
       .catch((err) => { this.state = { ...this.state, phase: 'failed', error: err.message.slice(0, 300) }; })
       .finally(() => { this.running = false; this.save(); });
     return true;
   }
 
   save() {
-    this.db.setMeta(`feedMeasure:${this.retailer}`, this.state);
+    this.db.setMeta(this.key, this.state);
   }
 
-  async run({ storeId, maxPagesPerFeed, maxLookups }) {
-    const { config } = this.loadConfig();
-    const departments = config?.departments ?? [];
-    this.state = { phase: 'feeds', startedAt: new Date().toISOString(), storeId, maxPagesPerFeed, feeds: [], calls: 0 };
-    const cats = new Map((await this.source.taxonomy()).map((c) => [c.name, c.id]));
-    this.state.calls += 1;
-    const candidates = new Map(); // item id -> { department, offers }
-    for (const department of departments) {
-      const category = cats.get(department);
-      if (!category) {
-        this.state.feeds.push({ department, error: 'no Walmart category with this name' });
-        continue;
-      }
-      for (const offer of OFFERS) {
-        const feed = { department, offer, pages: 0, items: 0, walmart: 0, otherSeller: 0, unnamed: 0, onlineOnly: 0, capped: false };
-        this.state.feeds.push(feed);
-        let query = { category, specialOffer: offer };
-        while (query) {
-          if (feed.pages >= maxPagesPerFeed) { feed.capped = true; break; }
-          let data;
-          try {
-            data = await this.source.request('/paginated/items', query, { cache: false });
-          } catch (err) {
-            feed.error = err.message.slice(0, 200);
-            break;
-          }
-          this.state.calls += 1;
-          feed.pages += 1;
-          for (const item of data?.items ?? []) {
-            feed.items += 1;
-            const seller = String(item.sellerInfo ?? '').trim();
-            const walmart = /^walmart(\.com)?$/i.test(seller);
-            if (walmart) feed.walmart += 1;
-            else if (seller || item.marketplace === true) { feed.otherSeller += 1; continue; }
-            else feed.unnamed += 1;
-            if (item.offerType === 'ONLINE_ONLY') { feed.onlineOnly += 1; continue; }
-            const id = String(item.itemId);
-            const c = candidates.get(id) ?? { department, offers: new Set() };
-            c.offers.add(offer);
-            candidates.set(id, c);
-          }
-          query = data?.nextPage ? Object.fromEntries(new URL(data.nextPage, 'https://x.invalid').searchParams) : null;
-          if (query) delete query.publisherId;
-          if (feed.pages % 10 === 0) this.save();
-        }
-        this.save();
+  /** A Walmart call that waits out rate limits (429) instead of giving up. */
+  async call(fn) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const result = await fn();
+        this.state.calls += 1;
+        return result;
+      } catch (err) {
+        if (!/\b429\b/.test(err.message) || attempt >= 15) throw err;
+        this.state.rateLimitWaits = (this.state.rateLimitWaits ?? 0) + 1;
+        await sleep(this.rateLimitWaitMs);
       }
     }
+  }
 
-    // Check the possible Walmart items at one store (a spread sample if there are too many).
-    this.state.phase = 'lookups';
-    const all = [...candidates.keys()];
-    const step = Math.max(1, all.length / (maxLookups * BATCH));
-    const sample = step > 1 ? Array.from({ length: Math.floor(all.length / step) }, (_, i) => all[Math.floor(i * step)]) : all;
-    const lookups = { candidates: all.length, checked: sample.length, sampled: step > 1, foundWalmartInStore: 0, notAtStore: 0, onlineOnly: 0, otherSeller: 0, clearanceFlag: 0 };
-    this.state.lookups = lookups;
+  /** Page through one feed; returns the possible Walmart items (not another seller's). */
+  async readFeed(feed, query, maxPages, onItem) {
+    while (query) {
+      if (feed.pages >= maxPages) { feed.capped = true; break; }
+      let data;
+      try {
+        data = await this.call(() => this.source.request('/paginated/items', query, { cache: false }));
+      } catch (err) {
+        feed.error = err.message.slice(0, 200);
+        break;
+      }
+      feed.pages += 1;
+      for (const item of data?.items ?? []) {
+        feed.items += 1;
+        const seller = String(item.sellerInfo ?? '').trim();
+        if (/^walmart(\.com)?$/i.test(seller)) feed.walmart += 1;
+        else if (seller || item.marketplace === true) { feed.otherSeller += 1; continue; }
+        else feed.unnamed += 1;
+        onItem(String(item.itemId));
+      }
+      query = data?.nextPage ? Object.fromEntries(new URL(data.nextPage, 'https://x.invalid').searchParams) : null;
+      if (query) delete query.publisherId;
+      if (!query) feed.complete = true;
+      if (feed.pages % 10 === 0) this.save();
+    }
+    this.save();
+  }
+
+  /** Check ids at one store (an even sample when there are more than maxLookups batches). */
+  async checkAtStore(ids, storeId, maxLookups) {
+    const step = Math.max(1, ids.length / (maxLookups * BATCH));
+    const sample = step > 1 ? Array.from({ length: Math.floor(ids.length / step) }, (_, i) => ids[Math.floor(i * step)]) : ids;
+    const out = { candidates: ids.length, checked: sample.length, sampled: step > 1, walmartInStore: 0, notAtStore: 0, onlineOnly: 0, otherSeller: 0, clearanceFlag: 0 };
     const confirmed = [];
     for (let i = 0; i < sample.length; i += BATCH) {
       const batch = sample.slice(i, i + BATCH);
-      const { found, missing, onlineOnly } = await this.source.storeLookup(batch, storeId);
-      this.state.calls += 1;
-      lookups.notAtStore += missing.length;
-      lookups.onlineOnly += onlineOnly?.length ?? 0;
+      const { found, missing, onlineOnly } = await this.call(() => this.source.storeLookup(batch, storeId));
+      out.notAtStore += missing.length;
+      out.onlineOnly += onlineOnly?.length ?? 0;
       for (const f of found) {
-        if (!f.isWalmart) { lookups.otherSeller += 1; continue; }
-        lookups.foundWalmartInStore += 1;
-        if (f.clearance) lookups.clearanceFlag += 1;
+        if (!f.isWalmart) { out.otherSeller += 1; continue; }
+        out.walmartInStore += 1;
+        if (f.clearance) out.clearanceFlag += 1;
         confirmed.push(f.itemId);
       }
       if ((i / BATCH) % 10 === 0) this.save();
     }
+    out.scale = sample.length ? ids.length / sample.length : 0;
+    return { out, confirmed };
+  }
 
-    // Compare with the search-built lists.
+  async run({ storeId }) {
+    const { config } = this.loadConfig();
+    const departments = config?.departments ?? [];
+    this.state = { phase: 'deal feeds', startedAt: new Date().toISOString(), storeId, calls: 0, rateLimitWaits: 0, deals: { feeds: [] }, tier3: { feeds: [] } };
+    const cats = new Map((await this.call(() => this.source.taxonomy())).map((c) => [c.name, c.id]));
     const t1 = new Set(this.tiers.itemIds(1));
     const t2 = new Set(this.tiers.itemIds(2));
     const t3 = new Set(this.tiers.itemIds(3));
+    const lists = { tier1: t1.size, tier2: t2.size, tier3: t3.size };
+
+    // 1. Deal feeds: Clearance, Rollback, Reduced Price per department.
+    const dealCandidates = new Map(); // id -> { department, offers }
+    for (const department of departments) {
+      const category = cats.get(department);
+      for (const offer of DEAL_OFFERS) {
+        const feed = { department, offer, pages: 0, items: 0, walmart: 0, otherSeller: 0, unnamed: 0, complete: false, capped: false };
+        this.state.deals.feeds.push(feed);
+        if (!category) { feed.error = 'no Walmart category with this name'; continue; }
+        await this.readFeed(feed, { category, specialOffer: offer }, 60, (id) => {
+          const c = dealCandidates.get(id) ?? { department, offers: [] };
+          if (!c.offers.includes(offer)) c.offers.push(offer);
+          dealCandidates.set(id, c);
+        });
+      }
+    }
+    this.state.phase = 'deal lookups';
+    const deals = await this.checkAtStore([...dealCandidates.keys()], storeId, 400);
     const compare = { inTier1: 0, inTier2: 0, inTier3Only: 0, inNoList: 0 };
     const missedByDepartment = {};
-    for (const id of confirmed) {
+    const missedByOffer = {};
+    for (const id of deals.confirmed) {
       if (t1.has(id)) compare.inTier1 += 1;
       else if (t2.has(id)) compare.inTier2 += 1;
       else if (t3.has(id)) compare.inTier3Only += 1;
       else {
         compare.inNoList += 1;
-        const d = candidates.get(id)?.department ?? '?';
-        missedByDepartment[d] = (missedByDepartment[d] ?? 0) + 1;
+        const c = dealCandidates.get(id);
+        missedByDepartment[c?.department ?? '?'] = (missedByDepartment[c?.department ?? '?'] ?? 0) + 1;
+        for (const o of c?.offers ?? []) missedByOffer[o] = (missedByOffer[o] ?? 0) + 1;
       }
     }
-    const scale = sample.length ? all.length / sample.length : 0;
-    this.state = {
-      ...this.state,
-      phase: 'done',
-      finishedAt: new Date().toISOString(),
-      compare,
-      missedByDepartment,
-      // Estimated for all candidates when only a sample was checked.
-      estimate: {
-        walmartInStore: Math.round(lookups.foundWalmartInStore * scale),
-        notInAnyList: Math.round(compare.inNoList * scale),
-      },
-      lists: { tier1: t1.size, tier2: t2.size, tier3: t3.size },
-      sampleMissed: confirmed.filter((id) => !t1.has(id) && !t2.has(id) && !t3.has(id)).slice(0, 15),
-    };
+    Object.assign(this.state.deals, {
+      lookups: deals.out, compare, missedByDepartment, missedByOffer,
+      estimate: { walmartInStore: Math.round(deals.out.walmartInStore * deals.out.scale), notInAnyList: Math.round(compare.inNoList * deals.out.scale) },
+      sampleMissed: deals.confirmed.filter((id) => !t1.has(id) && !t2.has(id) && !t3.has(id)).slice(0, 15),
+    });
+    this.save();
+
+    // 2. Everything feeds (no deal filter), capped per department, vs tier 3.
+    this.state.phase = 'everything feeds';
+    const all = new Map(); // id -> department
+    for (const department of departments) {
+      const category = cats.get(department);
+      const feed = { department, pages: 0, items: 0, walmart: 0, otherSeller: 0, unnamed: 0, complete: false, capped: false };
+      this.state.tier3.feeds.push(feed);
+      if (!category) { feed.error = 'no Walmart category with this name'; continue; }
+      await this.readFeed(feed, { category }, 25, (id) => all.set(id, department));
+    }
+    this.state.phase = 'everything lookups';
+    const everything = await this.checkAtStore([...all.keys()], storeId, 150);
+    const inTier3 = everything.confirmed.filter((id) => t3.has(id)).length;
+    const missedByDept = {};
+    for (const id of everything.confirmed) if (!t3.has(id)) missedByDept[all.get(id)] = (missedByDept[all.get(id)] ?? 0) + 1;
+    Object.assign(this.state.tier3, {
+      lookups: everything.out,
+      compare: { inTier3: inTier3, notInTier3: everything.confirmed.length - inTier3 },
+      missedByDepartment: missedByDept,
+      sampleMissed: everything.confirmed.filter((id) => !t3.has(id)).slice(0, 15),
+    });
+    this.state = { ...this.state, phase: 'done', finishedAt: new Date().toISOString(), lists };
   }
 }
