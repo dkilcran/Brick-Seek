@@ -584,8 +584,7 @@ async function render() {
     if (parts[0] === 'stores') return await allDealsView('stores', query);
     if (parts[0] === 'search') return await searchView(query);
     if (parts[0] === 'r' && parts[2] === 'item' && parts[3]) return await itemView(parts[1], decodeURIComponent(parts[3]), query);
-    // Old links: product search on the home page, and the old Deals page.
-    if (!parts[0] && query.get('q')) return go('/search', Object.fromEntries(query));
+    // Old links to the Deals page.
     if (parts[0] === 'deals') return go('/', {});
     return await allDealsView('all', query);
   } catch (err) {
