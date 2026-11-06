@@ -147,7 +147,7 @@ export class WalmartAdapter extends RetailerAdapter {
 
   /**
    * One page (25) of product search results: only items Walmart itself sells
-   * in stores, in Walmart's relevance order, up to Walmart's 1,000-result
+   * (online or in stores; never marketplace sellers), in Walmart's relevance order, up to Walmart's 1,000-result
    * limit. On the last page, items our store checks know that match the words
    * are added (Walmart's search doesn't always list them).
    * @returns {Promise<{ products: object[], total: number, nextStart: number|null }>}
@@ -163,8 +163,10 @@ export class WalmartAdapter extends RetailerAdapter {
       const products = await this.source.search(parsed.value, {});
       return { products, total: products.length, nextStart: null };
     }
-    const filters = this.storeConfig()?.baseFilters ?? ['retailer_type:Walmart', 'fulfillment_method:In-store'];
-    const { products, total } = await this.source.searchPage({ query: parsed.value, filters, start });
+    // Sold by Walmart (online-only items included); the store lists add the in-store filter.
+    const { products, total } = await this.source.searchPage({
+      query: parsed.value, filters: ['retailer_type:Walmart'], start, keepOnlineOnly: true,
+    });
     const next = start + 25;
     const nextStart = products.length && next < 1000 && next <= total ? next : null;
     let saved = [];

@@ -793,7 +793,7 @@ test('product search pages through every Walmart in-store result, then adds item
   const first = await adapter.searchPaged('hp laptop');
   assert.equal(first.products.length, 25);
   assert.equal(first.nextStart, 26);
-  assert.deepEqual(calls[0].filters, ['retailer_type:Walmart', 'fulfillment_method:In-store'], 'only Walmart-sold, in stores');
+  assert.deepEqual(calls[0].filters, ['retailer_type:Walmart'], 'only Walmart-sold (online-only items included)');
   const second = await adapter.searchPaged('hp laptop', { start: 26 });
   assert.equal(second.nextStart, null);
   assert.deepEqual(second.products.map((p) => p.id), [...all.slice(25).map((p) => p.id), '18140512295'], 'saved matches after the last page');
@@ -811,4 +811,17 @@ test('search pages drop marketplace and online-only items even when Walmart\'s f
   });
   const { products } = await live.searchPage({ query: 'laptop', filters: ['retailer_type:Walmart'] });
   assert.deepEqual(products.map((p) => p.id), ['1']);
+});
+
+test('search pages keep Walmart online-only items when asked (product search), never marketplace ones', async () => {
+  const live = new WalmartLiveSource({
+    consumerId: 'x', privateKey: generateKeyPairSync('rsa', { modulusLength: 1024 }).privateKey.export({ type: 'pkcs1', format: 'pem' }),
+    minIntervalMs: 0,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ totalResults: 2, items: [
+      { itemId: 2, name: 'Laptop B', salePrice: 842.9, sellerInfo: 'GAMES FOR LESS', marketplace: true, offerType: 'ONLINE_ONLY' },
+      { itemId: 3, name: 'Laptop C', salePrice: 600, sellerInfo: 'Walmart.com', offerType: 'ONLINE_ONLY' },
+    ] }) }),
+  });
+  const { products } = await live.searchPage({ query: 'laptop', filters: ['retailer_type:Walmart'], keepOnlineOnly: true });
+  assert.deepEqual(products.map((p) => [p.id, p.onlineOnly]), [['3', true]]);
 });

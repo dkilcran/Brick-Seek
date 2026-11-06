@@ -209,6 +209,8 @@ export class WalmartLiveSource {
       reviewCount: item.numReviews ?? null,
       specialOffer: specialOfferOf(item),
       inStockOnline: onlineStock(item.stock),
+      // Walmart sells it online only (not carried in stores).
+      onlineOnly: item.offerType === 'ONLINE_ONLY',
       // Walmart only reports a best current offer for listings someone is selling now.
       listingActive: Boolean(item.bestMarketplacePrice),
       currentOfferPrice: typeof item.bestMarketplacePrice?.price === 'number' ? item.bestMarketplacePrice.price : null,
@@ -476,14 +478,15 @@ export class WalmartLiveSource {
    * whole-dollar price band (lo..hi) and an optional price sort. Returns
    * Walmart-sold products and the total result count.
    */
-  async searchPage({ query, filters, lo = null, hi = null, start = 1, sort = null }) {
+  /** @param {{ keepOnlineOnly?: boolean }} opts  the store lists drop online-only items; product search keeps them */
+  async searchPage({ query, filters, lo = null, hi = null, start = 1, sort = null, keepOnlineOnly = false }) {
     const params = { query, facet: 'on', 'facet.filter': filters, start, numItems: 25 };
     if (lo != null && hi != null) params['facet.range'] = `price:[${lo} TO ${hi}]`;
     if (sort) Object.assign(params, { sort: 'price', order: sort });
     const data = await this.request('/search', params, { cache: false });
     // Walmart's own filters miss some: marketplace sellers and online-only items get through.
     const products = (data?.items ?? [])
-      .filter((item) => item?.itemId && isWalmartSeller(item, { fromLookup: true }) && item.offerType !== 'ONLINE_ONLY')
+      .filter((item) => item?.itemId && isWalmartSeller(item, { fromLookup: true }) && (keepOnlineOnly || item.offerType !== 'ONLINE_ONLY'))
       .map((item) => this.toProduct(item, { fromLookup: true }));
     return { products, total: Number(data?.totalResults) || 0 };
   }

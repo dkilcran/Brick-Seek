@@ -71,6 +71,7 @@ function productCard(product, { zip, price = product.price, was = product.msrp, 
       ${extra}
     </div>
     ${note}
+    ${product.onlineOnly ? '<div class="badges"><span class="badge signal">Online only</span></div>' : ''}
     <div class="muted" style="font-size:13px">Item #${esc(product.id)}${product.upc ? ` · UPC ${esc(product.upc)}` : ''}</div>
   </a>`;
 }
@@ -293,6 +294,7 @@ async function itemView(retailerId, id, query) {
         <div class="price-row">
           <span class="price">${money(product.price)}</span><span class="muted">${product.storeOffers?.length ? 'at nearby stores' : 'online'}</span>
           ${product.inStockOnline === false ? '<span class="badge instore">In-store only</span>' : ''}
+          ${product.onlineOnly ? '<span class="badge signal">Online only: not sold in stores</span>' : ''}
           ${off ? `<span class="was">${money(product.msrp)}</span><span class="badge off">${off}% off${product.storeOffers?.length ? '' : ' MSRP'}</span>` : ''}
         </div>
         ${product.storeOffers?.length ? `<div class="muted" style="font-size:14px">Online: ${product.onlinePrice != null
