@@ -486,11 +486,14 @@ export class WalmartAdapter extends RetailerAdapter {
       if (!(price > 0)) continue; // not Walmart's online offer
       const name = pooled?.name ?? i?.title;
       if (!name || !keep(pooled?.category ?? i?.department)) continue;
+      const was = looked ? i.online_was : null;
+      // Rollback / Reduced Price online only when Walmart.com shows a was-price (being on
+      // Walmart's list isn't enough; many have none online); Clearance shows regardless.
+      if (kind !== 'clearance' && !(was > price)) continue;
       const c = card(id, {
         retailer: this.id, id, name, imageUrl: pooled?.imageUrl ?? i?.image_url ?? null,
         category: pooled?.category ?? i?.department ?? null, url: this.productUrl(id),
       });
-      const was = looked ? i.online_was : null;
       c.online = { price, wasPrice: was, kind, label: DEAL_LABELS[kind], ...discount(price, was) };
     }
     // Where each item is sold, from the online lookup when there is one.
@@ -502,7 +505,7 @@ export class WalmartAdapter extends RetailerAdapter {
       // The lists and store checks only cover items carried in stores.
       c.soldInStores = !onlineOnly || Boolean(c.store);
     }
-    const out = [...cards.values()];
+    const out = [...cards.values()].filter((c) => c.online || c.store);
     this.cardCache = { key, cards: out };
     return out;
   }
@@ -513,6 +516,7 @@ export class WalmartAdapter extends RetailerAdapter {
     if (!kind || !this.storeData) return null;
     const i = this.storeData.onlineInfo(this.id, [itemId]).get(String(itemId));
     if (!(i?.online_price > 0)) return null;
+    if (kind !== 'clearance' && !(i.online_was > i.online_price)) return null;
     return { price: i.online_price, wasPrice: i.online_was, kind, label: DEAL_LABELS[kind], onlineOnly: i.online_only === 1, ...discount(i.online_price, i.online_was) };
   }
 

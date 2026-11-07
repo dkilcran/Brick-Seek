@@ -75,6 +75,13 @@ test('Walmart builds cards from the online lookups and store deals', async () =>
   assert.deepEqual([byId.clr.online.label, byId.clr.online.percentOff, byId.clr.soldOnline, byId.clr.soldInStores], ['Clearance', 33, true, false]);
   assert.deepEqual([byId.rb.online.label, byId.rb.store.label, byId.rb.store.price, byId.rb.soldInStores], ['Rollback', 'Rollback', 15, true]);
   assert.equal(adapter.onlineDeal('rb').wasPrice, 25);
+  // Rollback online with no Walmart.com was-price: not an online deal.
+  tiers.insertItem.run('walmart', 2, 'r2', 'flat', 'Home', 'rollback');
+  tiers.upsertProduct.run('walmart', 'flat', 'r2', JSON.stringify({ id: 'flat', name: 'Soda', price: 91.54, category: 'Home' }));
+  db.saveOnlineLookup('walmart', 'flat', { isWalmart: true, price: 91.54, wasPrice: null, onlineOnly: false, availableOnline: true }, day);
+  adapter.cardCache = null;
+  assert.equal((await adapter.allDealCards()).some((c) => c.product.id === 'flat'), false);
+  assert.equal(adapter.onlineDeal('flat'), null);
   // A store deal with no online lookup yet isn't called store-only.
   db.recordStorePrices('walmart', '573', [{ itemId: 'shelf', title: 'Lamp', price: 3, clearance: true, seller: 'Walmart.com', inStock: true }], day);
   db.refreshMarkdowns('walmart');
