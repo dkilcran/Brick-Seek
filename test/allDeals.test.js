@@ -19,13 +19,13 @@ const cards = [
 ];
 const ids = (list) => list.map((c) => c.product.id);
 
-test('where it is sold: both by default; online hides store lines; in stores keeps online lines', () => {
+test('Online Deals / In Store Deals: items with that kind of deal, always with all their lines', () => {
   assert.deepEqual(ids(filterCards(cards)), ['both', 'web', 'shelf', 'roll']);
   const online = filterCards(cards, { where: ['online'] });
   assert.deepEqual(ids(online), ['both', 'web', 'roll']);
-  assert.equal(online[0].store, null, 'store line hidden when only Sold Online is picked');
+  assert.ok(online[0].store, 'the store deal still shows on an item picked for its online deal');
   const stores = filterCards(cards, { where: ['stores'] });
-  assert.deepEqual(ids(stores), ['both', 'shelf', 'roll'], 'in-store items, even with only an online deal');
+  assert.deepEqual(ids(stores), ['both', 'shelf']);
   assert.ok(stores[0].online && stores[0].store, 'both lines shown');
 });
 

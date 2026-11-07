@@ -21,12 +21,6 @@ export function discount(price, ref) {
   return { percentOff: Math.round((1 - price / ref) * 100), dollarsOff: Number((ref - price).toFixed(2)) };
 }
 
-/** The deal lines a card shows for a "where" choice: online only hides store lines. */
-function lines(card, where) {
-  const showStore = where.has('stores');
-  return [card.online, showStore ? card.store : null].filter(Boolean);
-}
-
 /** Labels a filter can pick: the deal kinds plus price-history badges. */
 function cardLabels(card) {
   const out = new Set();
@@ -43,7 +37,8 @@ function cardLabels(card) {
  * Keep the cards matching the filters, with the lines that apply.
  * @param {{ where?: string[], labels?: string[], q?: string, category?: string,
  *   minPrice?: number, maxPrice?: number, minDiscount?: number }} f
- *   where: 'online' (sold online) and/or 'stores' (sold in stores); default both.
+ *   where: 'online' (has an online deal) and/or 'stores' (has a store deal); default
+ *   both. Cards always keep all their deal lines.
  */
 export function filterCards(cards, { where = ['online', 'stores'], labels = [], q = '', category, minPrice, maxPrice, minDiscount = 0 } = {}) {
   const w = new Set(where.length ? where : ['online', 'stores']);
@@ -51,22 +46,19 @@ export function filterCards(cards, { where = ['online', 'stores'], labels = [], 
   const words = String(q ?? '').toLowerCase().split(/\s+/).filter(Boolean);
   const out = [];
   for (const card of cards) {
-    // Where it's sold: items sold in both places show under either.
-    if (!((w.has('online') && card.soldOnline) || (w.has('stores') && card.soldInStores))) continue;
-    const shown = { ...card, store: w.has('stores') ? card.store : null };
-    const ls = lines(card, w);
-    if (!ls.length) continue;
-    if (wanted.size && ![...cardLabels(shown)].some((l) => wanted.has(l))) continue;
+    // Online Deals / In Store Deals: items with that kind of deal (all lines still shown).
+    if (!((w.has('online') && card.online) || (w.has('stores') && card.store))) continue;
+    if (wanted.size && ![...cardLabels(card)].some((l) => wanted.has(l))) continue;
     if (category && card.product.category !== category) continue;
     if (words.length) {
       const text = `${card.product.name ?? ''} ${card.product.id}`.toLowerCase();
       if (!words.every((x) => text.includes(x))) continue;
     }
-    const best = summarize(shown);
+    const best = summarize(card);
     if (minPrice != null && best.lowestPrice < minPrice) continue;
     if (maxPrice != null && best.lowestPrice > maxPrice) continue;
     if (best.percentOff < minDiscount) continue;
-    out.push({ ...shown, ...best });
+    out.push({ ...card, ...best });
   }
   return out;
 }

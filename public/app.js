@@ -240,22 +240,25 @@ async function allDealsView(mode, query) {
     <section class="hero">
       <h1>${mode === 'stores' ? 'In Store Only' : 'All Deals'}</h1>
       <p>${mode === 'stores'
-        ? `${esc(r.name)} items sold in stores, with their store deals and online deals.`
+        ? `Deals on the shelf at ${esc(r.name)} stores near you, with any online deal on the same item.`
         : `Every deal ${esc(r.name)} itself has, online and at stores near you. Never marketplace sellers.`}</p>
     </section>
-    <form class="toolbar deal-toolbar" id="deal-tools">
-      <div class="field grow"><label for="dq">Search deals or look up an item</label>
+    <form class="filters" id="deal-tools">
+      <div class="field"><label for="dq">Search deals or look up an item</label>
         <div class="search-row"><input id="dq" name="q" type="search" value="${esc(q)}" placeholder="e.g. laptop, LEGO, or an item # / UPC / link">
         <button class="btn" type="submit">Search</button></div></div>
-      ${mode === 'all' ? `<details class="field multi" id="where"><summary><span class="label">Where</span>${where.length === 2 ? 'Online and in stores' : where[0] === 'online' ? 'Sold Online' : 'Sold In Stores'}</summary>
-        <label><input type="checkbox" name="where" value="online" ${where.includes('online') ? 'checked' : ''}> Sold Online</label>
-        <label><input type="checkbox" name="where" value="stores" ${where.includes('stores') ? 'checked' : ''}> Sold In Stores</label>
-      </details>` : ''}
-      <div class="field"><label for="cat">Category</label><select id="cat" name="category"><option value="">All categories</option></select></div>
-      <div class="field"><label for="min">Minimum discount</label><select id="min" name="min">
-        ${[0, 10, 20, 30, 40, 50, 60].map((m) => `<option value="${m}" ${String(m) === min ? 'selected' : ''}>${m}%+</option>`).join('')}</select></div>
-      ${sortSelect('sort', sort)}
-      <div class="field price-range"><label>Price</label>
+      <div class="filter-grid">
+        ${mode === 'all' ? `<div class="field"><span class="label">Deals</span><details class="multi" id="where"><summary>${where.length === 2 ? 'Online and in store' : where[0] === 'online' ? 'Online Deals' : 'In Store Deals'}</summary>
+          <div class="multi-menu">
+            <label><input type="checkbox" name="where" value="online" ${where.includes('online') ? 'checked' : ''}> Online Deals</label>
+            <label><input type="checkbox" name="where" value="stores" ${where.includes('stores') ? 'checked' : ''}> In Store Deals</label>
+          </div></details></div>` : ''}
+        <div class="field"><label for="cat">Category</label><select id="cat" name="category"><option value="">All categories</option></select></div>
+        <div class="field"><label for="min">Minimum discount</label><select id="min" name="min">
+          ${[0, 10, 20, 30, 40, 50, 60].map((m) => `<option value="${m}" ${String(m) === min ? 'selected' : ''}>${m ? `${m}%+` : 'Any'}</option>`).join('')}</select></div>
+        ${sortSelect('sort', sort)}
+      </div>
+      <div class="field"><span class="label">Price</span>
         <div class="range-row">
           <input type="number" name="minPrice" min="0" step="1" placeholder="$0" value="${esc(minPrice)}" aria-label="Minimum price">
           <div class="dual-range">
@@ -266,7 +269,7 @@ async function allDealsView(mode, query) {
         </div>
       </div>
     </form>
-    <div class="chips" style="justify-content:center">${BADGES.map(chip).join('')}</div>
+    <div class="chips badge-chips">${BADGES.map(chip).join('')}</div>
     <div id="deal-list"><div class="loading">Loading deals…</div></div>`;
 
   const tools = $app.querySelector('#deal-tools');
