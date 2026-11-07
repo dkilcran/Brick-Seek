@@ -40,7 +40,7 @@ export class FeedMeasure {
    * Run at `at` (ISO time; default now), stopping by `until` (ISO time) with
    * whatever is done. Saved, so a restart keeps the plan.
    */
-  schedule({ at = new Date().toISOString(), storeId = '573', until = null, dealPages = 15, everythingPages = 10 } = {}) {
+  schedule({ at = new Date().toISOString(), storeId = '573', until = null, dealPages = 60, everythingPages = 25 } = {}) {
     const plan = { at, storeId, until, dealPages, everythingPages };
     // A measurement already running takes the new stop time.
     if (this.running) {
@@ -55,7 +55,7 @@ export class FeedMeasure {
     return plan;
   }
 
-  start({ storeId = '573', until = null, dealPages = 15, everythingPages = 10 } = {}) {
+  start({ storeId = '573', until = null, dealPages = 60, everythingPages = 25 } = {}) {
     if (this.running) return false;
     this.running = true;
     this.deadline = until ? Date.parse(until) : Infinity;
@@ -167,7 +167,8 @@ export class FeedMeasure {
         const feed = { department, offer, pages: 0, items: 0, walmart: 0, otherSeller: 0, unnamed: 0, complete: false, capped: false };
         this.state.deals.feeds.push(feed);
         if (!category) { feed.error = 'no Walmart category with this name'; continue; }
-        await this.readFeed(feed, { category, specialOffer: offer }, dealPages, (id) => {
+        // soldByWmt: Walmart leaves out marketplace listings (99% of the unfiltered Clearance feeds).
+        await this.readFeed(feed, { category, specialOffer: offer, soldByWmt: 'true' }, dealPages, (id) => {
           const c = dealCandidates.get(id) ?? { department, offers: [] };
           if (!c.offers.includes(offer)) c.offers.push(offer);
           dealCandidates.set(id, c);
@@ -205,7 +206,7 @@ export class FeedMeasure {
       const feed = { department, pages: 0, items: 0, walmart: 0, otherSeller: 0, unnamed: 0, complete: false, capped: false };
       this.state.tier3.feeds.push(feed);
       if (!category) { feed.error = 'no Walmart category with this name'; continue; }
-      await this.readFeed(feed, { category }, everythingPages, (id) => all.set(id, department));
+      await this.readFeed(feed, { category, soldByWmt: 'true' }, everythingPages, (id) => all.set(id, department));
     }
     this.state.phase = 'everything lookups';
     const everything = await this.checkAtStore([...all.keys()], storeId, 150);

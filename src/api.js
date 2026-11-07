@@ -420,7 +420,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const at = query.get('at');
       const until = query.get('until') && !Number.isNaN(Date.parse(query.get('until'))) ? new Date(query.get('until')).toISOString() : null;
       const pages = (name, d) => clampInt(query.get(name), d, 1, 200);
-      const opts = { storeId, until, dealPages: pages('dealPages', 15), everythingPages: pages('everythingPages', 10) };
+      const opts = { storeId, until, dealPages: pages('dealPages', 60), everythingPages: pages('everythingPages', 25) };
       if (at && !Number.isNaN(Date.parse(at))) scheduled = adapter.feedMeasure.schedule({ ...opts, at: new Date(at).toISOString() });
       else if (query.get('start') === '1') scheduled = adapter.feedMeasure.schedule(opts);
       return { scheduled, ...adapter.feedMeasure.status() };
