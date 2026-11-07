@@ -157,3 +157,5 @@ details.multi summary::-webkit-details-marker { display: none; }
 .multi-menu { position: absolute; z-index: 5; top: 48px; left: 0; right: 0; min-width: 180px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.12); }
 .multi-menu label { display: flex; gap: 8px; align-items: center; padding: 8px; font-size: 15px; text-transform: none; letter-spacing: 0; color: var(--text); font-weight: 500; }
 .badge-chips { justify-content: center; margin: 16px auto 4px; max-width: 900px; }
+.multi-menu input[type=checkbox] { width: auto; height: auto; margin: 0; }
+.multi-menu label { white-space: nowrap; }
