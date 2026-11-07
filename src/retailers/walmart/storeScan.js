@@ -165,7 +165,8 @@ export class StoreScanDb {
     this.setOnlineLookup = db.prepare(`INSERT INTO store_items
       (retailer, item_id, online_price, online_date, online_was, online_only, online_available, online_lookup_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET online_price = excluded.online_price, online_date = excluded.online_date,
-        online_was = excluded.online_was, online_only = excluded.online_only, online_available = excluded.online_available,
+        online_was = excluded.online_was, online_only = COALESCE(excluded.online_only, store_items.online_only),
+        online_available = excluded.online_available,
         online_lookup_date = excluded.online_lookup_date`);
     this.setListPrice = db.prepare(`INSERT INTO store_items (retailer, item_id, msrp) VALUES (?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET msrp = excluded.msrp`);
@@ -544,6 +545,18 @@ export class StoreScanDb {
     return this.db.prepare(`SELECT i.item_id FROM store_items i
       WHERE i.retailer = ? AND i.title IS NOT NULL AND ${like} LIMIT ?`)
       .all(retailer, ...words.map((w) => `%${w.replace(/[%_]/g, '')}%`), limit * 4).map((r) => r.item_id);
+  }
+
+  /** Items Walmart sells online only (from the online lookup or a store lookup). */
+  isOnlineOnly(retailer, itemId) {
+    this.getOnlineOnly ??= this.db.prepare('SELECT online_only FROM store_items WHERE retailer = ? AND item_id = ?');
+    return this.getOnlineOnly.get(retailer, String(itemId))?.online_only === 1;
+  }
+
+  markOnlineOnly(retailer, ids) {
+    const mark = this.db.prepare(`INSERT INTO store_items (retailer, item_id, online_only) VALUES (?, ?, 1)
+      ON CONFLICT (retailer, item_id) DO UPDATE SET online_only = 1`);
+    for (const id of ids) mark.run(retailer, String(id));
   }
 
   /** Forget items' store prices everywhere (e.g. Walmart sells them online only). History is kept. */

@@ -50,6 +50,7 @@ crowded $1 band is read sorted both ways.
 | `departmentQueries` | Search words per department (Walmart's search needs text). Departments not listed use their own name. |
 | `baseFilters` | Filters on every search: `retailer_type:Walmart` (sold by Walmart), `fulfillment_method:In-store` (carried in stores). |
 | `tiers` | The deal filters for tier 1 and tier 2; each is its own search pass. |
+| `dealFeeds` | `true` (default): after the morning search, also read Walmart's Clearance, Rollback and Reduced Price feeds (sold by Walmart only) into the lists. `false` turns them off. |
 | `markdownPercent` | A store price at least this many percent below the item's highest valid store price (current, sold by Walmart, at any store, or that store's own earlier price) is labeled **Markdown**. Default 10. |
 | `restartChecks` | Change this to any new value to restart today's cycle right away. |
 | `useSerpApi` | `false`: SerpApi isn't used. `true` turns the old paid SerpApi searches back on (needs `SERPAPI_KEY`), with `filters`, `searchTerms`, `discoveryStores`, `maxPages`, `monthlySearchBudget`, `fullSweep` and `inspect`. |

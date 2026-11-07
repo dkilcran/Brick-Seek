@@ -263,3 +263,35 @@ test('tier 3 batches wrap around at the end of the list without repeating within
   assert.ok(second.length <= 20 && new Set(second).size === second.length);
   assert.ok(second.slice(9).every((id) => id < first.at(-1)), 'after the end it starts over from the top');
 });
+
+test('after the search, Walmart\'s deal feeds add to the lists; online-only items are skipped in store checks', async () => {
+  const day = makeDay({ start: '2026-11-03T10:30:00Z', catalog: CATALOG });
+  const feedPages = {
+    'clearance:': { items: [{ itemId: 't1a', name: 'A', salePrice: 5 }, { itemId: 'f1', name: 'Feed clearance', salePrice: 3 }, { itemId: 'mk', name: 'Seller', salePrice: 1, sellerInfo: 'Toy Co' }],
+      nextPage: '/v1/paginated/items?category=4171&specialOffer=clearance&soldByWmt=true&lastDoc=x' },
+    'clearance:x': { items: [{ itemId: 'web', name: 'Online only', salePrice: 9 }] },
+    'rollback:': { items: [{ itemId: 'f2', name: 'Feed rollback', salePrice: 4 }] },
+    'reduced:': { items: [] },
+  };
+  Object.assign(day.source, {
+    taxonomy: async () => [{ name: 'Toys', id: '4171' }],
+    async request(path, q) {
+      assert.equal(q.soldByWmt, 'true');
+      return feedPages[`${q.specialOffer}:${q.lastDoc ?? ''}`] ?? { items: [] };
+    },
+    toProduct: (item) => ({ id: String(item.itemId), name: item.name, price: item.salePrice, category: 'Toys', seller: { isRetailer: true } }),
+  });
+  // 'web' is known to be sold online only.
+  day.db.markOnlineOnly('walmart', ['web']);
+  await day.runUntilIdle(); // lists (search, then feeds); checks wait for 5:00
+  const st = day.checker.status();
+  assert.deepEqual(st.lists.feeds, {
+    feedsDone: 3, feedsTotal: 3, pages: 4, items: 5, addedBeyondSearch: 3, alreadyFoundBySearch: 1, otherSeller: 1, otherDepartments: 0,
+  });
+  assert.deepEqual(day.tiers.itemIds(1).sort(), ['f1', 't1a', 't1b', 'web']);
+  assert.equal(day.tiers.offers().get('f2'), 'rollback');
+  day.setClock('2026-11-03T11:00:00Z');
+  await day.runUntilIdle();
+  assert.ok(day.lookups.some((l) => l.ids.includes('f1')), 'feed items get store checks');
+  assert.ok(!day.lookups.some((l) => l.ids.includes('web')), 'online-only items are skipped');
+});

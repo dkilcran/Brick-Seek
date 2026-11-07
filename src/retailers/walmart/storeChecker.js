@@ -20,6 +20,10 @@
 // Progress is saved after every step, so a restart resumes where it left off.
 import { localParts, scheduleDayKey } from '../../lib/scanSchedule.js';
 
+// Walmart's deal feeds read after the morning search (specialOffer values).
+const FEED_OFFERS = ['clearance', 'rollback', 'reduced'];
+// A safety cap on feed pages per night (all departments; ~65 pages measured).
+const MAX_FEED_PAGES_TOTAL = 600;
 const BATCH = 20; // most item ids per store lookup
 const REQUIRED = new Set(['lists', 'checks']);
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -165,6 +169,41 @@ export class StoreChecker {
         this.state = { ...state, searches: state.searches + 1 };
         return true;
       }
+      // Then Walmart's deal feeds (Walmart-sold only), which find about twice the
+      // in-store deal items the search does, plus Walmart.com-only deals.
+      if (config.dealFeeds !== false && this.source.request && this.source.taxonomy) {
+        if (!state.feeds) {
+          const cats = new Map((await this.source.taxonomy()).map((c) => [c.name, c.id]));
+          const jobs = [];
+          for (const department of config.departments) {
+            const category = cats.get(department);
+            if (category) for (const offer of FEED_OFFERS) jobs.push({ department, category, offer });
+          }
+          this.state = { ...state, feeds: { jobs, index: 0, query: null, pages: 0, items: 0, otherSeller: 0, added: 0, alreadyListed: 0, skipped: 0 } };
+          return true;
+        }
+        const f = state.feeds;
+        if (f.index < f.jobs.length) {
+          const fj = f.jobs[f.index];
+          const query = f.query ?? { category: fj.category, specialOffer: fj.offer, soldByWmt: 'true' };
+          const data = await this.source.request('/paginated/items', query, { cache: false });
+          const got = this.tiers.addFeedItems(state.listRun, fj, data?.items, {
+            toProduct: (item) => this.source.toProduct(item, { fromLookup: true }), keep: this.keepProduct(config),
+          });
+          let next = data?.nextPage ? Object.fromEntries(new URL(data.nextPage, 'https://x.invalid').searchParams) : null;
+          if (next) delete next.publisherId;
+          if (f.pages >= MAX_FEED_PAGES_TOTAL) next = null;
+          this.state = {
+            ...state,
+            feeds: {
+              ...f, index: next ? f.index : f.index + 1, query: next, pages: f.pages + 1,
+              items: f.items + got.items, otherSeller: f.otherSeller + got.otherSeller, added: f.added + got.added,
+              alreadyListed: f.alreadyListed + got.alreadyListed, skipped: f.skipped + got.skipped,
+            },
+          };
+          return true;
+        }
+      }
       this.tiers.markBuilt(1, state.listRun);
       this.tiers.markBuilt(2, state.listRun);
       // The tier 1/2 products become the home page deal pool.
@@ -202,6 +241,22 @@ export class StoreChecker {
       }
       const storeId = seg.stores[Math.floor(state.offset / batches)];
       const b = state.offset % batches;
+      if (!seg.online) {
+        // Items Walmart sells online only have no store price; skip them (no call when none are left).
+        const batch = ids.slice(b * BATCH, b * BATCH + BATCH).filter((id) => !this.db.isOnlineOnly(this.retailer, id));
+        if (!batch.length) {
+          this.state = { ...state, offset: state.offset + 1 };
+          return true;
+        }
+        const { found, onlineOnly } = await this.source.storeLookup(batch, storeId);
+        this.db.recordStorePrices(this.retailer, storeId, found, state.day);
+        if (onlineOnly?.length) {
+          this.db.markOnlineOnly(this.retailer, onlineOnly);
+          this.db.dropItems(this.retailer, onlineOnly);
+        }
+        this.state = { ...state, offset: state.offset + 1, lookups: state.lookups + 1, rows: state.rows + found.length };
+        return true;
+      }
       if (seg.online) {
         const batch = ids.slice(b * BATCH, b * BATCH + BATCH);
         const online = await this.source.onlinePrices(batch);
@@ -211,10 +266,6 @@ export class StoreChecker {
         this.state = { ...state, offset: state.offset + 1, lookups: state.lookups + 1 };
         return true;
       }
-      const { found, onlineOnly } = await this.source.storeLookup(ids.slice(b * BATCH, b * BATCH + BATCH), storeId);
-      this.db.recordStorePrices(this.retailer, storeId, found, state.day);
-      if (onlineOnly?.length) this.db.dropItems(this.retailer, onlineOnly);
-      this.state = { ...state, offset: state.offset + 1, lookups: state.lookups + 1, rows: state.rows + found.length };
       return true;
     }
 
@@ -375,6 +426,11 @@ export class StoreChecker {
       lists: {
         searches: s.searches, queued: this.tiers.queueSize(s.listRun),
         tier1: s.tier1 ?? this.tiers.count(1), tier2: s.tier2 ?? this.tiers.count(2), doneAt: s.listsDoneAt,
+        // Walmart's deal feeds after the search: items added vs already found by the search.
+        feeds: s.feeds ? {
+          feedsDone: s.feeds.index, feedsTotal: s.feeds.jobs.length, pages: s.feeds.pages, items: s.feeds.items,
+          addedBeyondSearch: s.feeds.added, alreadyFoundBySearch: s.feeds.alreadyListed, otherSeller: s.feeds.otherSeller, otherDepartments: s.feeds.skipped,
+        } : null,
       },
       checks: {
         fullCheckStores: s.probeStores,

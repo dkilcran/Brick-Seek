@@ -40,8 +40,8 @@ export class FeedMeasure {
    * Run at `at` (ISO time; default now), stopping by `until` (ISO time) with
    * whatever is done. Saved, so a restart keeps the plan.
    */
-  schedule({ at = new Date().toISOString(), storeId = '573', until = null, dealPages = 60, everythingPages = 25 } = {}) {
-    const plan = { at, storeId, until, dealPages, everythingPages };
+  schedule({ at = new Date().toISOString(), storeId = '573', until = null, dealPages = 60, everythingPages = 25, parts = ['deals', 'everything'], lookups = true } = {}) {
+    const plan = { at, storeId, until, dealPages, everythingPages, parts, lookups };
     // A measurement already running takes the new stop time.
     if (this.running) {
       this.deadline = until ? Date.parse(until) : Infinity;
@@ -55,11 +55,13 @@ export class FeedMeasure {
     return plan;
   }
 
-  start({ storeId = '573', until = null, dealPages = 60, everythingPages = 25 } = {}) {
+  start({ storeId = '573', until = null, dealPages = 60, everythingPages = 25, parts = ['deals', 'everything'], lookups = true } = {}) {
     if (this.running) return false;
     this.running = true;
     this.deadline = until ? Date.parse(until) : Infinity;
-    this.run({ storeId, dealPages, everythingPages })
+    // The last finished measurement is kept next to the new one.
+    if (this.state?.phase === 'done') this.db.setMeta(`${this.key}:previous`, this.state);
+    this.run({ storeId, dealPages, everythingPages, parts, lookups })
       .then(() => this.db.setMeta(`${this.key}:plan`, null))
       .catch((err) => { this.state = { ...this.state, phase: 'failed', error: err.message.slice(0, 300) }; })
       .finally(() => { this.running = false; this.save(); });
@@ -145,11 +147,11 @@ export class FeedMeasure {
     return { out, confirmed };
   }
 
-  async run({ storeId, dealPages = 15, everythingPages = 10 }) {
+  async run({ storeId, dealPages = 15, everythingPages = 10, parts = ['deals', 'everything'], lookups = true }) {
     const { config } = this.loadConfig();
     const departments = config?.departments ?? [];
     this.state = {
-      phase: 'deal feeds', startedAt: new Date().toISOString(), storeId, dealPages, everythingPages,
+      phase: parts.includes('deals') ? 'deal feeds' : 'everything feeds', startedAt: new Date().toISOString(), storeId, dealPages, everythingPages, parts, lookups,
       until: Number.isFinite(this.deadline) ? new Date(this.deadline).toISOString() : null,
       calls: 0, rateLimitWaits: 0, deals: { feeds: [] }, tier3: { feeds: [] },
     };
@@ -161,7 +163,7 @@ export class FeedMeasure {
 
     // 1. Deal feeds: Clearance, Rollback, Reduced Price per department.
     const dealCandidates = new Map(); // id -> { department, offers }
-    for (const department of departments) {
+    for (const department of parts.includes('deals') ? departments : []) {
       const category = cats.get(department);
       for (const offer of DEAL_OFFERS) {
         const feed = { department, offer, pages: 0, items: 0, walmart: 0, otherSeller: 0, unnamed: 0, complete: false, capped: false };
@@ -175,6 +177,7 @@ export class FeedMeasure {
         });
       }
     }
+    if (parts.includes('deals') && lookups) {
     this.state.phase = 'deal lookups';
     const deals = await this.checkAtStore([...dealCandidates.keys()], storeId, 400);
     const compare = { inTier1: 0, inTier2: 0, inTier3Only: 0, inNoList: 0 };
@@ -196,17 +199,25 @@ export class FeedMeasure {
       estimate: { walmartInStore: Math.round(deals.out.walmartInStore * deals.out.scale), notInAnyList: Math.round(compare.inNoList * deals.out.scale) },
       sampleMissed: deals.confirmed.filter((id) => !t1.has(id) && !t2.has(id) && !t3.has(id)).slice(0, 15),
     });
+    }
     this.save();
 
     // 2. Everything feeds (no deal filter), capped per department, vs tier 3.
     this.state.phase = 'everything feeds';
     const all = new Map(); // id -> department
-    for (const department of departments) {
+    for (const department of parts.includes('everything') ? departments : []) {
       const category = cats.get(department);
       const feed = { department, pages: 0, items: 0, walmart: 0, otherSeller: 0, unnamed: 0, complete: false, capped: false };
       this.state.tier3.feeds.push(feed);
       if (!category) { feed.error = 'no Walmart category with this name'; continue; }
       await this.readFeed(feed, { category, soldByWmt: 'true' }, everythingPages, (id) => all.set(id, department));
+    }
+    // Overlap with tier 3 by item id alone (no lookups needed).
+    this.state.tier3.items = all.size;
+    this.state.tier3.alsoInTier3 = [...all.keys()].filter((id) => t3.has(id)).length;
+    if (!parts.includes('everything') || !lookups) {
+      this.state = { ...this.state, phase: 'done', finishedAt: new Date().toISOString(), lists };
+      return;
     }
     this.state.phase = 'everything lookups';
     const everything = await this.checkAtStore([...all.keys()], storeId, 150);

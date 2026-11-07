@@ -42,6 +42,12 @@
 - **Walmart's own online price**: `/search` with `retailer_type:Walmart` returns
   Walmart-sold online prices; `/items` without `storeId` only when its seller
   is Walmart (else it's a marketplace offer). Store prices above it aren't deals.
+- **Bulk feeds** (`/paginated/items?category=&specialOffer=clearance|rollback|reduced`)
+  are ~99% marketplace unless `soldByWmt=true`, which makes Walmart drop them
+  (Home Clearance: 12,000+ listings -> 125). 200 items per page, `nextPage` to
+  continue; rate-limited harder than other calls (wait ~60s on 429). They don't
+  say whether an item is in stores; a lookup does (~73% of deal-feed items are
+  online only).
 - **Affiliate links**: Walmart's program runs on Impact. `productTrackingUrl`
   is `goto.walmart.com/c/{publisherId}/568844/9383?veh=aff&sourceid=imp_000011112222333344&u={item url}`
   (`|PUBID|` when no publisherId is sent); `walmartProductUrl` builds it.

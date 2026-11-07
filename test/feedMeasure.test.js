@@ -78,3 +78,18 @@ test('a measurement past its stop time finishes with what it has', async () => {
   assert.equal(s.stoppedEarly, true);
   assert.equal(s.deals.feeds.every((f) => f.pages === 0), true);
 });
+
+test('a size-only measurement reads the everything feeds without store lookups', async () => {
+  const { db, tiers, source } = setup();
+  let lookups = 0;
+  source.storeLookup = async () => { lookups += 1; return { found: [], missing: [], onlineOnly: [] }; };
+  const m = new FeedMeasure({ source, db, tiers, loadConfig: () => ({ config: { departments: ['Toys'] } }), rateLimitWaitMs: 1 });
+  m.schedule({ parts: ['everything'], lookups: false, everythingPages: 1000 });
+  await new Promise((r) => setTimeout(r, 5));
+  while (m.running) await new Promise((r) => setTimeout(r, 5));
+  const s = m.status();
+  assert.equal(s.phase, 'done', s.error);
+  assert.equal(lookups, 0);
+  assert.equal(s.deals.feeds.length, 0);
+  assert.deepEqual([s.tier3.feeds[0].complete, s.tier3.items, s.tier3.alsoInTier3], [true, 2, 1]);
+});

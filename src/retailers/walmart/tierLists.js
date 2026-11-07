@@ -200,6 +200,43 @@ export class TierStore {
   }
 
   /**
+   * Add one page of a Walmart deal feed (/paginated/items with specialOffer and
+   * soldByWmt) to a run's lists: Clearance to tier 1, Rollback / Reduced Price
+   * to tier 2. Items another seller sells, or outside the kept departments, are
+   * skipped. Counts what the morning search had already found, to compare.
+   * @param {{ offer: 'clearance'|'rollback'|'reduced', department: string }} job
+   * @param {(item) => object} toProduct  the source's item -> product
+   */
+  addFeedItems(run, job, items, { toProduct, keep = () => true }) {
+    const tier = job.offer === 'clearance' ? 1 : 2;
+    const has = this.db.prepare('SELECT 1 FROM tier_items WHERE retailer = ? AND tier = ? AND run = ? AND item_id = ?');
+    const out = { items: 0, otherSeller: 0, added: 0, alreadyListed: 0, skipped: 0 };
+    this.db.exec('BEGIN');
+    try {
+      for (const item of items ?? []) {
+        if (!item?.itemId) continue;
+        out.items += 1;
+        const seller = String(item.sellerInfo ?? '').trim();
+        if ((seller && !/^walmart(\.com)?$/i.test(seller)) || item.marketplace === true) { out.otherSeller += 1; continue; }
+        const p = toProduct(item);
+        if (!keep(p)) { out.skipped += 1; continue; }
+        if (has.get(this.retailer, tier, run, p.id)) out.alreadyListed += 1;
+        else {
+          this.insertItem.run(this.retailer, tier, run, p.id, job.department, tier === 2 ? job.offer : null);
+          out.added += 1;
+        }
+        this.upsertProduct.run(this.retailer, p.id, run, JSON.stringify(p));
+        if (p.price > 0) this.store.saveOnlinePrice(this.retailer, p.id, p.price, run.slice(0, 10));
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return out;
+  }
+
+  /**
    * Walmart's online deal label for each item on today's lists: 'clearance'
    * (tier 1), else 'rollback' / 'reduced' (tier 2; 'offer' when unknown).
    * @returns {Map<string, string>}
