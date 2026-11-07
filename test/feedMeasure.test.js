@@ -66,3 +66,15 @@ test('a scheduled measurement is saved and picked up again after a restart', () 
   assert.equal(after.status().scheduledFor, at);
   clearTimeout(after.timer);
 });
+
+test('a measurement past its stop time finishes with what it has', async () => {
+  const { db, tiers, source } = setup();
+  const m = new FeedMeasure({ source, db, tiers, loadConfig: () => ({ config: { departments: ['Toys'] } }), rateLimitWaitMs: 1 });
+  m.schedule({ until: new Date(Date.now() - 1000).toISOString() });
+  await new Promise((r) => setTimeout(r, 5));
+  while (m.running) await new Promise((r) => setTimeout(r, 5));
+  const s = m.status();
+  assert.equal(s.phase, 'done');
+  assert.equal(s.stoppedEarly, true);
+  assert.equal(s.deals.feeds.every((f) => f.pages === 0), true);
+});

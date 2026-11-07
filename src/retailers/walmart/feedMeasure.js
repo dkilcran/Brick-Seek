@@ -36,9 +36,17 @@ export class FeedMeasure {
     };
   }
 
-  /** Run at `at` (ISO time; default now). Saved, so a restart keeps the plan. */
-  schedule({ at = new Date().toISOString(), storeId = '573' } = {}) {
-    const plan = { at, storeId };
+  /**
+   * Run at `at` (ISO time; default now), stopping by `until` (ISO time) with
+   * whatever is done. Saved, so a restart keeps the plan.
+   */
+  schedule({ at = new Date().toISOString(), storeId = '573', until = null, dealPages = 15, everythingPages = 10 } = {}) {
+    const plan = { at, storeId, until, dealPages, everythingPages };
+    // A measurement already running takes the new stop time.
+    if (this.running) {
+      this.deadline = until ? Date.parse(until) : Infinity;
+      if (this.state) this.state.until = until;
+    }
     this.db.setMeta(`${this.key}:plan`, plan);
     clearTimeout(this.timer);
     const wait = Math.max(0, Date.parse(at) - Date.now());
@@ -47,10 +55,11 @@ export class FeedMeasure {
     return plan;
   }
 
-  start({ storeId = '573' } = {}) {
+  start({ storeId = '573', until = null, dealPages = 15, everythingPages = 10 } = {}) {
     if (this.running) return false;
     this.running = true;
-    this.run({ storeId })
+    this.deadline = until ? Date.parse(until) : Infinity;
+    this.run({ storeId, dealPages, everythingPages })
       .then(() => this.db.setMeta(`${this.key}:plan`, null))
       .catch((err) => { this.state = { ...this.state, phase: 'failed', error: err.message.slice(0, 300) }; })
       .finally(() => { this.running = false; this.save(); });
@@ -77,8 +86,16 @@ export class FeedMeasure {
   }
 
   /** Page through one feed; returns the possible Walmart items (not another seller's). */
+  /** Past the stop time: finish with what's done. */
+  late() {
+    if (Date.now() < (this.deadline ?? Infinity)) return false;
+    this.state.stoppedEarly = true;
+    return true;
+  }
+
   async readFeed(feed, query, maxPages, onItem) {
     while (query) {
+      if (this.late()) break;
       if (feed.pages >= maxPages) { feed.capped = true; break; }
       let data;
       try {
@@ -111,6 +128,7 @@ export class FeedMeasure {
     const out = { candidates: ids.length, checked: sample.length, sampled: step > 1, walmartInStore: 0, notAtStore: 0, onlineOnly: 0, otherSeller: 0, clearanceFlag: 0 };
     const confirmed = [];
     for (let i = 0; i < sample.length; i += BATCH) {
+      if (this.late()) break;
       const batch = sample.slice(i, i + BATCH);
       const { found, missing, onlineOnly } = await this.call(() => this.source.storeLookup(batch, storeId));
       out.notAtStore += missing.length;
@@ -127,10 +145,14 @@ export class FeedMeasure {
     return { out, confirmed };
   }
 
-  async run({ storeId }) {
+  async run({ storeId, dealPages = 15, everythingPages = 10 }) {
     const { config } = this.loadConfig();
     const departments = config?.departments ?? [];
-    this.state = { phase: 'deal feeds', startedAt: new Date().toISOString(), storeId, calls: 0, rateLimitWaits: 0, deals: { feeds: [] }, tier3: { feeds: [] } };
+    this.state = {
+      phase: 'deal feeds', startedAt: new Date().toISOString(), storeId, dealPages, everythingPages,
+      until: Number.isFinite(this.deadline) ? new Date(this.deadline).toISOString() : null,
+      calls: 0, rateLimitWaits: 0, deals: { feeds: [] }, tier3: { feeds: [] },
+    };
     const cats = new Map((await this.call(() => this.source.taxonomy())).map((c) => [c.name, c.id]));
     const t1 = new Set(this.tiers.itemIds(1));
     const t2 = new Set(this.tiers.itemIds(2));
@@ -145,7 +167,7 @@ export class FeedMeasure {
         const feed = { department, offer, pages: 0, items: 0, walmart: 0, otherSeller: 0, unnamed: 0, complete: false, capped: false };
         this.state.deals.feeds.push(feed);
         if (!category) { feed.error = 'no Walmart category with this name'; continue; }
-        await this.readFeed(feed, { category, specialOffer: offer }, 60, (id) => {
+        await this.readFeed(feed, { category, specialOffer: offer }, dealPages, (id) => {
           const c = dealCandidates.get(id) ?? { department, offers: [] };
           if (!c.offers.includes(offer)) c.offers.push(offer);
           dealCandidates.set(id, c);
@@ -183,7 +205,7 @@ export class FeedMeasure {
       const feed = { department, pages: 0, items: 0, walmart: 0, otherSeller: 0, unnamed: 0, complete: false, capped: false };
       this.state.tier3.feeds.push(feed);
       if (!category) { feed.error = 'no Walmart category with this name'; continue; }
-      await this.readFeed(feed, { category }, 25, (id) => all.set(id, department));
+      await this.readFeed(feed, { category }, everythingPages, (id) => all.set(id, department));
     }
     this.state.phase = 'everything lookups';
     const everything = await this.checkAtStore([...all.keys()], storeId, 150);

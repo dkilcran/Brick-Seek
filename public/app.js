@@ -212,7 +212,7 @@ function allDealCard(c) {
 }
 
 /**
- * The All Deals page (mode 'all') and the In Store Only page (mode 'stores',
+ * The All Deals page (mode 'all') and the In Store Deals page (mode 'stores',
  * items sold in stores). Filters live in the URL.
  */
 async function allDealsView(mode, query) {
@@ -238,7 +238,7 @@ async function allDealsView(mode, query) {
   };
   $app.innerHTML = `
     <section class="hero">
-      <h1>${mode === 'stores' ? 'In Store Only' : 'All Deals'}</h1>
+      <h1>${mode === 'stores' ? 'In Store Deals' : 'All Deals'}</h1>
       <p>${mode === 'stores'
         ? `Deals on the shelf at ${esc(r.name)} stores near you, with any online deal on the same item.`
         : `Every deal ${esc(r.name)} itself has, online and at stores near you. Never marketplace sellers.`}</p>

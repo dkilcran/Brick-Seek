@@ -418,8 +418,11 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const storeId = /^\d{1,6}$/.test(query.get('store') ?? '') ? query.get('store') : '573';
       let scheduled = null;
       const at = query.get('at');
-      if (at && !Number.isNaN(Date.parse(at))) scheduled = adapter.feedMeasure.schedule({ at: new Date(at).toISOString(), storeId });
-      else if (query.get('start') === '1') scheduled = adapter.feedMeasure.schedule({ storeId });
+      const until = query.get('until') && !Number.isNaN(Date.parse(query.get('until'))) ? new Date(query.get('until')).toISOString() : null;
+      const pages = (name, d) => clampInt(query.get(name), d, 1, 200);
+      const opts = { storeId, until, dealPages: pages('dealPages', 15), everythingPages: pages('everythingPages', 10) };
+      if (at && !Number.isNaN(Date.parse(at))) scheduled = adapter.feedMeasure.schedule({ ...opts, at: new Date(at).toISOString() });
+      else if (query.get('start') === '1') scheduled = adapter.feedMeasure.schedule(opts);
       return { scheduled, ...adapter.feedMeasure.status() };
     }],
 
