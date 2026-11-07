@@ -445,7 +445,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const adapter = requireRetailer(registry, params.retailer);
       if (!adapter.source?.request) throw new HttpError(501, 'Live mode only');
       const p = {};
-      for (const k of ['category', 'specialOffer', 'storeId', 'count', 'query', 'categoryId', 'start', 'numItems',
+      for (const k of ['category', 'specialOffer', 'storeId', 'count', 'query', 'categoryId', 'start', 'numItems', 'soldByWmt', 'available', 'brand',
         'facet', 'facet.filter', 'facet.range', 'responseGroup', 'sort', 'order']) {
         // Allows facet.range values like "price:[0 TO 5]".
         const values = query.getAll(k).filter((v) => /^[\w .:&'\[\]-]{1,60}$/.test(v));
