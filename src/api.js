@@ -455,12 +455,15 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
         const values = query.getAll(k).filter((v) => /^[\w .:&'\[\]-]{1,60}$/.test(v));
         if (values.length) p[k] = values.length === 1 ? values[0] : values;
       }
-      const path = query.get('search') === '1' ? '/search' : '/paginated/items';
+      // Walmart's other feeds (listed in walmart.io's docs app), for testing what they return.
+      const FEEDS = ['/feeds/items', '/feeds/rollback', '/feeds/bestsellers', '/feeds/preorder', '/clearance', '/specialbuy', '/trends'];
+      const path = query.get('search') === '1' ? '/search' : FEEDS.includes(query.get('path')) ? query.get('path') : '/paginated/items';
       const data = await adapter.source.request(path, p, { cache: false });
-      const items = data?.items ?? [];
+      const items = Array.isArray(data?.items) ? data.items : Array.isArray(data) ? data : [];
       const count = (f) => items.reduce((m, i) => ({ ...m, [f(i)]: (m[f(i)] ?? 0) + 1 }), {});
       return {
         path, params: p, items: items.length, nextPage: Boolean(data?.nextPage), totalResults: data?.totalResults ?? null,
+        responseKeys: data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data) : null,
         sellers: count((i) => (/^walmart/i.test(i.sellerInfo ?? '') ? 'Walmart' : i.sellerInfo ? 'other' : i.marketplace ? 'marketplace' : 'unnamed')),
         stock: count((i) => i.stock ?? '?'),
         clearanceFlag: count((i) => String(i.clearance)),
