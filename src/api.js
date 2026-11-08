@@ -485,6 +485,27 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       };
     }],
 
+    // Ask Walmart's API about itself: a fixed set of self-description addresses
+    // (OpenAPI / Swagger files), an OPTIONS request, or a deliberately bad request.
+    ['GET', '/api/:retailer/debug/describe', async ({ params, query }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.source?.rawCall) throw new HttpError(501, 'Live mode only');
+      const probes = {
+        'openapi-product': ['/openapi.json', 'product'], 'swagger-product': ['/swagger.json', 'product'],
+        'api-docs-product': ['/api-docs', 'product'], 'v3-api-docs-product': ['/v3/api-docs', 'product'],
+        'v2-api-docs-product': ['/v2/api-docs', 'product'], 'product-root': ['', 'product'],
+        'paginated-bad-param': ['/paginated/items', 'product', { category: '4044', soldByWmt: 'maybe', count: '9999' }],
+        'paginated-options': ['/paginated/items', 'product', {}, 'OPTIONS'],
+        'root-openapi': ['/api-proxy/service/affil/product/v2/openapi.json', 'root'],
+        'root-docs': ['/api-proxy/service/affil/product/v2/api-docs', 'root'],
+      };
+      const name = query.get('probe');
+      const pr = probes[name];
+      if (!pr) return { probes: Object.keys(probes) };
+      const [path, base, ps = {}, method = 'GET'] = pr;
+      return { probe: name, ...(await adapter.source.rawCall(path, { method, base, params: ps })) };
+    }],
+
     // Walmart's category tree below a category (or the top level): names and ids.
     ['GET', '/api/:retailer/debug/taxonomy', async ({ params, query }) => {
       const adapter = requireRetailer(registry, params.retailer);

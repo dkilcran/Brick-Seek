@@ -147,6 +147,26 @@ export class WalmartLiveSource {
   }
 
   /** @param {{ cache?: boolean }} opts  big paged responses skip the cache */
+  /**
+   * Diagnostics: a signed call that returns the raw status, headers and body
+   * (never throws on an HTTP error), for asking Walmart's API what it supports.
+   * `base` 'product' is the usual product API; 'root' is the API host itself.
+   */
+  async rawCall(path, { method = 'GET', base = 'product', params = {} } = {}) {
+    const root = 'https://developer.api.walmart.com';
+    const url = new URL((base === 'root' ? root : BASE_URL) + path);
+    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+    await this.throttle();
+    const res = await this.fetch(url, {
+      method,
+      headers: { Accept: 'application/json', ...signWalmartRequest({ consumerId: this.consumerId, keyVersion: this.keyVersion, privateKey: this.privateKey }) },
+    });
+    const body = method === 'HEAD' ? '' : await res.text().catch(() => '');
+    const headers = {};
+    res.headers?.forEach?.((v, k) => { if (/allow|content-type|link|x-|access-control/i.test(k)) headers[k] = v; });
+    return { url: url.toString().replace(/publisherId=[^&]+/, 'publisherId=…'), status: res.status, headers, body: body.slice(0, 3000) };
+  }
+
   async request(path, params = {}, { cache = true } = {}) {
     const url = new URL(BASE_URL + path);
     for (const [k, v] of Object.entries(params)) {
