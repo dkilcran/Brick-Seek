@@ -500,6 +500,15 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
         'root-docs': ['/api-proxy/service/affil/product/v2/api-docs', 'root'],
       };
       const name = query.get('probe');
+      // probe=param&param=<name>&path=paginated|search|items: send a deliberately wrong value
+      // for one parameter; a typed parameter Walmart knows answers with a conversion error.
+      if (name === 'param') {
+        const param = query.get('param') ?? '';
+        if (!/^[a-zA-Z_.]{1,30}$/.test(param)) throw new HttpError(400, 'param should be a parameter name');
+        const path = { search: '/search', items: '/items' }[query.get('path')] ?? '/paginated/items';
+        const base = path === '/search' ? { query: 'lamp' } : path === '/items' ? { ids: '24016954' } : { category: '4044', soldByWmt: 'true' };
+        return { probe: name, param, ...(await adapter.source.rawCall(path, { params: { ...base, [param]: 'zz!' } })) };
+      }
       const pr = probes[name];
       if (!pr) return { probes: Object.keys(probes) };
       const [path, base, ps = {}, method = 'GET'] = pr;
