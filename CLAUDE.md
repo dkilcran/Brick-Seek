@@ -25,9 +25,12 @@
   (`special_offers:Clearance|Rollback|Reduced Price`, `retailer_type:Walmart`,
   `fulfillment_method:In-store`), 25 per page, paged with `start`, which must be
   under 1,000 (so at most 1,000 results per search). `facet.range=price:[lo TO hi]`
-  works with whole dollars only. It ignores `storeId` and `categoryId`; the query
-  text drives results (department names fail for e.g. "auto & tires"). Builds
-  the daily tier lists; the store lookup confirms each item.
+  works with whole dollars only. It ignores `storeId`. `categoryId` (taxonomy id,
+  subcategories like `4044_90548` too) does filter, together with the facets
+  ("lamp" in-store: 207; with Home > Appliances: 0). A query is still required
+  and drives results erratically ("home" in Home in-store: 14,725; "a": 6;
+  "with": 63); there is no match-everything query. Builds the daily tier
+  lists; the store lookup confirms each item.
 - Synchronous SQLite blocks the whole server: anything a page calls must stay
   fast at production size (800k+ current prices). Time new queries on a
   realistic test database before pushing; a 28s query got the site restarted.
@@ -42,12 +45,22 @@
 - **Walmart's own online price**: `/search` with `retailer_type:Walmart` returns
   Walmart-sold online prices; `/items` without `storeId` only when its seller
   is Walmart (else it's a marketplace offer). Store prices above it aren't deals.
+- **Finding hidden parameters**: Walmart's API has no OpenAPI/Swagger file; it
+  ignores unknown parameters but rejects a wrong value for a known typed one,
+  naming it (`/api/walmart/debug/describe?probe=param&param=<name>`). Feed:
+  `soldByWmt`, `available` (booleans), `count`, `lastDoc`, `remainingHits`;
+  no sort, price or date filters. The docs app's `/feeds/*`, `/clearance` and
+  `/specialbuy` endpoints answer "No endpoint" for our account.
 - **Bulk feeds** (`/paginated/items?category=&specialOffer=clearance|rollback|reduced`)
   are ~99% marketplace unless `soldByWmt=true`, which makes Walmart drop them
   (Home Clearance: 12,000+ listings -> 125). 200 items per page, `nextPage` to
   continue; rate-limited harder than other calls (wait ~60s on 429). They don't
   say whether an item is in stores; a lookup does (~73% of deal-feed items are
-  online only).
+  online only). Ordered by item id; `lastDoc=<id>` starts after an id (newer
+  listings have higher ids). Without a deal filter they're huge (Home, sold by
+  Walmart: 6.65M; `available=true`: 2.5M, ~10% in stores), but `brand=` with a
+  Walmart store brand (Mainstays, Great Value, Hyper Tough, Ozark Trail) is
+  small and ~95% in stores.
 - **Affiliate links**: Walmart's program runs on Impact. `productTrackingUrl`
   is `goto.walmart.com/c/{publisherId}/568844/9383?veh=aff&sourceid=imp_000011112222333344&u={item url}`
   (`|PUBID|` when no publisherId is sent); `walmartProductUrl` builds it.
