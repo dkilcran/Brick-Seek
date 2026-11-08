@@ -450,7 +450,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       if (!adapter.source?.request) throw new HttpError(501, 'Live mode only');
       const p = {};
       for (const k of ['category', 'specialOffer', 'storeId', 'count', 'query', 'categoryId', 'start', 'numItems', 'soldByWmt', 'available', 'brand',
-        'facet', 'facet.filter', 'facet.range', 'responseGroup', 'sort', 'order']) {
+        'facet', 'facet.filter', 'facet.range', 'responseGroup', 'sort', 'order', 'maxId', 'minId', 'lastDoc', 'minPrice', 'maxPrice']) {
         // Allows facet.range values like "price:[0 TO 5]".
         const values = query.getAll(k).filter((v) => /^[\w .:&'\[\]-]{1,60}$/.test(v));
         if (values.length) p[k] = values.length === 1 ? values[0] : values;
@@ -465,12 +465,41 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
         stock: count((i) => i.stock ?? '?'),
         clearanceFlag: count((i) => String(i.clearance)),
         sample: items.slice(0, 5).map((i) => ({ itemId: i.itemId, name: i.name?.slice(0, 50), seller: i.sellerInfo ?? null, salePrice: i.salePrice, stock: i.stock, clearance: i.clearance, strikeThroughPrice: i.strikeThroughPrice ?? null })),
+        // With fields=1: which fields the items carry, values of the ones that might
+        // tell in-store items apart, the next page's parameters, and the item id range.
+        ...(query.get('fields') === '1' ? {
+          fields: items.reduce((m, i) => { for (const k of Object.keys(i)) m[k] = (m[k] ?? 0) + 1; return m; }, {}),
+          values: Object.fromEntries(['offerType', 'shipToStore', 'freeShipToStore', 'availableOnline', 'marketplace', 'isTwoDayShippingEligible', 'brandName']
+            .map((f) => [f, count((i) => String(i[f]))])),
+          nextPageParams: data?.nextPage ? Object.fromEntries(new URL(data.nextPage, 'https://x.invalid').searchParams) : null,
+          itemIds: items.length ? { first: items[0].itemId, last: items.at(-1).itemId, min: Math.min(...items.map((i) => Number(i.itemId))), max: Math.max(...items.map((i) => Number(i.itemId))) } : null,
+        } : {}),
         // Search facets (when facet=on): name and its top values with counts.
         facets: (data?.facets ?? []).map((f) => ({
           name: f.name, displayName: f.displayName,
           values: (f.facetValues ?? []).slice(0, 12).map((v) => `${v.name} (${v.count})`),
         })),
       };
+    }],
+
+    // Walmart's category tree below a category (or the top level): names and ids.
+    ['GET', '/api/:retailer/debug/taxonomy', async ({ params, query }) => {
+      const adapter = requireRetailer(registry, params.retailer);
+      if (!adapter.source?.taxonomy) throw new HttpError(501, 'Live mode only');
+      const id = query.get('category');
+      const find = (list) => {
+        for (const c of list ?? []) {
+          if (c.id === id) return c;
+          const hit = find(c.children);
+          if (hit) return hit;
+        }
+        return null;
+      };
+      const all = await adapter.source.taxonomy();
+      const node = id ? find(all) : { name: 'All', children: all };
+      if (!node) throw new HttpError(404, 'No such category');
+      const count = (c) => 1 + (c.children ?? []).reduce((n, x) => n + count(x), 0);
+      return { id: node.id ?? null, name: node.name, children: (node.children ?? []).map((c) => ({ id: c.id, name: c.name, subcategories: count(c) - 1 })) };
     }],
 
     // Is discovery worth it? Finds per day and per department/page, new vs already
