@@ -422,7 +422,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const pages = (name, d) => clampInt(query.get(name), d, 1, 200);
       const opts = {
         storeId, until, dealPages: pages('dealPages', 60), everythingPages: pages('everythingPages', 25),
-        parts: (query.get('parts') ?? 'deals,everything').split(',').filter((x) => ['deals', 'everything'].includes(x)),
+        parts: (query.get('parts') ?? 'deals,everything').split(',').filter((x) => ['deals', 'everything', 'tier3sources'].includes(x)),
         lookups: query.get('lookups') !== '0',
       };
       if (at && !Number.isNaN(Date.parse(at))) scheduled = adapter.feedMeasure.schedule({ ...opts, at: new Date(at).toISOString() });

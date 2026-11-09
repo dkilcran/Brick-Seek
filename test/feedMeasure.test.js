@@ -93,3 +93,33 @@ test('a size-only measurement reads the everything feeds without store lookups',
   assert.equal(s.deals.feeds.length, 0);
   assert.deepEqual([s.tier3.feeds[0].complete, s.tier3.items, s.tier3.alsoInTier3], [true, 2, 1]);
 });
+
+test('Tier 3 sources: subcategory searches and store-brand feeds vs Tier 3', async () => {
+  const { db, tiers, source } = setup(); // tier 3 has item '7'
+  source.taxonomy = async () => [{ name: 'Toys', id: '4171', children: [
+    { name: 'Dolls', id: '4171_1' }, { name: 'Shop by Brand', id: '4171_9' },
+  ] }];
+  const searches = [];
+  source.request = async (path, q) => {
+    if (path === '/search') {
+      searches.push(q);
+      return { totalResults: 40, items: [{ itemId: 7 }, { itemId: 70 }, { itemId: 71, offerType: 'ONLINE_ONLY' }, { itemId: 72 }] };
+    }
+    if (q.brand === 'Mainstays') {
+      return { items: [{ itemId: 7, categoryPath: 'Home Page/Toys/Dolls' }, { itemId: 80, categoryPath: 'Home Page/Toys/Games' }, { itemId: 81, categoryPath: 'Home Page/Clothing/Kids' }] };
+    }
+    return { items: [] };
+  };
+  source.storeLookup = async (ids) => ({ found: ids.map((id) => ({ itemId: id, isWalmart: true })), missing: [], onlineOnly: [] });
+  const m = new FeedMeasure({ source, db, tiers, loadConfig: () => ({ config: { departments: ['Toys'] } }), rateLimitWaitMs: 1 });
+  m.schedule({ parts: ['tier3sources'] });
+  await new Promise((r) => setTimeout(r, 5));
+  while (m.running) await new Promise((r) => setTimeout(r, 5));
+  const s = m.status();
+  assert.equal(s.phase, 'done', s.error);
+  assert.deepEqual(searches.map((q) => [q.query, q.categoryId]), [['Dolls', '4171_1']], 'shop pages are skipped');
+  assert.deepEqual(s.subcategories[0], { department: 'Toys', subcategory: 'Dolls', id: '4171_1', total: 40, page1: 3, page1NotInTier3: 2, estimatedNew: 27, callsToReadAll: 2 });
+  const mainstays = s.brands.find((b) => b.brand === 'Mainstays');
+  assert.deepEqual([mainstays.items, mainstays.inDepartments, mainstays.notInTier3], [3, 2, 1]);
+  assert.equal(s.summary.storeBrands.estimatedNewInStore, 1);
+});

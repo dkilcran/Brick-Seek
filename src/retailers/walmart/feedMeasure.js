@@ -10,6 +10,15 @@
 // restart re-runs an unfinished measurement).
 
 const DEAL_OFFERS = ['clearance', 'rollback', 'reduced'];
+// Walmart's own store brands, for the Tier 3 sources measurement.
+export const STORE_BRANDS = [
+  'Mainstays', 'Better Homes & Gardens', 'Great Value', 'Hyper Tough', 'Ozark Trail', 'onn.', 'Pen+Gear', 'Holiday Time',
+  'Way To Celebrate', 'Your Zone', 'The Pioneer Woman', 'Beautiful', 'Gap Home', 'Allswell', 'Thyme & Table', 'Hart', 'Blackweb',
+  'Marketside', "Sam's Choice", 'bettergoods', 'Freshness Guaranteed', 'Play Day', 'Kid Connection', 'Adventure Force', 'My Life As',
+  'Athletic Works', 'EverStart', 'SuperTech', 'Auto Drive', 'Expert Grill', 'Backyard Grill', 'Spark. Create. Imagine.',
+];
+// Taxonomy children that are shop pages rather than product subcategories.
+const NOT_SUBCATEGORY = /shop by|featured|endeca|sweepstakes|ideas|lookbook|inspiration|manual|values|personalized|gift|deals|new arrivals|trending|savings|clearance|rollback/i;
 const BATCH = 20;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -113,7 +122,7 @@ export class FeedMeasure {
         if (/^walmart(\.com)?$/i.test(seller)) feed.walmart += 1;
         else if (seller || item.marketplace === true) { feed.otherSeller += 1; continue; }
         else feed.unnamed += 1;
-        onItem(String(item.itemId));
+        onItem(String(item.itemId), item);
       }
       query = data?.nextPage ? Object.fromEntries(new URL(data.nextPage, 'https://x.invalid').searchParams) : null;
       if (query) delete query.publisherId;
@@ -150,6 +159,7 @@ export class FeedMeasure {
   async run({ storeId, dealPages = 15, everythingPages = 10, parts = ['deals', 'everything'], lookups = true }) {
     const { config } = this.loadConfig();
     const departments = config?.departments ?? [];
+    if (parts.includes('tier3sources')) return this.tier3Sources({ storeId, departments });
     this.state = {
       phase: parts.includes('deals') ? 'deal feeds' : 'everything feeds', startedAt: new Date().toISOString(), storeId, dealPages, everythingPages, parts, lookups,
       until: Number.isFinite(this.deadline) ? new Date(this.deadline).toISOString() : null,
@@ -231,5 +241,89 @@ export class FeedMeasure {
       sampleMissed: everything.confirmed.filter((id) => !t3.has(id)).slice(0, 15),
     });
     this.state = { ...this.state, phase: 'done', finishedAt: new Date().toISOString(), lists };
+  }
+
+  /**
+   * Which sources would add in-store items to Tier 3:
+   *  - subcategory searches: each department's subcategories searched by their
+   *    own name within that subcategory, in-store and sold by Walmart (page 1
+   *    of each: total results and how many items Tier 3 lacks);
+   *  - store-brand feeds: Walmart's own brands (sold by Walmart, available),
+   *    kept to the configured departments, a sample checked at the store.
+   */
+  async tier3Sources({ storeId, departments }) {
+    const t3 = new Set(this.tiers.itemIds(3));
+    this.state = {
+      phase: 'subcategory searches', startedAt: new Date().toISOString(), storeId, parts: ['tier3sources'],
+      until: Number.isFinite(this.deadline) ? new Date(this.deadline).toISOString() : null,
+      calls: 0, rateLimitWaits: 0, tier3: t3.size, subcategories: [], brands: [],
+    };
+    const tree = await this.call(() => this.source.taxonomy());
+    const filters = ['retailer_type:Walmart', 'fulfillment_method:In-store'];
+    // 1. Subcategory searches (national and store brands alike).
+    for (const dept of tree.filter((c) => departments.includes(c.name))) {
+      for (const subcat of (dept.children ?? []).filter((c) => !NOT_SUBCATEGORY.test(c.name))) {
+        if (this.late()) break;
+        const row = { department: dept.name, subcategory: subcat.name, id: subcat.id };
+        this.state.subcategories.push(row);
+        try {
+          const data = await this.call(() => this.source.request('/search', {
+            query: subcat.name, categoryId: subcat.id, numItems: 25, facet: 'on', 'facet.filter': filters,
+          }, { cache: false }));
+          const ids = (data?.items ?? []).filter((i) => i?.itemId && i.offerType !== 'ONLINE_ONLY').map((i) => String(i.itemId));
+          row.total = Number(data?.totalResults) || 0;
+          row.page1 = ids.length;
+          row.page1NotInTier3 = ids.filter((id) => !t3.has(id)).length;
+          // Estimated for everything reachable (searches stop at 1,000; more needs price bands).
+          const reachable = Math.min(row.total, 1000);
+          row.estimatedNew = ids.length ? Math.round(reachable * row.page1NotInTier3 / ids.length) : 0;
+          row.callsToReadAll = Math.ceil(reachable / 25);
+        } catch (err) {
+          row.error = err.message.slice(0, 160);
+        }
+        if (this.state.subcategories.length % 10 === 0) this.save();
+      }
+    }
+    this.save();
+    // 2. Store-brand feeds.
+    this.state.phase = 'store-brand feeds';
+    const keep = new Set(departments);
+    const brandItems = new Map(); // id -> brand
+    for (const brand of STORE_BRANDS) {
+      const feed = { brand, pages: 0, items: 0, walmart: 0, otherSeller: 0, unnamed: 0, inDepartments: 0, notInTier3: 0, complete: false, capped: false };
+      this.state.brands.push(feed);
+      await this.readFeed(feed, { brand, soldByWmt: 'true', available: 'true' }, 60, (id, item) => {
+        const parts = String(item.categoryPath ?? '').split('/').map((x) => x.trim()).filter((x) => x && !/^home ?page$/i.test(x));
+        if (!keep.has(parts[0])) return;
+        feed.inDepartments += 1;
+        if (!t3.has(id)) feed.notInTier3 += 1;
+        brandItems.set(id, brand);
+      });
+    }
+    this.state.phase = 'store-brand lookups';
+    const notInTier3 = [...brandItems.keys()].filter((id) => !t3.has(id));
+    const { out, confirmed } = await this.checkAtStore(notInTier3, storeId, 100);
+    const sum = (rows, k) => rows.reduce((n, r) => n + (r[k] ?? 0), 0);
+    this.state = {
+      ...this.state,
+      phase: 'done',
+      finishedAt: new Date().toISOString(),
+      summary: {
+        subcategorySearches: {
+          subcategories: this.state.subcategories.length,
+          totalInStoreResults: sum(this.state.subcategories, 'total'),
+          estimatedNewItems: sum(this.state.subcategories, 'estimatedNew'),
+          callsToReadAll: sum(this.state.subcategories, 'callsToReadAll'),
+          over1000: this.state.subcategories.filter((r) => r.total > 1000).length,
+        },
+        storeBrands: {
+          itemsInDepartments: brandItems.size,
+          notInTier3: notInTier3.length,
+          lookups: out,
+          estimatedNewInStore: Math.round(out.walmartInStore * out.scale),
+          sampleNew: confirmed.slice(0, 10),
+        },
+      },
+    };
   }
 }
