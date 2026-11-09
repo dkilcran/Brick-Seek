@@ -18,7 +18,7 @@ export const STORE_BRANDS = [
   'Athletic Works', 'EverStart', 'SuperTech', 'Auto Drive', 'Expert Grill', 'Backyard Grill', 'Spark. Create. Imagine.',
 ];
 // Taxonomy children that are shop pages rather than product subcategories.
-const NOT_SUBCATEGORY = /shop by|featured|endeca|sweepstakes|ideas|lookbook|inspiration|manual|values|personalized|gift|deals|new arrivals|trending|savings|clearance|rollback/i;
+const NOT_SUBCATEGORY = /^shop |shop by|featured|endeca|sweepstakes|ideas|lookbook|inspiration|manual|values|personalized|gift|deals|new arrivals|trending|savings|clearance|rollback/i;
 const BATCH = 20;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
