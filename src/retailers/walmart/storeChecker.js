@@ -25,6 +25,7 @@
 // "lists" and "checks" always finish, even past endAt.
 // Progress is saved after every step, so a restart resumes where it left off.
 import { localParts, scheduleDayKey } from '../../lib/scanSchedule.js';
+import { isShelfListing } from './tierLists.js';
 
 const FEED_OFFERS = ['clearance', 'rollback', 'reduced']; // specialOffer values of Walmart's deal feeds
 const MAX_FEED_PAGES = 600; // safety cap per night over all feeds (about 60 pages measured)
@@ -298,9 +299,9 @@ export class StoreChecker {
    * One feed page of the nightly new listings: each department's feed (sold by
    * Walmart) after the newest item id seen, added to the tier 3 list (and to a
    * rebuild in progress). Walmart numbers new listings above existing ones,
-   * but files unpriced listings (e.g. video episodes) above those, so a page
-   * with no priced item ends the department and the next night starts after
-   * the newest priced one. The first time, it starts near the newest listings
+   * but files other listings (unpriced items, video episodes) above those, so
+   * a page with no shelf listing (see isShelfListing) ends the department and
+   * the next night starts after the newest one. The first time, it starts near the newest listings
    * (see seekNewest) instead of reading years of older ones.
    */
   async newItemsStep(state, config) {
@@ -315,7 +316,7 @@ export class StoreChecker {
       return true;
     }
     const job = f.jobs[f.index];
-    const cursorKey = `newItems:cursor:${this.retailer}:${job.department}`;
+    const cursorKey = `newItems:after:${this.retailer}:${job.department}`;
     const cursor = this.db.getMeta(cursorKey);
     if (!cursor) {
       const newestListed = f.seek ? null : this.tiers.maxTier3Id(job.department);
@@ -333,8 +334,8 @@ export class StoreChecker {
     const building = this.db.getMeta(`tier3:building:${this.retailer}`);
     const got = this.tiers.addFeedItems(building ? [current, building] : [current], { tier: 3, department: job.department }, page.items,
       { toProduct: this.toProduct, keep: this.keepProduct(config) });
-    if (got.lastPricedId && Number(got.lastPricedId) > Number(cursor)) this.db.setMeta(cursorKey, got.lastPricedId);
-    const done = !page.next || got.lastPricedId === null || f.jobPages + 1 >= NEW_ITEM_PAGES;
+    if (got.lastListingId && Number(got.lastListingId) > Number(cursor)) this.db.setMeta(cursorKey, got.lastListingId);
+    const done = !page.next || got.lastListingId === null || f.jobPages + 1 >= NEW_ITEM_PAGES;
     this.state = {
       ...state,
       newItems: {
@@ -346,15 +347,14 @@ export class StoreChecker {
   }
 
   /**
-   * One probe of where a department's newest priced listing is: `lo` is an id
-   * with priced listings after it, `hi` one without (null until found).
+   * One probe of where a department's newest shelf listing is: `lo` is an id
+   * with shelf listings after it, `hi` one without (null until found).
    * Steps up (doubling) until past the newest, then halves the gap.
    */
   async seekNewest(job, { lo, hi, step }) {
     const probe = hi === null ? lo + step : Math.floor((lo + hi) / 2);
     const page = await this.feedPage({ category: job.category, soldByWmt: 'true', lastDoc: String(probe) });
-    const priced = page.items.some((item) => item.salePrice > 0);
-    if (priced) return { lo: probe, hi, step: hi === null ? step * 2 : step };
+    if (page.items.some(isShelfListing)) return { lo: probe, hi, step: hi === null ? step * 2 : step };
     return { lo, hi: probe, step };
   }
 

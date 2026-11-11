@@ -344,15 +344,15 @@ test('the tier 3 rebuild reads the store-brand feeds and keeps items already see
   day.tiers.markBuilt(3, 'old');
   day.db.recordStorePrices('walmart', 'A', [{ itemId: 'shelf1', price: 4, seller: 'Walmart.com', inStock: true }], '2026-11-01');
   const requests = withFeeds(day, (q) => ({
-    'Mainstays:': { items: [{ itemId: 'b1', name: 'Mainstays lamp', salePrice: 9 }, { itemId: 'ep1', name: 'Episode' }], nextPage: '/v1/paginated/items?category=4171&brand=Mainstays&soldByWmt=true&lastDoc=ep1&publisherId=1' },
-    'Mainstays:ep1': { items: [{ itemId: 'b2', name: 'Mainstays rug', salePrice: 20 }, { itemId: 'mk', name: 'Seller', salePrice: 1, sellerInfo: 'Toy Co' }] },
+    'Mainstays:': { items: [{ itemId: 701, name: 'Mainstays lamp', salePrice: 9 }, { itemId: 703, name: 'Episode' }], nextPage: '/v1/paginated/items?category=4171&brand=Mainstays&soldByWmt=true&lastDoc=703&publisherId=1' },
+    'Mainstays:703': { items: [{ itemId: 702, name: 'Mainstays rug', salePrice: 20 }, { itemId: 704, name: 'Seller', salePrice: 1, sellerInfo: 'Toy Co' }] },
   })[`${q.brand}:${q.lastDoc ?? ''}`]);
   await day.runUntilIdle();
-  assert.deepEqual(requests.map((q) => [q.category, q.brand, q.lastDoc ?? null]), [['4171', 'Mainstays', null], ['4171', 'Mainstays', 'ep1']]);
+  assert.deepEqual(requests.map((q) => [q.category, q.brand, q.lastDoc ?? null]), [['4171', 'Mainstays', null], ['4171', 'Mainstays', '703']]);
   assert.equal(requests[1].publisherId, undefined);
   const ids = day.tiers.itemIds(3);
-  for (const id of ['b1', 'b2', 'shelf1', 'x1']) assert.ok(ids.includes(id), id);
-  for (const id of ['ep1', 'mk', 'gone1']) assert.ok(!ids.includes(id), `${id} left out`);
+  for (const id of ['701', '702', 'shelf1', 'x1']) assert.ok(ids.includes(id), id);
+  for (const id of ['703', '704', 'gone1']) assert.ok(!ids.includes(id), `${id} left out`);
   const { lastBuild } = day.checker.status().tier3;
   assert.equal(lastBuild.carriedOver, 1);
   assert.deepEqual(lastBuild.brandFeeds, { feedsDone: 1, feeds: 1, pages: 2, items: 4, added: 2, otherSeller: 1, otherDepartments: 0 });
@@ -373,8 +373,11 @@ test('each night, the newest listings join tier 3; the first night finds where t
     { itemId: 5000000, name: 'Older listing the searches never found', salePrice: 3 },
     { itemId: 150000206, name: 'New lamp', salePrice: 9 },
     { itemId: 150000207, name: 'New rug', salePrice: 20 },
-    // Past the newest real listings: unpriced ones (video episodes) to the end.
-    ...Array.from({ length: 5 }, (_, i) => ({ itemId: 9000000000 + i, name: `Episode ${i}` })),
+    // Past the newest real listings, as in Walmart's Home feed: unpriced items,
+    // priced video episodes (ids ending 001-003, never available), a far-out id.
+    { itemId: 9000000000, name: 'Unpriced' },
+    ...[1, 2, 3].map((n) => ({ itemId: 40000000000 + n, name: `Episode ${n}`, salePrice: 1.99, stock: 'Not available' })),
+    { itemId: 190052277878, name: 'Bedding with a 12-digit id', salePrice: 125.8 },
   ];
   const requests = withFeeds(day, feedOver(listings));
   await day.runUntilIdle();
@@ -383,7 +386,7 @@ test('each night, the newest listings join tier 3; the first night finds where t
   const ids = day.tiers.itemIds(3);
   assert.ok(ids.includes('150000206') && ids.includes('150000207'));
   assert.ok(!ids.includes('5000000'), 'older listings are skipped');
-  assert.equal(day.db.getMeta('newItems:cursor:walmart:Toys'), '150000207');
+  assert.equal(day.db.getMeta('newItems:after:walmart:Toys'), '150000207');
   const st = day.checker.status();
   assert.equal(st.newItems.added, 2);
   assert.ok(requests.length <= 10, `${requests.length} feed pages`);
@@ -396,9 +399,9 @@ test('each night, the newest listings join tier 3; the first night finds where t
   await day.runUntilIdle();
   day.setClock('2026-11-04T11:00:00Z');
   await day.runUntilIdle();
-  assert.deepEqual(requests.slice(before).map((q) => q.lastDoc), ['150000207', '9000000000'], 'until a page with no priced listing');
+  assert.deepEqual(requests.slice(before).map((q) => q.lastDoc), ['150000207', '9000000000'], 'until a page with no shelf listing');
   assert.ok(day.tiers.itemIds(3).includes('150000300'));
-  assert.equal(day.db.getMeta('newItems:cursor:walmart:Toys'), '150000300');
+  assert.equal(day.db.getMeta('newItems:after:walmart:Toys'), '150000300');
 });
 
 test('on rebuild day the new listings also go into the rebuild', async () => {
@@ -411,4 +414,13 @@ test('on rebuild day the new listings also go into the rebuild', async () => {
   await day.runUntilIdle();
   assert.equal(day.tiers.builtRun(3), '2026-11-02:t3', 'rebuilt');
   assert.ok(day.tiers.itemIds(3).includes('206'), 'kept although no store has checked it yet');
+});
+
+test('shelf listings: priced, a normal id, not a video episode', async () => {
+  const { isShelfListing } = await import('../src/retailers/walmart/tierLists.js');
+  assert.equal(isShelfListing({ itemId: 21400510966, salePrice: 692.99, stock: 'Available' }), true);
+  assert.equal(isShelfListing({ itemId: 21400510001, salePrice: 5, stock: 'Available' }), true, 'an available item ending 001');
+  assert.equal(isShelfListing({ itemId: 40556741003, salePrice: 1.99, stock: 'Not available' }), false, 'episode');
+  assert.equal(isShelfListing({ itemId: 22004750001, stock: 'Not available' }), false, 'unpriced');
+  assert.equal(isShelfListing({ itemId: 190052277878, salePrice: 125.8 }), false, '12-digit id');
 });

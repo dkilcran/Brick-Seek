@@ -522,7 +522,7 @@ export class StorePrices {
       DROP TABLE IF EXISTS discovery_finds;
       DROP TABLE IF EXISTS saved_pools;
       DROP TABLE IF EXISTS item_checks;
-      DELETE FROM store_scan_meta WHERE key LIKE 'markedDown:%' OR key LIKE 'feedMeasure:%'
+      DELETE FROM store_scan_meta WHERE key LIKE 'markedDown:%' OR key LIKE 'feedMeasure:%' OR key LIKE 'newItems:cursor:%'
         OR key IN ('startedAt', 'testedSettings', 'lastRunSummary', 'sampleResult', 'inspectResults', 'inspectDone', 'sweepDone');
     `);
   }

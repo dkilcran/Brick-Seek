@@ -15,6 +15,18 @@ const FIRST_BANDS = [[0, 5], [5, 10], [10, 20], [20, 50], [50, 100], [100, 200],
 /** Taxonomy children that are shop pages rather than product subcategories. */
 const NOT_SUBCATEGORY = /^shop |shop by|featured|endeca|sweepstakes|ideas|lookbook|inspiration|manual|values|personalized|gift|deals|new arrivals|trending|savings|clearance|rollback/i;
 
+/**
+ * A feed item that can be a shelf item. Walmart's department feeds also list
+ * unpriced items, priced digital video episodes filed under Home decor (ids
+ * ending 001-003, never available) and a few far-out 12-digit ids.
+ */
+export function isShelfListing(item) {
+  const id = Number(item?.itemId);
+  if (!(item?.salePrice > 0) || !(id < 1e11)) return false;
+  const episode = id % 1000 >= 1 && id % 1000 <= 3 && /not available/i.test(item.stock ?? '');
+  return !episode;
+}
+
 /** 'rollback' or 'reduced' from a job's special_offers filter (null for other filters). */
 function offerOf(filters) {
   const f = filters.find((x) => x.startsWith('special_offers:'));
@@ -253,10 +265,10 @@ export class TierStore {
   /**
    * Add one page of a Walmart feed (/paginated/items with soldByWmt) to a run's
    * lists. Deal feeds (job.offer): Clearance to tier 1, Rollback / Reduced
-   * Price to tier 2. Tier 3 feeds (job.tier 3): items with a price, added to
-   * every run given (unpriced listings such as video episodes are left out).
-   * Items another seller sells, or outside the kept departments, are skipped.
-   * Counts how many were already listed, and the highest priced item id.
+   * Price to tier 2. Tier 3 feeds (job.tier 3): shelf listings only (see
+   * isShelfListing), added to every run given. Items another seller sells, or
+   * outside the kept departments, are skipped. Counts how many were already
+   * listed, and returns the highest shelf listing's id.
    * @param {string|string[]} runs
    * @param {{ offer?: 'clearance'|'rollback'|'reduced', tier?: 3, department: string }} job
    * @param {(item) => object} toProduct  the source's item -> product
@@ -266,7 +278,7 @@ export class TierStore {
     const targets = [].concat(runs);
     const run = targets[0];
     const has = this.db.prepare('SELECT 1 FROM tier_items WHERE retailer = ? AND tier = ? AND run = ? AND item_id = ?');
-    const out = { items: 0, otherSeller: 0, added: 0, alreadyListed: 0, skipped: 0, unpriced: 0, lastPricedId: null };
+    const out = { items: 0, otherSeller: 0, added: 0, alreadyListed: 0, skipped: 0, notListings: 0, lastListingId: null };
     this.db.exec('BEGIN');
     try {
       for (const item of items ?? []) {
@@ -275,8 +287,9 @@ export class TierStore {
         const seller = String(item.sellerInfo ?? '').trim();
         if ((seller && !/^walmart(\.com)?$/i.test(seller)) || item.marketplace === true) { out.otherSeller += 1; continue; }
         const p = toProduct(item);
-        if (tier === 3 && !(p.price > 0)) { out.unpriced += 1; continue; }
-        if (p.price > 0 && (out.lastPricedId === null || Number(p.id) > Number(out.lastPricedId))) out.lastPricedId = p.id;
+        const listing = isShelfListing(item);
+        if (tier === 3 && !listing) { out.notListings += 1; continue; }
+        if (listing && (out.lastListingId === null || Number(p.id) > Number(out.lastListingId))) out.lastListingId = p.id;
         if (!keep(p)) { out.skipped += 1; continue; }
         if (has.get(this.retailer, tier, run, p.id)) out.alreadyListed += 1;
         else out.added += 1;

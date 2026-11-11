@@ -70,7 +70,13 @@
   listings have higher ids). Without a deal filter they're huge (Home, sold by
   Walmart: 6.65M; `available=true`: 2.5M, ~10% in stores), but `brand=` with a
   Walmart store brand (Mainstays, Great Value, Hyper Tough, Ozark Trail) is
-  small and ~95% in stores.
+  small and ~95% in stores. `brand=` is loose (other brands come along).
+- **Top of a department feed** (Home, Nov 11): real listings end around id
+  21.4B; above them come unpriced items, priced digital video episodes filed
+  as Home decor (ids ending 001-003, "Not available", unknown to `/items`)
+  up to ~55B, and a few 12-digit ids (190052277878). Walmart-sold Home
+  listings run ~200 per 1-9M ids. `remainingHits` is the feed's total, not
+  what's left. `isShelfListing` filters these.
 - **Affiliate links**: Walmart's program runs on Impact. `productTrackingUrl`
   is `goto.walmart.com/c/{publisherId}/568844/9383?veh=aff&sourceid=imp_000011112222333344&u={item url}`
   (`|PUBID|` when no publisherId is sent); `walmartProductUrl` builds it.
