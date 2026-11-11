@@ -3,6 +3,7 @@
 import { isValidZip } from './lib/geo.js';
 import { summarizeAvailability, isSoldByRetailer } from './retailers/RetailerAdapter.js';
 import { filterCards, sortCards } from './lib/allDeals.js';
+import { isShelfListing } from './retailers/walmart/tierLists.js';
 import { DEFAULT_SCAN_CONFIG_PATH, describeScanConfig, loadScanConfig } from './lib/scanConfig.js';
 
 export class HttpError extends Error {
@@ -192,6 +193,9 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const count = (f) => items.reduce((m, i) => ({ ...m, [f(i)]: (m[f(i)] ?? 0) + 1 }), {});
       return {
         path, params: p, items: items.length, nextPage: Boolean(data?.nextPage), totalResults: data?.totalResults ?? null,
+        // Items that can be shelf items (see isShelfListing), and the highest such id.
+        shelfListings: items.filter(isShelfListing).length,
+        lastShelfListing: items.filter(isShelfListing).map((i) => i.itemId).sort((a, b) => b - a)[0] ?? null,
         sellers: count((i) => (/^walmart/i.test(i.sellerInfo ?? '') ? 'Walmart' : i.sellerInfo ? 'other' : i.marketplace ? 'marketplace' : 'unnamed')),
         stock: count((i) => i.stock ?? '?'),
         clearanceFlag: count((i) => String(i.clearance)),
