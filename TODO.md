@@ -1,41 +1,22 @@
 # To do
 
-Ideas and fixes waiting to be worked on.
+Everything from the Nov 2 list is done (deal labels, Markdown measurement,
+product-page store list with Check store / Check all stores, department
+filter, disk limits, affiliate links).
 
-**Done Nov 3:** 1 and 5 answered in chat; 4, 6 and 7 built and live.
-**Done Nov 4:** 2 and 3 (deal labels and markdown measurement, see
-`config/README.md`); online-only items dropped from store results; affiliate
-links and disclosure built.
-**Waiting on the owner:** Walmart affiliate approval on Impact, then set
-`WALMART_PUBLISHER_ID` in Render to turn the tracking links and disclosure on.
+## Waiting on the owner
 
-## From the owner (Nov 2, 2026)
+- Walmart affiliate approval on Impact, then set `WALMART_PUBLISHER_ID` in
+  Render to turn on the tracking links and the disclosure.
 
-1. **Where does the Clearance tag come from?** Explain the source of the
-   Clearance label on deals and store prices.
-2. **A "Markdown" label** for items that Walmart hasn't already labeled
-   Clearance, Rollback or Reduced Price.
-3. **Measure markdowns accurately** by comparing against other stores AND a
-   was-price or MSRP. Some "Clearance near you" items have an unrealistic MSRP
-   (possibly a competitor's price) but a reasonable price that's the same at
-   every store, so they're probably not clearance.
-4. **Store list on the product page:**
-   - Don't show the online price for each store by default; it's an
-     ambiguous guess. Still show the online price somewhere on the page.
-   - A "Check store" link per store that looks up that store's data and
-     updates the price when it can.
-   - A "Check all stores" button that checks every store listed on the page
-     and updates the prices.
-5. **Affiliate program:** how to set up affiliate links so clicks through to
-   Walmart earn commission.
+## Open options (not started)
 
-## Found while checking the site (Nov 2, 2026)
-
-6. **Department filter:** about 1,800 of the 5,431 "Clearance near you" items
-   are in removed departments (Clothing 774, Beauty 271, Pets 204, Health and
-   Medicine 198, Baby 183, Personal Care 159), plus some Books and
-   Collectibles. Show only the departments in `config/store-scan.json`, and
-   skip the others in the Tier 3 store checks.
-7. **Disk space:** the database grew from 143 MB to 222 MB in two days. Check
-   that the Render disk has room for about 600–700 MB, the expected size once
-   14-day retention levels it off.
+- **ZIP as a store limiter** in the top bar (deal pages limited to stores near
+  it), noted Nov 5 as "at some point".
+- **Store-brand feeds for Tier 3** (Mainstays, Great Value, Hyper Tough, Ozark
+  Trail): ~28,000 more in-store items; deferred because national brands are
+  more useful to compare.
+- **New items each night** via the feeds' `lastDoc` (newer listings have
+  higher item ids), instead of waiting for Monday's Tier 3 rebuild.
+- **Store stock counts**: Walmart's API only says in stock or not; counts
+  need another source (e.g. Walmart Data Ventures, paid).

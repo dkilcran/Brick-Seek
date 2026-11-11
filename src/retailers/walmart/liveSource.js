@@ -1,30 +1,25 @@
-// Live data source backed by the Walmart I/O Affiliate API.
-// https://walmart.io/docs/affiliates/v1/introduction
-//
-// The public affiliate API exposes catalog data, online prices and a store
-// locator, but not per-store stock counts. Store-level results are returned
-// with status "unknown" and the online price so the UI stays consistent.
+// Walmart I/O Affiliate API client (https://walmart.io/docs/affiliates/v1/introduction).
+// What each call really returns is recorded in CLAUDE.md; in short:
+//   /search           finds items (25 per page, 1,000 per search), online price only
+//   /paginated/items  bulk feeds by department and deal tag (200 per page)
+//   /items            details for up to 20 item ids: Walmart.com's offer, or with
+//                     a storeId that store's price, stock and Clearance flag
+//   /stores, /taxonomy  the store locator and the category tree
 import { createSign } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { TtlCache } from '../../lib/cache.js';
-import { STOCK_STATUS } from '../RetailerAdapter.js';
 import { walmartProductUrl } from './identifiers.js';
 
 const BASE_URL = 'https://developer.api.walmart.com/api-proxy/service/affil/product/v2';
-const SPECIAL_OFFERS = ['clearance', 'rollback'];
+const LOOKUP_BATCH = 20; // most item ids Walmart accepts per lookup
 // Top-level taxonomy entries that are site sections, not product departments.
 const NON_PRODUCT_SECTIONS = /^(help|ideas|feature|gift registry|gifts & registry|services|photo center|shop by brand|new arrivals|savings|character shop|personalized gifts)$/i;
 
-// Bulk feeds usually leave sellerInfo out, so there a missing seller means
-// "unknown" (null) until the item is looked up. A single-item lookup names
-// third-party sellers, so there a missing seller means Walmart itself.
-export function isWalmartSeller(item, { fromLookup = true } = {}) {
+/** Walmart itself sells the item: it names itself, or names no seller on an item not flagged marketplace. */
+export function isWalmartSeller(item) {
   if (item.sellerInfo) return /^walmart(\.com)?$/i.test(String(item.sellerInfo).trim());
-  if (item.marketplace === true) return false;
-  return fromLookup ? true : null;
+  return item.marketplace !== true;
 }
-
-const LOOKUP_BATCH = 20; // most item ids Walmart accepts per lookup
 
 // categoryPath looks like "Home Page/Home/Rugs/Area Rugs"; the department is
 // the first segment after the "Home Page" root.
@@ -49,44 +44,16 @@ function specialOfferOf(item) {
   return null;
 }
 
-function onlineStock(stock) {
+/** Walmart's stock text ("Available", "Not available", ...) as true / false / null (unknown). */
+function inStock(stock) {
   if (!stock) return null;
   return /^available$/i.test(stock) ? true : /not available/i.test(stock) ? false : null;
 }
 
-// Raw Walmart fields per product, kept out of API responses; used by fieldSurvey().
-const RAW_FIELDS = new WeakMap();
-
-function scalarFields(item) {
-  const out = {};
-  for (const [k, v] of Object.entries(item)) {
-    if (k === 'bestMarketplacePrice' && v && typeof v === 'object') {
-      // Flatten this one: it describes the item's current best offer.
-      for (const [sk, sv] of Object.entries(v)) {
-        if (sv === null || ['string', 'number', 'boolean'].includes(typeof sv)) out[`${k}.${sk}`] = sv;
-      }
-      out[k] = '[object]';
-    } else if (v === null || ['string', 'number', 'boolean'].includes(typeof v)) {
-      out[k] = typeof v === 'string' && v.length > 120 ? `${v.slice(0, 120)}…` : v;
-    } else {
-      out[k] = Array.isArray(v) ? `[array ${v.length}]` : '[object]';
-    }
-  }
-  return out;
-}
-
-async function mapLimit(list, limit, fn) {
-  const out = [];
-  let i = 0;
-  const workers = Array.from({ length: Math.min(limit, list.length) }, async () => {
-    while (i < list.length) {
-      const idx = i++;
-      out[idx] = await fn(list[idx]);
-    }
-  });
-  await Promise.all(workers);
-  return out;
-}
+const wasPriceOf = (item) => {
+  const strike = Number(item.strikeThroughPrice);
+  return strike > (item.salePrice ?? 0) ? strike : null;
+};
 
 export function signWalmartRequest({ consumerId, keyVersion, privateKey, timestamp = Date.now() }) {
   const ts = String(timestamp);
@@ -101,12 +68,14 @@ export function signWalmartRequest({ consumerId, keyVersion, privateKey, timesta
 }
 
 export class WalmartLiveSource {
+  /**
+   * @param {object} opts
+   * @param {{ get(zip): object[]|null, set(zip, stores): void }} [opts.zipStoreCache]  saved store lists per ZIP
+   * @param {number} [opts.minIntervalMs]  spacing between calls; Walmart rate-limits the API
+   */
   constructor({
     consumerId, keyVersion = '1', privateKey, privateKeyPath, publisherId, fetchImpl = fetch,
-    poolPages = 3, poolRefreshMs = 24 * 60 * 60 * 1000, poolMaxItems = 20000, poolStore = null,
-    poolRefreshDue = null, zipStoreCache = null,
-    minIntervalMs = 2000, maxRetries = 3, retryPassDelayMs = 30000,
-    itemChecks = null,
+    zipStoreCache = null, minIntervalMs = 2000, maxRetries = 3,
   } = {}) {
     if (!consumerId) throw new Error('WALMART_CONSUMER_ID is required for live mode');
     this.consumerId = consumerId;
@@ -115,27 +84,10 @@ export class WalmartLiveSource {
     this.publisherId = publisherId;
     this.fetch = fetchImpl;
     this.cache = new TtlCache({ ttlMs: 10 * 60 * 1000 });
-    this.poolPages = poolPages;
-    this.poolRefreshMs = poolRefreshMs;
-    this.poolMaxItems = poolMaxItems;
-    this.pool = null; // { products, fetchedAt, stats }
-    /** @type {import('../../lib/poolStore.js').PoolStore|null} saved copy, so restarts don't refetch */
-    this.poolStore = poolStore;
-    this.triedSavedPool = false;
-    /** @type {(fetchedAt: number, now: Date) => boolean} when a saved pool needs refreshing; default: older than poolRefreshMs */
-    this.poolRefreshDue = poolRefreshDue ?? ((fetchedAt, now) => now.getTime() - fetchedAt >= this.poolRefreshMs);
-    this.poolRefresh = null;
-    /** @type {{ get(zip): object[]|null, set(zip, stores): void }|null} saved store lists per ZIP */
     this.zipStoreCache = zipStoreCache;
-    // Walmart rate-limits the affiliate API, so requests are spaced out.
     this.minIntervalMs = minIntervalMs;
     this.maxRetries = maxRetries;
-    this.retryPassDelayMs = retryPassDelayMs;
     this.nextSlot = 0;
-    /** @type {import('../../lib/itemChecks.js').ItemChecks|null} */
-    this.itemChecks = itemChecks;
-    this.checkVersion = 0; // bumps as lookups confirm sellers, to refresh ranking
-    this.checkStats = { looked: 0, walmart: 0, thirdParty: 0, notFound: 0, errors: 0, running: false, pending: 0 };
   }
 
   /** Wait for this request's turn: at most one request per minIntervalMs. */
@@ -146,27 +98,10 @@ export class WalmartLiveSource {
     if (slot > now) await new Promise((r) => setTimeout(r, slot - now));
   }
 
-  /** @param {{ cache?: boolean }} opts  big paged responses skip the cache */
   /**
-   * Diagnostics: a signed call that returns the raw status, headers and body
-   * (never throws on an HTTP error), for asking Walmart's API what it supports.
-   * `base` 'product' is the usual product API; 'root' is the API host itself.
+   * A signed GET. Array values are sent as repeated parameters. 404 gives null;
+   * other errors throw. Cached for 10 minutes unless `cache` is false.
    */
-  async rawCall(path, { method = 'GET', base = 'product', params = {} } = {}) {
-    const root = 'https://developer.api.walmart.com';
-    const url = new URL((base === 'root' ? root : BASE_URL) + path);
-    for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
-    await this.throttle();
-    const res = await this.fetch(url, {
-      method,
-      headers: { Accept: 'application/json', ...signWalmartRequest({ consumerId: this.consumerId, keyVersion: this.keyVersion, privateKey: this.privateKey }) },
-    });
-    const body = method === 'HEAD' ? '' : await res.text().catch(() => '');
-    const headers = {};
-    res.headers?.forEach?.((v, k) => { if (/allow|content-type|link|x-|access-control/i.test(k)) headers[k] = v; });
-    return { url: url.toString().replace(/publisherId=[^&]+/, 'publisherId=…'), status: res.status, headers, body: body.slice(0, 3000) };
-  }
-
   async request(path, params = {}, { cache = true } = {}) {
     const url = new URL(BASE_URL + path);
     for (const [k, v] of Object.entries(params)) {
@@ -204,109 +139,36 @@ export class WalmartLiveSource {
     return cache ? this.cache.wrap(url.toString(), () => fetchJson()) : fetchJson();
   }
 
-  /** @param {{ fromLookup?: boolean }} opts  false for bulk feeds, where sellers are often missing */
-  toProduct(item, { fromLookup = true } = {}) {
-    const category = departmentOf(item.categoryPath);
-    const isRetailer = isWalmartSeller(item, { fromLookup });
-    const product = {
+  toProduct(item) {
+    return {
       retailer: 'walmart',
       id: String(item.itemId),
       sku: String(item.itemId),
       upc: item.upc ?? null,
       name: item.name,
       brand: item.brandName ?? null,
-      category,
+      category: departmentOf(item.categoryPath),
       imageUrl: item.largeImage ?? item.mediumImage ?? item.thumbnailImage ?? null,
       // Built here rather than taken from Walmart, so every link has the affiliate tracking (or none).
       url: walmartProductUrl(item.itemId, this.publisherId),
-      msrp: realMsrp(item.msrp) ?? item.salePrice ?? null,
+      msrp: realMsrp(item.msrp),
       price: item.salePrice ?? null,
       seller: {
-        name: item.sellerInfo ?? (item.marketplace === true ? 'Marketplace seller (unnamed)' : isRetailer ? 'Walmart.com' : null),
-        isRetailer,
+        name: item.sellerInfo ?? (item.marketplace === true ? 'Marketplace seller (unnamed)' : 'Walmart.com'),
+        isRetailer: isWalmartSeller(item),
       },
       rating: Number.parseFloat(item.customerRating) || null,
       reviewCount: item.numReviews ?? null,
       specialOffer: specialOfferOf(item),
-      inStockOnline: onlineStock(item.stock),
+      inStockOnline: inStock(item.stock),
       // Walmart sells it online only (not carried in stores).
       onlineOnly: item.offerType === 'ONLINE_ONLY',
-      // Walmart only reports a best current offer for listings someone is selling now.
-      listingActive: Boolean(item.bestMarketplacePrice),
-      currentOfferPrice: typeof item.bestMarketplacePrice?.price === 'number' ? item.bestMarketplacePrice.price : null,
     };
-    RAW_FIELDS.set(product, scalarFields(item));
-    return product;
-  }
-
-  /**
-   * Diagnostics for spotting stale listings: which fields Walmart sends and
-   * their values, split by available-online vs not, plus price-cent endings
-   * and samples of the biggest "discounts" among items not sold online.
-   */
-  fieldSurvey() {
-    const products = this.pool?.products ?? [];
-    const group = (p) => (p.inStockOnline === false ? 'notOnline' : 'online');
-    const keys = { online: {}, notOnline: {} };
-    const values = {};
-    const cents = { online: {}, notOnline: {} };
-    const sizes = { online: 0, notOnline: 0 };
-    for (const p of products) {
-      if (p.seller?.isRetailer === false) continue; // known third-party
-      const g = group(p);
-      sizes[g] += 1;
-      const raw = RAW_FIELDS.get(p) ?? {};
-      for (const [k, v] of Object.entries(raw)) {
-        keys[g][k] = (keys[g][k] ?? 0) + 1;
-        if (typeof v === 'string' && v.length > 40) continue;
-        values[k] ??= { online: {}, notOnline: {} };
-        const key = String(v);
-        values[k][g][key] = (values[k][g][key] ?? 0) + 1;
-      }
-      if (typeof p.price === 'number') {
-        const c = Math.round((p.price % 1) * 100).toString().padStart(2, '0');
-        cents[g][c] = (cents[g][c] ?? 0) + 1;
-      }
-    }
-    const top = (obj, n = 12) => Object.fromEntries(Object.entries(obj).sort((a, b) => b[1] - a[1]).slice(0, n));
-    // Only fields with a handful of distinct values are useful as flags.
-    const flags = {};
-    for (const [k, v] of Object.entries(values)) {
-      const distinct = new Set([...Object.keys(v.online), ...Object.keys(v.notOnline)]).size;
-      if (distinct <= 15) flags[k] = { online: top(v.online, 15), notOnline: top(v.notOnline, 15) };
-    }
-    const offPct = (p) => (p.msrp > 0 ? 1 - p.price / p.msrp : 0);
-    const sample = (list) => list.slice(0, 8).map((p) => ({ ...RAW_FIELDS.get(p), _discountPct: Math.round(offPct(p) * 100) }));
-    const sold = products.filter((p) => p.seller?.isRetailer !== false && p.price > 0);
-    return {
-      sizes,
-      keys: { online: top(keys.online, 80), notOnline: top(keys.notOnline, 80) },
-      flags,
-      priceCents: { online: top(cents.online, 15), notOnline: top(cents.notOnline, 15) },
-      samples: {
-        notOnlineHugeDiscount: sample(sold.filter((p) => p.inStockOnline === false && offPct(p) >= 0.9)),
-        notOnlineModestDiscount: sample(sold.filter((p) => p.inStockOnline === false && offPct(p) > 0.1 && offPct(p) < 0.4)),
-        onlineDiscounted: sample(sold.filter((p) => p.inStockOnline !== false && offPct(p) > 0.2)),
-      },
-    };
-  }
-
-  async search(query, { limit = 25 } = {}) {
-    // Only items Walmart itself sells in stores: unfiltered, the first page is
-    // mostly marketplace sellers (all 25 for "HP OmniBook 5"), which we drop.
-    const data = await this.request('/search', {
-      query, numItems: Math.min(limit, 25), facet: 'on',
-      'facet.filter': ['retailer_type:Walmart', 'fulfillment_method:In-store'],
-    });
-    const products = (data?.items ?? []).map((i) => this.toProduct(i, { fromLookup: false }));
-    this.applySavedChecks(products);
-    await this.checkItems(products.filter((p) => p.seller.isRetailer === null));
-    return products;
   }
 
   /**
    * Walmart's raw item lookup, for diagnostics. `params` passes optional
-   * lookup parameters through (e.g. a store or ZIP), to see what they change.
+   * lookup parameters through (e.g. a store), to see what they change.
    * `batch` uses the /items?ids= form instead of /items/{id}.
    */
   async rawItem(itemId, { params = {}, batch = false } = {}) {
@@ -315,6 +177,7 @@ export class WalmartLiveSource {
       : this.request(`/items/${encodeURIComponent(itemId)}`, params, { cache: false });
   }
 
+  /** Walmart.com's default offer for an item (may be a marketplace seller's). */
   async getById(itemId) {
     const data = await this.request(`/items/${encodeURIComponent(itemId)}`);
     const item = data?.items?.[0] ?? (data?.itemId ? data : null);
@@ -327,13 +190,10 @@ export class WalmartLiveSource {
     return item ? this.toProduct(item) : null;
   }
 
+  /** Walmart's category tree: [{ id, name, children }]. */
   async taxonomy() {
     const data = await this.request('/taxonomy');
     return data?.categories ?? [];
-  }
-
-  async categories() {
-    return (await this.taxonomy()).map((c) => c.name).sort();
   }
 
   /** Top-level product departments (site sections like Help left out). */
@@ -341,6 +201,7 @@ export class WalmartLiveSource {
     return (await this.taxonomy()).map((c) => c.name).filter((n) => !NON_PRODUCT_SECTIONS.test(n)).sort();
   }
 
+  /** Walmart stores near a ZIP, nearest first (saved per ZIP when a cache is given). */
   async stores(zip, { limit = 15 } = {}) {
     const saved = this.zipStoreCache?.get(zip);
     if (saved?.length) return saved.slice(0, limit);
@@ -370,231 +231,70 @@ export class WalmartLiveSource {
     return stores.slice(0, limit);
   }
 
-  async inventory(product, zip, opts = {}) {
-    const stores = await this.stores(zip, opts);
-    return stores.map((store) => ({
-      store,
-      price: product.price,
-      quantity: null,
-      status: STOCK_STATUS.UNKNOWN,
-      aisle: null,
-      clearance: false,
-    }));
-  }
-
-  async priceHistory() {
-    return null; // fall back to locally recorded observations
-  }
-
   /**
-   * Fetch up to `pages` pages of a paginated feed, following `nextPage`.
-   * Never throws: one failing feed shouldn't empty the deals page.
+   * One page of Walmart's search: facet filters, an optional (sub)category id,
+   * an optional whole-dollar price band (lo..hi) and an optional price sort.
+   * Returns Walmart-sold products and the total result count. Walmart's own
+   * filters let some marketplace and online-only items through; those are
+   * dropped (online-only ones are kept when `keepOnlineOnly` is set).
    */
-  async fetchFeed(name, path, params, pages) {
-    const stat = { name, pages: 0, items: 0, error: null };
-    const items = [];
-    let query = params;
-    try {
-      while (query && stat.pages < pages) {
-        const data = await this.request(path, query, { cache: false });
-        stat.pages += 1;
-        items.push(...(data?.items ?? []));
-        // nextPage is a path with the query for the following page.
-        query = data?.nextPage ? Object.fromEntries(new URL(data.nextPage, BASE_URL).searchParams) : null;
-        if (query) delete query.publisherId;
-      }
-    } catch (err) {
-      stat.error = err.message.slice(0, 200);
-      console.warn(`walmart: ${name} failed: ${stat.error}`);
-    }
-    stat.items = items.length;
-    return { items, stat };
-  }
-
-  async fetchPool() {
-    const started = Date.now();
-    const cats = (await this.taxonomy().catch(() => [])).filter((c) => !NON_PRODUCT_SECTIONS.test(c.name));
-    const feeds = [
-      ['trending', '/trends', {}, 1],
-      ...SPECIAL_OFFERS.map((offer) => [offer, '/paginated/items', { specialOffer: offer }, this.poolPages]),
-      ...cats.map((c) => [c.name, '/paginated/items', { category: c.id }, this.poolPages]),
-    ];
-    // One feed at a time; requests are throttled anyway and parallel bursts get rate-limited.
-    const fetchAll = (list) => mapLimit(list, 1, ([name, path, params, pages]) => this.fetchFeed(name, path, params, pages));
-    const results = await fetchAll(feeds);
-    // Give rate-limited feeds one more try after a pause.
-    const failed = feeds.filter((_, i) => results[i].stat.error);
-    if (failed.length) {
-      await new Promise((r) => setTimeout(r, this.retryPassDelayMs));
-      const retried = await fetchAll(failed);
-      failed.forEach((feed, j) => {
-        const i = feeds.indexOf(feed);
-        if (retried[j].items.length >= results[i].items.length) {
-          results[i] = { items: retried[j].items, stat: { ...retried[j].stat, retried: true } };
-        }
-      });
-    }
-
-    const previous = this.pool;
-    const byId = new Map();
-    const feedIds = {};
-    results.forEach(({ items, stat }) => {
-      let products = items.filter((item) => item?.itemId).map((item) => this.toProduct(item, { fromLookup: false }));
-      // A feed that still failed keeps what it had last time rather than dropping out.
-      const before = previous?.feedIds?.[stat.name];
-      if (stat.error && before && before.length > products.length) {
-        products = before.map((id) => previous.byId.get(id)).filter(Boolean);
-        stat.reusedPrevious = products.length;
-      }
-      feedIds[stat.name] = products.map((p) => p.id);
-      for (const p of products) {
-        if (byId.size >= this.poolMaxItems) break;
-        if (!byId.has(p.id)) byId.set(p.id, p);
-      }
-    });
-    const stats = {
-      fetchedAt: new Date().toISOString(),
-      durationMs: Date.now() - started,
-      requests: results.reduce((n, r) => n + r.stat.pages + (r.stat.error ? 1 : 0), 0),
-      uniqueItems: byId.size,
-      failedFeeds: results.filter((r) => r.stat.error).length,
-      feeds: results.map((r) => r.stat),
-    };
-    console.log(`walmart: deal pool ${stats.uniqueItems} items, ${stats.failedFeeds} failed feeds, ${stats.requests} requests in ${stats.durationMs}ms`);
-    const products = [...byId.values()];
-    this.applySavedChecks(products);
-    const pool = { products, byId, feedIds, fetchedAt: Date.now(), stats };
-    try {
-      this.poolStore?.save('walmart', pool);
-    } catch (err) {
-      console.warn('walmart: could not save the deal pool', err.message);
-    }
-    return pool;
-  }
-
-  // ---- seller / existence checks -------------------------------------------
-
-  applyCheck(product, check) {
-    product.seller = { name: check.seller ?? product.seller?.name ?? null, isRetailer: check.isRetailer };
-    product.exists = check.exists;
-  }
-
-  /** Fill in sellers from earlier lookups saved in the database. */
-  applySavedChecks(products) {
-    if (!this.itemChecks) return;
-    for (const p of products) {
-      if (p.seller?.isRetailer !== null) continue;
-      const check = this.itemChecks.get('walmart', p.id);
-      if (check) this.applyCheck(p, check);
-    }
-  }
-
-  /**
-   * Look items up (20 per call) to learn who sells them and whether they still
-   * exist; save and apply the results.
-   */
-  /**
-   * One page of Walmart's search for building tier lists: filters, an optional
-   * whole-dollar price band (lo..hi) and an optional price sort. Returns
-   * Walmart-sold products and the total result count.
-   */
-  /** @param {{ keepOnlineOnly?: boolean }} opts  the store lists drop online-only items; product search keeps them */
   async searchPage({ query, filters, lo = null, hi = null, start = 1, sort = null, keepOnlineOnly = false, categoryId = null }) {
     const params = { query, facet: 'on', 'facet.filter': filters, start, numItems: 25 };
-    if (categoryId) params.categoryId = categoryId; // limits the search to a (sub)category
+    if (categoryId) params.categoryId = categoryId;
     if (lo != null && hi != null) params['facet.range'] = `price:[${lo} TO ${hi}]`;
     if (sort) Object.assign(params, { sort: 'price', order: sort });
     const data = await this.request('/search', params, { cache: false });
-    // Walmart's own filters miss some: marketplace sellers and online-only items get through.
     const products = (data?.items ?? [])
-      .filter((item) => item?.itemId && isWalmartSeller(item, { fromLookup: true }) && (keepOnlineOnly || item.offerType !== 'ONLINE_ONLY'))
-      .map((item) => this.toProduct(item, { fromLookup: true }));
+      .filter((item) => item?.itemId && isWalmartSeller(item) && (keepOnlineOnly || item.offerType !== 'ONLINE_ONLY'))
+      .map((item) => this.toProduct(item));
     return { products, total: Number(data?.totalResults) || 0 };
   }
 
   /**
-   * Replace the deal pool with products from the tier lists (Walmart-sold
-   * Clearance, Rollback and Reduced Price items) and save it for restarts.
-   */
-  setPool(products) {
-    const byId = new Map(products.map((p) => [p.id, p]));
-    this.pool = {
-      products: [...byId.values()], byId, feedIds: {}, fetchedAt: Date.now(),
-      stats: { source: 'tier lists', uniqueItems: byId.size, fetchedAt: new Date().toISOString() },
-    };
-    try {
-      this.poolStore?.save('walmart', this.pool);
-    } catch (err) {
-      console.warn('walmart: could not save the deal pool', err.message);
-    }
-  }
-
-  /** True when the deal pool comes from the tier lists (so the old bulk refresh isn't needed). */
-  get poolFromTiers() {
-    return this.pool?.stats?.source === 'tier lists';
-  }
-
-  /**
-   * One page of Walmart's catalog search with facet filters (e.g.
-   * special_offers:Clearance, retailer_type:Walmart). Search isn't store
-   * specific; it finds candidates for the store lookup to check.
-   * @returns {Promise<{ ids: string[], total: number|null }>} ids of items Walmart itself sells
-   */
-  async searchClearance({ query, filters, start = 1, numItems = 25 }) {
-    const data = await this.request('/search', {
-      query, facet: 'on', 'facet.filter': filters, start, numItems,
-    }, { cache: false });
-    const ids = (data?.items ?? [])
-      .filter((item) => item?.itemId && isWalmartSeller(item, { fromLookup: true }))
-      .map((item) => String(item.itemId));
-    return { ids, total: Number(data?.totalResults) || null };
-  }
-
-  /**
-   * Walmart's offer for item ids at one store (one lookup of up to 20 ids):
-   * with a storeId the lookup returns that store's price, stock, Clearance
-   * flag and was-price (strikeThroughPrice) instead of the default online offer.
-   * @returns {Promise<{ found: object[], missing: string[] }>}
+   * Walmart's offer for up to 20 item ids at one store: with a storeId the
+   * lookup returns that store's price, stock, Clearance flag and was-price
+   * instead of the default online offer. Items Walmart sells online only
+   * come back with the online price, so they're returned apart.
+   * @returns {Promise<{ found: object[], missing: string[], onlineOnly: string[] }>}
    */
   async storeLookup(ids, storeId) {
     let data;
     try {
       data = await this.request('/items', { ids: ids.join(','), storeId }, { cache: false });
     } catch (err) {
-      if (/\b400\b/.test(err.message) && /not found/i.test(err.message)) return { found: [], missing: ids.map(String) };
+      if (/\b400\b/.test(err.message) && /not found/i.test(err.message)) return { found: [], missing: ids.map(String), onlineOnly: [] };
       throw err;
     }
-    const found = (data?.items ?? []).map((item) => {
-      const p = this.toProduct(item, { fromLookup: true });
-      const strike = Number(item.strikeThroughPrice);
+    const all = (data?.items ?? []).map((item) => {
+      const p = this.toProduct(item);
       return {
         itemId: p.id,
         title: p.name,
+        imageUrl: p.imageUrl,
+        category: p.category,
         price: p.price,
-        wasPrice: strike > (p.price ?? 0) ? strike : null,
+        wasPrice: wasPriceOf(item),
+        listPrice: p.msrp,
         clearance: item.clearance === true,
         inStock: p.inStockOnline, // with a storeId, "stock" describes that store
         seller: p.seller.name,
-        isWalmart: p.seller.isRetailer === true,
-        imageUrl: p.imageUrl,
-        url: p.url,
-        category: p.category,
-        offerType: item.offerType ?? null,
-        listPrice: realMsrp(item.msrp), // Walmart's list price (msrp), when it gives one
+        isWalmart: p.seller.isRetailer,
+        onlineOnly: p.onlineOnly,
       };
     });
-    const seen = new Set(found.map((f) => f.itemId));
-    // Walmart answers a store lookup for items it only sells online, with the
-    // online price; those aren't on any store's shelf.
-    const onlineOnly = found.filter((f) => f.offerType === 'ONLINE_ONLY').map((f) => f.itemId);
+    const seen = new Set(all.map((f) => f.itemId));
     return {
-      found: found.filter((f) => f.offerType !== 'ONLINE_ONLY'),
+      found: all.filter((f) => !f.onlineOnly),
       missing: ids.map(String).filter((id) => !seen.has(id)),
-      onlineOnly,
+      onlineOnly: all.filter((f) => f.onlineOnly).map((f) => f.itemId),
     };
   }
 
-  /** Online (walmart.com) price and seller for item ids, 20 per lookup. */
+  /**
+   * Walmart.com's offer for item ids (20 per lookup): price, was-price, seller,
+   * and whether Walmart sells the item online only. id -> offer; ids Walmart
+   * doesn't know are left out.
+   */
   async onlinePrices(ids) {
     const out = new Map();
     for (let i = 0; i < ids.length; i += LOOKUP_BATCH) {
@@ -602,13 +302,10 @@ export class WalmartLiveSource {
       try {
         const data = await this.request('/items', { ids: batch.join(',') }, { cache: false });
         for (const item of data?.items ?? []) {
-          const p = this.toProduct(item, { fromLookup: true });
-          const strike = Number(item.strikeThroughPrice);
+          const p = this.toProduct(item);
           out.set(p.id, {
-            price: p.price, msrp: p.msrp, seller: p.seller.name, isWalmart: p.seller.isRetailer === true, inStockOnline: p.inStockOnline,
-            wasPrice: strike > (p.price ?? 0) ? strike : null, // Walmart.com's was-price (online deals)
-            onlineOnly: item.offerType === 'ONLINE_ONLY',
-            availableOnline: item.availableOnline === true,
+            price: p.price, wasPrice: wasPriceOf(item), seller: p.seller.name, isWalmart: p.seller.isRetailer,
+            onlineOnly: p.onlineOnly, availableOnline: item.availableOnline === true,
           });
         }
       } catch (err) {
@@ -616,138 +313,5 @@ export class WalmartLiveSource {
       }
     }
     return out;
-  }
-
-  async checkItems(products) {
-    const results = [];
-    for (let i = 0; i < products.length; i += LOOKUP_BATCH) {
-      const batch = products.slice(i, i + LOOKUP_BATCH);
-      let found;
-      try {
-        const data = await this.request('/items', { ids: batch.map((p) => p.id).join(',') }, { cache: false });
-        found = new Map((data?.items ?? []).map((item) => [String(item.itemId), item]));
-      } catch (err) {
-        // Walmart answers 400 "Results not found" when none of the ids exist.
-        if (/\b400\b/.test(err.message) && /not found/i.test(err.message)) {
-          found = new Map();
-        } else {
-          this.checkStats.errors += 1;
-          console.warn(`walmart: item lookup failed: ${err.message.slice(0, 160)}`);
-          continue;
-        }
-      }
-      const checks = batch.map((p) => {
-        const item = found.get(p.id);
-        if (!item) return { itemId: p.id, seller: null, isRetailer: false, exists: false };
-        const looked = this.toProduct(item, { fromLookup: true });
-        return { itemId: p.id, seller: looked.seller.name, isRetailer: looked.seller.isRetailer === true, exists: true };
-      });
-      this.itemChecks?.putMany('walmart', checks);
-      checks.forEach((c, j) => this.applyCheck(batch[j], c));
-      for (const c of checks) {
-        this.checkStats.looked += 1;
-        if (!c.exists) this.checkStats.notFound += 1;
-        else if (c.isRetailer) this.checkStats.walmart += 1;
-        else this.checkStats.thirdParty += 1;
-      }
-      this.checkVersion += 1;
-      this.checkStats.pending = Math.max(0, this.checkStats.pending - batch.length);
-      results.push(...checks);
-    }
-    return results;
-  }
-
-  /**
-   * Check every pool item with an unknown seller that could be a deal (priced
-   * below its list or current offer price), biggest discounts first. Runs in
-   * the background after each pool load.
-   */
-  checkPoolSellers() {
-    // A run already in progress covers this pool too; share it.
-    this.checkRun ??= this.runPoolChecks().finally(() => { this.checkRun = null; });
-    return this.checkRun;
-  }
-
-  async runPoolChecks() {
-    if (!this.pool) return;
-    const reference = (p) => Math.max(p.msrp ?? 0, p.currentOfferPrice ?? 0);
-    const discount = (p) => 1 - p.price / reference(p);
-    const todo = this.pool.products
-      .filter((p) => p.seller?.isRetailer === null && p.price > 0 && reference(p) > p.price)
-      .sort((a, b) => discount(b) - discount(a));
-    this.checkStats.running = true;
-    this.checkStats.pending = todo.length;
-    try {
-      await this.checkItems(todo);
-    } finally {
-      this.checkStats.running = false;
-    }
-  }
-
-  /**
-   * Deal pool: trending items, plus several pages each of the Clearance and
-   * Rollback feeds and every product department. Refreshed hourly in the
-   * background; visitors get the previous pool while a refresh runs. The
-   * very first load waits for the whole fetch (a couple of minutes).
-   */
-  /** @param {{ wait?: boolean }} opts  wait=false returns [] at once while the first pool loads */
-  async dealCandidates({ category, wait = true } = {}) {
-    const startChecks = () =>
-      this.checkPoolSellers().catch((err) => console.warn('walmart: seller checks failed', err.message));
-    // After a restart, start from the saved pool; a stale one is refreshed below, in the background.
-    if (!this.pool && !this.triedSavedPool) {
-      this.triedSavedPool = true;
-      try {
-        const saved = this.poolStore?.load('walmart');
-        if (saved) {
-          // Links follow the current publisher ID, which may have been set since the pool was saved.
-          for (const p of saved.products) p.url = walmartProductUrl(p.id, this.publisherId);
-          this.pool = saved;
-          this.applySavedChecks(saved.products);
-          console.log(`walmart: loaded saved deal pool (${saved.products.length} items from ${new Date(saved.fetchedAt).toISOString()})`);
-          startChecks();
-        }
-      } catch (err) {
-        console.warn('walmart: could not load the saved deal pool', err.message);
-      }
-    }
-    if (!this.pool) {
-      this.poolRefresh ??= this.fetchPool()
-        .then((pool) => { this.pool ??= pool; startChecks(); return pool; })
-        .finally(() => { this.poolRefresh = null; });
-      if (!wait) return [];
-      await this.poolRefresh;
-    } else if (!this.poolRefresh && this.poolRefreshDue(this.pool.fetchedAt, new Date())) {
-      this.poolRefresh = this.fetchPool()
-        .then((pool) => { this.pool = pool; startChecks(); })
-        .catch((err) => console.warn('walmart: pool refresh failed', err.message))
-        .finally(() => { this.poolRefresh = null; });
-    }
-    const { products } = this.pool;
-    return category ? products.filter((p) => p.category === category) : products;
-  }
-
-  /** True until the first pool has loaded (e.g. right after a restart). */
-  get poolLoading() {
-    return !this.pool;
-  }
-
-  /** True while a pool download (first load or scheduled refresh) is running. */
-  get poolRefreshing() {
-    return Boolean(this.poolRefresh);
-  }
-
-  /** Changes whenever the pool is refetched. */
-  get poolStamp() {
-    return this.pool?.fetchedAt ?? null;
-  }
-
-  /** Changes when the pool is refetched or lookups confirm more sellers. */
-  get rankStamp() {
-    return this.pool ? `${this.pool.fetchedAt}:${this.checkVersion}` : null;
-  }
-
-  poolStats() {
-    return this.pool ? { ...this.pool.stats, sellerChecks: { ...this.checkStats } } : null;
   }
 }

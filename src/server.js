@@ -62,18 +62,8 @@ export function createApp(registry = createDefaultRegistry()) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT ?? 3000);
   const registry = createDefaultRegistry();
-  // Start loading deal pools now; a live pool takes a couple of minutes to fetch.
-  for (const adapter of registry.list()) {
-    if (adapter.features.deals) adapter.getDealCandidates().catch((err) => console.warn(`${adapter.id}: warm-up failed`, err.message));
-    adapter.storeScanner?.start();
-    adapter.storeChecker?.start();
-  }
-  // Check every few minutes whether a scheduled deal-pool refresh is due, even with no visitors.
-  setInterval(() => {
-    for (const adapter of registry.list()) {
-      if (adapter.features.deals) adapter.getDealCandidates({ wait: false }).catch(() => {});
-    }
-  }, 5 * 60 * 1000).unref();
+  for (const adapter of registry.list()) adapter.storeChecker?.start();
+  // Once a day: drop old price history.
   const pruneAll = () => {
     registry.tracker.prune();
     for (const adapter of registry.list()) adapter.storeData?.prune().catch((err) => console.warn('prune failed', err.message));

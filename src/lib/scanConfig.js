@@ -1,12 +1,14 @@
-// Settings for the local store scan, read from config/store-scan.json (or
+// Settings for the store checks, read from config/store-scan.json (or
 // SCAN_CONFIG_PATH). Edited by hand, so everything is validated and problems
-// are reported rather than crashing the server.
+// are reported rather than crashing the server. See config/README.md.
 import { readFileSync } from 'node:fs';
-import { parseClock } from './scanSchedule.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseClock } from './scanSchedule.js';
 
 export const DEFAULT_SCAN_CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'store-scan.json');
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const FILTER = /^[a-z_]+:.+$/; // e.g. "special_offers:Clearance"
 
 /**
  * @returns {{ config: object|null, errors: string[] }}
@@ -19,126 +21,79 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
     return { config: null, errors: [`Could not read ${path}: ${err.message}`] };
   }
   const errors = [];
+  const strings = (value) => (Array.isArray(value) ? value.map((v) => String(v).trim()).filter(Boolean) : []);
+
   const stores = Array.isArray(raw.stores) ? raw.stores : [];
   if (!stores.length) errors.push('"stores" needs at least one store');
   for (const s of stores) {
     if (!/^\d+$/.test(String(s?.id ?? ''))) errors.push(`Store id ${JSON.stringify(s?.id)} should be a Walmart store number like "573"`);
   }
-  const departments = Array.isArray(raw.departments) ? raw.departments.map((d) => String(d).trim()).filter(Boolean) : [];
-  if (!departments.length) errors.push('"departments" needs at least one department');
-  // Walmart search filters (facets), e.g. "special_offers:Clearance", "retailer_type:Walmart".
-  const filters = Array.isArray(raw.filters) ? raw.filters.map((f) => String(f).trim()).filter(Boolean) : [];
-  for (const f of filters) if (!/^[a-z_]+:.+$/.test(f)) errors.push(`Filter ${JSON.stringify(f)} should look like "special_offers:Clearance"`);
-  // Optional keywords; with none, each department is searched by its filters alone.
-  const terms = Array.isArray(raw.searchTerms) ? raw.searchTerms.map((t) => String(t).trim()).filter(Boolean) : [];
-  const searchTerms = terms.length ? terms : [''];
-  if (!terms.length && !filters.length) errors.push('Set "filters" or "searchTerms" (or both)');
   const storeIds = new Set(stores.map((s) => String(s?.id)));
-  // SerpApi searches only these stores (discovery); the free item lookup checks every store.
-  const discoveryStores = Array.isArray(raw.discoveryStores) && raw.discoveryStores.length
-    ? raw.discoveryStores.map(String)
-    : [...storeIds];
-  for (const id of discoveryStores) if (!storeIds.has(id)) errors.push(`discoveryStores: ${id} isn't in "stores"`);
-  // Full daily checks: these stores every day, plus this many others in rotation.
-  const dailyStores = Array.isArray(raw.dailyStores) ? raw.dailyStores.map(String) : [];
+  const dailyStores = strings(raw.dailyStores);
   for (const id of dailyStores) if (!storeIds.has(id)) errors.push(`dailyStores: ${id} isn't in "stores"`);
   const rotatingStoresPerDay = raw.rotatingStoresPerDay == null ? 1 : Number(raw.rotatingStoresPerDay);
   if (!(Number.isInteger(rotatingStoresPerDay) && rotatingStoresPerDay >= 0)) errors.push('"rotatingStoresPerDay" should be a whole number, 0 or more');
-  // Daily times (Chicago): product list refresh, then the store checks.
+
+  const departments = [...new Set(strings(raw.departments))];
+  if (!departments.length) errors.push('"departments" needs at least one department');
+
   const schedule = {
     productListAt: raw.schedule?.productListAt ?? '04:00',
     storeChecksAt: raw.schedule?.storeChecksAt ?? '05:00',
+    endAt: raw.schedule?.endAt ?? '20:00',
+    tier3RebuildDay: raw.schedule?.tier3RebuildDay ?? 'Monday',
   };
-  schedule.endAt = raw.schedule?.endAt ?? '20:00';
-  schedule.tier3RebuildDay = raw.schedule?.tier3RebuildDay ?? 'Monday';
-  const productListHour = parseClock(schedule.productListAt, null);
-  const storeChecksHour = parseClock(schedule.storeChecksAt, null);
-  const endHour = parseClock(schedule.endAt, null);
-  if (productListHour === null) errors.push('"schedule.productListAt" should be a time like "04:00"');
-  if (storeChecksHour === null) errors.push('"schedule.storeChecksAt" should be a time like "05:00"');
-  if (endHour === null) errors.push('"schedule.endAt" should be a time like "20:00"');
-  const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-  if (!WEEKDAYS.includes(schedule.tier3RebuildDay)) errors.push('"schedule.tier3RebuildDay" should be a weekday like "Monday"');
-  // Tier lists from Walmart's search: every search gets baseFilters, plus one filter set per tier entry.
-  const baseFilters = Array.isArray(raw.baseFilters) ? raw.baseFilters.map(String) : ['retailer_type:Walmart', 'fulfillment_method:In-store'];
+  const hours = {};
+  for (const [key, name, fallback] of [['productListAt', 'productListHour', 4], ['storeChecksAt', 'storeChecksHour', 5], ['endAt', 'endHour', 20]]) {
+    const hour = parseClock(schedule[key], null);
+    if (hour === null) errors.push(`"schedule.${key}" should be a time like "${String(fallback).padStart(2, '0')}:00"`);
+    hours[name] = hour ?? fallback;
+  }
+  if (!WEEKDAYS.includes(schedule.tier3RebuildDay)) {
+    errors.push('"schedule.tier3RebuildDay" should be a weekday like "Monday"');
+    schedule.tier3RebuildDay = 'Monday';
+  }
+
+  const baseFilters = Array.isArray(raw.baseFilters) ? strings(raw.baseFilters) : ['retailer_type:Walmart', 'fulfillment_method:In-store'];
   const tierFilters = {
-    1: raw.tiers?.['1'] ?? ['special_offers:Clearance'],
-    2: raw.tiers?.['2'] ?? ['special_offers:Rollback', 'special_offers:Reduced Price'],
+    1: strings(raw.tiers?.['1'] ?? ['special_offers:Clearance']),
+    2: strings(raw.tiers?.['2'] ?? ['special_offers:Rollback', 'special_offers:Reduced Price']),
   };
   for (const f of [...baseFilters, ...tierFilters[1], ...tierFilters[2]]) {
-    if (!/^[a-z_]+:.+$/.test(f)) errors.push(`Filter ${JSON.stringify(f)} should look like "special_offers:Clearance"`);
+    if (!FILTER.test(f)) errors.push(`Filter ${JSON.stringify(f)} should look like "special_offers:Clearance"`);
   }
-  // Search words per department (Walmart's search needs text); default: the department name.
-  // Markdown: a store price at least this many percent below the item's highest valid store price.
   const markdownPercent = raw.markdownPercent == null ? 10 : Number(raw.markdownPercent);
   if (!(markdownPercent > 0 && markdownPercent < 100)) errors.push('"markdownPercent" should be a number between 0 and 100, like 10');
-  const departmentQueries = raw.departmentQueries && typeof raw.departmentQueries === 'object' ? raw.departmentQueries : {};
-  const discoveryMaxPages = raw.discoveryMaxPages == null ? 20 : Number(raw.discoveryMaxPages);
-  if (!(Number.isInteger(discoveryMaxPages) && discoveryMaxPages >= 0)) errors.push('"discoveryMaxPages" should be a whole number, 0 or more');
-  const maxPages = raw.maxPages == null ? 1 : Number(raw.maxPages);
-  if (!(Number.isInteger(maxPages) && maxPages >= 1 && maxPages <= 25)) errors.push('"maxPages" should be a whole number from 1 to 25');
-  const monthlySearchBudget = Number(raw.monthlySearchBudget);
-  if (!(monthlySearchBudget > 0)) errors.push('"monthlySearchBudget" should be a positive number');
 
   return {
     config: {
-      zip: raw.zip ?? null,
-      zips: Array.isArray(raw.zips) ? raw.zips.map(String) : raw.zip ? [String(raw.zip)] : [],
+      zips: strings(raw.zips),
       stores: stores.map((s) => ({ id: String(s.id), label: s.label ?? null })),
-      discoveryStores,
-      schedule: {
-        ...schedule, productListHour: productListHour ?? 4, storeChecksHour: storeChecksHour ?? 5, endHour: endHour ?? 20,
-        tier3RebuildDay: WEEKDAYS.includes(schedule.tier3RebuildDay) ? schedule.tier3RebuildDay : 'Monday',
-      },
-      baseFilters,
-      tierFilters,
-      departmentQueries,
-      markdownGap: markdownPercent > 0 && markdownPercent < 100 ? markdownPercent / 100 : 0.1,
-      discoveryMaxPages: Number.isInteger(discoveryMaxPages) && discoveryMaxPages >= 0 ? discoveryMaxPages : 20,
-      // SerpApi store searches (paid); off now that Walmart's free search does discovery.
-      useSerpApi: raw.useSerpApi === true,
       dailyStores,
       rotatingStoresPerDay: Number.isInteger(rotatingStoresPerDay) && rotatingStoresPerDay >= 0 ? rotatingStoresPerDay : 1,
-      maxPages: Number.isInteger(maxPages) ? maxPages : 1,
-      departments: [...new Set(departments)],
-      filters,
-      searchTerms,
-      monthlySearchBudget: monthlySearchBudget > 0 ? Math.floor(monthlySearchBudget) : 0,
-      // Change this value (e.g. to today's date) to scan everything once, right away.
-      fullSweep: raw.fullSweep ? String(raw.fullSweep) : null,
-      // Change this value to restart today's free store checks with the current plan.
+      departments,
+      // Search words per department (Walmart's search needs text); default: the department name.
+      departmentQueries: raw.departmentQueries && typeof raw.departmentQueries === 'object' ? raw.departmentQueries : {},
+      schedule: { ...schedule, ...hours },
+      baseFilters,
+      tierFilters,
+      dealFeeds: raw.dealFeeds !== false,
+      tier3Subcategories: raw.tier3Subcategories !== false,
+      markdownGap: markdownPercent > 0 && markdownPercent < 100 ? markdownPercent / 100 : 0.1,
+      // Change this value to restart today's store checks with the current settings.
       restartChecks: raw.restartChecks ? String(raw.restartChecks) : null,
-      // Diagnostics: { run, items: [itemIds], stores: [storeIds], searchDepartment }; change run to repeat.
-      inspect: raw.inspect?.run ? {
-        run: String(raw.inspect.run),
-        items: (raw.inspect.items ?? []).map(String).slice(0, 10),
-        stores: (raw.inspect.stores ?? []).map(String).slice(0, 2),
-        searchDepartment: raw.inspect.searchDepartment ?? null,
-      } : null,
     },
     errors,
   };
 }
 
 /**
- * Check the config against the departments the retailer actually has, and
- * work out how often the budget lets each department be scanned.
+ * The settings checked against the departments the retailer actually has.
  * @param {string[]} available department names from the retailer's taxonomy
  */
 export function describeScanConfig({ config, errors }, available = []) {
   if (!config) return { ok: false, errors };
   const known = new Set(available);
   const unknownDepartments = available.length ? config.departments.filter((d) => !known.has(d)) : [];
-  const searchesPerSweep = config.discoveryStores.length * config.departments.length * config.searchTerms.length * config.maxPages;
-  const sweepsPerMonth = searchesPerSweep ? config.monthlySearchBudget / searchesPerSweep : 0;
-  return {
-    ok: errors.length === 0 && unknownDepartments.length === 0,
-    errors,
-    unknownDepartments,
-    config,
-    searchesPerSweep,
-    // e.g. 100 searches / 40 per sweep -> every department at every store about every 12 days
-    daysBetweenScans: sweepsPerMonth ? Math.round((30 / sweepsPerMonth) * 10) / 10 : null,
-    availableDepartments: available,
-  };
+  return { ok: errors.length === 0 && unknownDepartments.length === 0, errors, unknownDepartments, config, availableDepartments: available };
 }

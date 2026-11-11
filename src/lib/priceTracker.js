@@ -1,19 +1,16 @@
-// Records prices the app observes so retailers without a history API still
-// get a chart over time, plus "price drops" and "lowest ever" deals.
+// Records the online prices the app observes, so retailers without a history
+// API still get a chart over time, plus "Price drop" and "Lowest price ever".
 // Stored in SQLite (built into Node 22.13+): one row per product per day.
+// The same database file holds each retailer's own tables.
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 const RETENTION_DAYS = 365;
 
 export class PriceTracker {
-  /**
-   * @param {object} opts
-   * @param {string} [opts.dbPath] SQLite file; ':memory:' (default) keeps nothing across restarts
-   * @param {string} [opts.legacyJsonPath] old JSON history file to import once, then renamed to *.imported
-   */
-  constructor({ dbPath = ':memory:', legacyJsonPath = null } = {}) {
+  /** @param {{ dbPath?: string }} opts  SQLite file; ':memory:' (default) keeps nothing across restarts */
+  constructor({ dbPath = ':memory:' } = {}) {
     if (dbPath !== ':memory:') mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.db.exec(`
@@ -33,7 +30,6 @@ export class PriceTracker {
     this.select = this.db.prepare(
       'SELECT date, price FROM price_history WHERE retailer = ? AND product_id = ? ORDER BY date',
     );
-    if (legacyJsonPath) this.importLegacyJson(legacyJsonPath);
   }
 
   record(retailer, productId, price, date = new Date()) {
@@ -68,24 +64,6 @@ export class PriceTracker {
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
-    }
-  }
-
-  // History used to live in a JSON file: { "walmart:123": [{ date, price }] }.
-  importLegacyJson(path) {
-    if (!existsSync(path)) return;
-    try {
-      const data = JSON.parse(readFileSync(path, 'utf8'));
-      this.transaction(() => {
-        for (const [key, series] of Object.entries(data)) {
-          const [retailer, ...rest] = key.split(':');
-          for (const { date, price } of series) this.upsert.run(retailer, rest.join(':'), date, price);
-        }
-      });
-      renameSync(path, `${path}.imported`);
-      console.log(`price tracker: imported ${Object.keys(data).length} products from ${path}`);
-    } catch (err) {
-      console.warn('price tracker: could not import', path, err.message);
     }
   }
 

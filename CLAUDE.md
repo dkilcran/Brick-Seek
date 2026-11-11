@@ -7,8 +7,11 @@
   around it.
 - Commit and push straight to `main`; the owner reverts if needed. Render
   auto-deploys `main` (https://clearance-tracker.onrender.com).
-- Verify changes on the live site (the `/api/walmart/stats`, `/store-scan`,
-  `/store-check` endpoints), not just with tests. Push only when `npm test` passes.
+- Verify changes on the live site (`/api/walmart/store-check`, `/all-deals`,
+  a product page), not just with tests. Push only when `npm test` passes.
+  When startup or the schema changes, also boot the new code against a
+  database made by the previous commit before pushing (a failed boot keeps
+  the old version running on Render).
 - Give a time estimate before multi-step work and report the actual time.
 
 ## What the data sources really return (learned the hard way)
@@ -47,7 +50,7 @@
   is Walmart (else it's a marketplace offer). Store prices above it aren't deals.
 - **Finding hidden parameters**: Walmart's API has no OpenAPI/Swagger file; it
   ignores unknown parameters but rejects a wrong value for a known typed one,
-  naming it (`/api/walmart/debug/describe?probe=param&param=<name>`). Feed:
+  naming it (try `<name>=notanumber` on a call). Feed:
   `soldByWmt`, `available` (booleans), `count`, `lastDoc`, `remainingHits`;
   no sort, price or date filters. The docs app's `/feeds/*`, `/clearance` and
   `/specialbuy` endpoints answer "No endpoint" for our account.
@@ -64,7 +67,7 @@
 - **Affiliate links**: Walmart's program runs on Impact. `productTrackingUrl`
   is `goto.walmart.com/c/{publisherId}/568844/9383?veh=aff&sourceid=imp_000011112222333344&u={item url}`
   (`|PUBID|` when no publisherId is sent); `walmartProductUrl` builds it.
-- **SerpApi** (paid, now off via `useSerpApi`): `engine=walmart` with `store_id`
+- **SerpApi** (paid; its code was removed Nov 2026, see git history): `engine=walmart` with `store_id`
   and facets finds store clearance; `engine=walmart_product` with `store_id`
   adds aisle and pickup availability. 250 searches/month on the free plan.
 - Walmart's `categoryPath` starts with "Home Page/"; the department is the next segment.

@@ -1,112 +1,127 @@
 # Clearance Tracker
 
-A local inventory & price checker: look up a product, enter your ZIP, and see
-store-by-store stock, shelf prices, clearance markdowns, price history and a
-deals feed. **Walmart is supported today**; the code is organized so more
-retailers can be added without touching the API or UI.
+Deals at Walmart, online and on the shelf at the stores near you: Clearance,
+Rollback, Reduced Price and our own **Markdown** label, with store-by-store
+prices and stock. Only items Walmart itself sells, never marketplace sellers.
+**Walmart is supported today**; the code is organized so more retailers can be
+added without touching the API or UI.
 
-No dependencies — just Node.js 22.13+ (it uses Node's built-in SQLite).
+Live at https://clearance-tracker.onrender.com. No dependencies, just Node.js
+22.13+ (it uses Node's built-in SQLite and test runner).
 
 ```bash
-npm start        # http://localhost:3000
+npm start        # http://localhost:3000 (demo data without Walmart keys)
 npm test
 ```
 
-## Features
+## Pages
 
-- **Inventory checker** — search by Walmart item number, UPC, walmart.com link,
-  or keywords; results per nearby store with price, stock status, quantity and
-  aisle, filterable by radius/availability and sortable by distance or price.
-- **Clearance detection** — stores pricing an item well below online are flagged.
-- **Price history** chart for each product.
-- **Deals** — five sections, each filterable by category and minimum discount:
-  Top deals (capped at 2 per category so one category can't take over),
-  Price drops today, Lowest price ever, Big-ticket (most dollars off items over
-  $100), and Clearance near you (shelf markdowns at stores near your ZIP).
-- **Retailer-sold items only** — marketplace/third-party listings are excluded
-  everywhere: search, deals and product pages.
-- Remembers your ZIP; works on mobile; light/dark theme.
+- **All Deals** (`#/`): one card per item with up to two deal lines, **Online**
+  (Walmart.com) and **In store** (the cheapest nearby store with a deal, how
+  many other stores have one, and when it was checked). Filter by Online Deals
+  / In Store Deals, badge (Clearance, Rollback, Reduced Price, Markdown, Price
+  drop, Lowest price ever), category, minimum discount, price range and text;
+  sort by best match, % off, $ off, price or biggest recent drop.
+- **In Store Deals** (`#/stores`): the same, for items with a store deal.
+- **Search** (`#/search`): every item Walmart sells, online and in stores, 25 at
+  a time. An item number, UPC or walmart.com link opens the product page.
+- **Product page**: the online deal, one list of the 15 nearest stores (plus
+  farther tracked stores with a saved price) with each store's price, stock and
+  deal label, "Check store" / "Check all stores" for a live lookup, and the
+  online price history.
+- The ZIP in the top bar picks the nearby stores; it is remembered.
 
-## Data sources (Walmart)
+## How the data is collected (Walmart, live mode)
+
+Everything uses Walmart's free [affiliate API](https://walmart.io/). Every
+night (Chicago time), paced at about 28 calls a minute:
+
+1. **4:00, lists:** Walmart's search (Clearance, Rollback, Reduced Price; sold
+   by Walmart; carried in stores) for every department in
+   `config/store-scan.json`, then Walmart's deal feeds (sold by Walmart only).
+2. **5:00, store checks:** the item lookup with a store number returns that
+   store's price, stock, Clearance flag and was-price. Deal items are checked at
+   the 3 daily stores and 2 rotating ones, Clearance and store deals at the
+   other tracked stores, and Walmart.com's own price for every deal item.
+3. **Mondays, Tier 3:** the list of everything Walmart sells in stores in those
+   departments is rebuilt from department and subcategory searches.
+4. **Until 20:00:** Tier 3 items are checked at the daily stores, a slice a
+   day, to find store-level Markdowns Walmart doesn't tag.
+
+Pages read only saved data, so visitors never wait on Walmart (except
+"Check store", capped at 120 lookups an hour). Details, settings and the exact
+deal-label rules: [`config/README.md`](config/README.md). What each Walmart
+call really returns: [`CLAUDE.md`](CLAUDE.md).
+
+## How deals are ranked ("Best match")
+
+Each card's best deal line gets a score (`src/lib/allDeals.js`):
+
+| Signal | Weight |
+| --- | --- |
+| % off the reference price | 0.35 |
+| Dollars off (log scale, $1,000 off = full) | 0.20 |
+| Online price drop since the last recorded day (33% drop = full) | 0.15 |
+| At the lowest online price recorded (needs 7+ days of history) | 0.10 |
+| Deal kind: Clearance 1, Rollback / Reduced Price 0.6, Markdown 0.5 | 0.10 |
+
+## Modes
 
 | Mode | Set with | What you get |
 | --- | --- | --- |
-| `demo` | no keys set | Synthetic catalog, stores and stock. Stable per product/store/day. Good for development and demos. |
-| `live` | Walmart I/O keys set (automatic) | Real catalog, online prices and store locations via the [Walmart I/O Affiliate API](https://walmart.io/). |
+| `demo` | no keys set | Synthetic catalog, stores and stock, stable per product/store/day. |
+| `live` | Walmart I/O keys set (automatic) | Real items, store prices and stock (in stock or not; Walmart gives no counts). |
 
 To go live, create a Walmart I/O account, generate an RSA key pair, upload the
 public key, then copy `.env.example` to `.env` and fill in
 `WALMART_CONSUMER_ID`, `WALMART_KEY_VERSION`, and either
-`WALMART_PRIVATE_KEY_PATH` or `WALMART_PRIVATE_KEY`. Live mode switches on
-automatically once those are set (`WALMART_MODE=demo` forces demo data).
-Run with `node --env-file=.env src/server.js`.
-
-**Limitation:** Walmart's public API does not expose per-store stock counts, so
-in live mode store rows show the online price and "Check store" status. Getting
-true store-level inventory requires another data source (a partner feed or
-your own collection), which plugs in as a new source class in
-`src/retailers/walmart/`. In live mode, price history is built from prices the
-app observes over time (saved to `data/price-history.json`).
-
-## How deals are ranked
-
-`src/lib/deals.js` is shared by every retailer. Each candidate the retailer
-sells itself and has in stock online gets a score from:
-
-| Signal | Weight |
-| --- | --- |
-| % off list price | 35% |
-| Dollars off (log scale, $1,000 off = max) | 20% |
-| Drop since the last recorded price | 15% |
-| At the lowest price recorded (needs 7+ days of history) | 10% |
-| Rating × review count | 10% |
-| Clearance (full) or Rollback (60%) | 10% |
-
-On the home page each product appears only once, in the first section that
-picks it. Price drops and lowest-ever depend on the app's own price history,
-which grows each time the deal pool refreshes (every 30 minutes while in use),
-so they fill in over the first days of running live. On hosts with
-temporary disk (like Render's free plan) that history resets on each
-deploy or restart.
-
-In live mode the deal pool is Walmart's Trending list plus the first 3 pages
-(`WALMART_POOL_PAGES`) of the Clearance and Rollback feeds and of every product
-department. It is saved in the database and refreshes in the background once a day
-(`WALMART_POOL_REFRESH_MINUTES`); restarts reuse the saved copy, and visitors
-keep seeing the previous pool while a refresh runs. `GET /api/walmart/stats` shows the pool size, each feed's page and
-item counts and errors, and how long ranking takes.
+`WALMART_PRIVATE_KEY_PATH` or `WALMART_PRIVATE_KEY` (`WALMART_MODE=demo`
+forces demo data). Run with `node --env-file=.env src/server.js`.
+`WALMART_PUBLISHER_ID` (from Walmart's affiliate program on Impact) turns on
+affiliate tracking in every walmart.com link and the footer disclosure.
 
 ## Architecture
 
 ```
 src/
-  server.js                 HTTP server + static files (no framework)
+  server.js                 HTTP server, static files, starts the daily checks
   api.js                    /api/:retailer/... routes (retailer-agnostic)
-  lib/                      cache, geo (ZIP→state), seeded RNG, price tracker
+  lib/
+    allDeals.js             deal cards: filters, sorting, score, price signals
+    priceTracker.js         SQLite database + online price history
+    scanConfig.js           reads and validates config/store-scan.json
+    scanSchedule.js         Chicago-time clock helpers
+    cache.js, geo.js, random.js
   retailers/
     RetailerAdapter.js      base class + normalized Product/Store/Availability shapes
     registry.js             the list of enabled retailers
     walmart/
-      index.js              WalmartAdapter (input parsing, routes to a source)
-      demoSource.js         synthetic data
+      index.js              WalmartAdapter: pages from saved data
       liveSource.js         Walmart I/O client (RSA-signed requests)
-      catalog.js, identifiers.js
+      storeChecker.js       the daily cycle (lists, store checks, Tier 3)
+      tierLists.js          tier 1/2/3 lists and the search queue
+      storePrices.js        store prices, online lookups, deal labels
+      demoSource.js, catalog.js, identifiers.js
 public/                     single-page UI (vanilla JS)
+config/store-scan.json      stores, departments, schedule (see config/README.md)
 ```
 
 ### API
 
 | Route | Purpose |
 | --- | --- |
+| `GET /api/health` | health check |
 | `GET /api/retailers` | enabled retailers, their mode and feature flags |
-| `GET /api/:retailer/search?q=` | keyword / item # / UPC / URL search |
-| `GET /api/:retailer/products/:id` | product details |
-| `GET /api/:retailer/products/:id/inventory?zip=&radius=&sort=` | per-store availability + summary |
-| `GET /api/:retailer/products/:id/history?days=` | price history |
+| `GET /api/:retailer/all-deals?zip=&where=&labels=&q=&category=&minDiscount=&minPrice=&maxPrice=&sort=&offset=&limit=` | deal cards |
+| `GET /api/:retailer/search?q=&start=` | keyword / item # / UPC / link search, 25 per page |
+| `GET /api/:retailer/products/:id` | product details, store offers and online deal |
+| `GET /api/:retailer/products/:id/inventory?zip=&sort=distance\|price` | the store list for a ZIP |
+| `GET /api/:retailer/products/:id/check-store?store=` | live lookup at one store (live mode) |
+| `GET /api/:retailer/products/:id/history` | online price history |
 | `GET /api/:retailer/stores?zip=` | nearby stores |
-| `GET /api/:retailer/deals?section=&zip=&category=&minDiscount=` | one deal section: `top`, `drops`, `lowest`, `bigticket`, `clearance` (needs `zip`) |
-| `GET /api/:retailer/deals/sections?zip=&category=` | all sections for the home page |
-| `GET /api/:retailer/categories` | categories |
+| `GET /api/:retailer/store-check` | progress of the daily cycle |
+| `GET /api/:retailer/scan-config` | the settings, checked against Walmart's departments |
+| `GET /api/:retailer/debug/item/:id?storeId=`, `/debug/feed`, `/debug/taxonomy` | raw Walmart responses, for diagnostics |
 
 ### Adding a retailer
 
@@ -114,19 +129,16 @@ public/                     single-page UI (vanilla JS)
    `RetailerAdapter`; implement `id`, `name`, `color`, and the methods it can
    support (`searchProducts`, `lookupProduct`, `getProduct`, `findStores`,
    `checkInventory`, `getDealCandidates`, `getLocalClearance`,
-   `getCategories`, `getPriceHistory`), returning
-   the shapes documented in `RetailerAdapter.js`. Set `seller.isRetailer` on
-   every product; only `true` items are shown. Anything left unimplemented
-   returns HTTP 501.
+   `getPriceHistory`, or its own `allDealCards`), returning the shapes
+   documented in `RetailerAdapter.js`. Set `seller.isRetailer` on every
+   product; only `true` items are shown. Anything left unimplemented returns
+   HTTP 501.
 2. Register it in `createDefaultRegistry()` in `src/retailers/registry.js`.
-3. Remove it from the "coming soon" list (`UPCOMING`) in `public/app.js`.
-
-The new retailer then shows up as a tab in the UI and under `/api/<id>/...`.
 
 ## Deploying
 
-`npm start` runs `node src/server.js`, a single web server on `$PORT`
-(default 3000) that serves both the UI and the API. Any Node host works.
-For Render, `render.yaml` is included: in the Render dashboard choose
-**New → Blueprint**, pick this repo, and optionally paste the Walmart I/O
-credentials when prompted.
+`npm start` runs `node src/server.js`, one web server on `$PORT` (default
+3000) for the UI and the API. Render auto-deploys `main` from `render.yaml`
+(starter plan with a 1 GB disk for the database at `DATABASE_PATH`). Store
+prices are kept 14 days; the daily prune cuts the store price history to 7 days
+if the database is over 700 MB.

@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { filterCards, sortCards, discount } from '../src/lib/allDeals.js';
+import { filterCards, sortCards, discount, priceSignals } from '../src/lib/allDeals.js';
 import { PriceTracker } from '../src/lib/priceTracker.js';
-import { StoreScanDb } from '../src/retailers/walmart/storeScan.js';
+import { StorePrices } from '../src/retailers/walmart/storePrices.js';
 import { TierStore } from '../src/retailers/walmart/tierLists.js';
 import { WalmartAdapter } from '../src/retailers/walmart/index.js';
 
@@ -51,7 +51,7 @@ test('sorting uses each card\'s best deal', () => {
 
 test('Walmart builds cards from the online lookups and store deals', async () => {
   const tracker = new PriceTracker();
-  const db = new StoreScanDb(tracker.db);
+  const db = new StorePrices(tracker.db);
   const tiers = new TierStore(db);
   const day = new Date().toISOString().slice(0, 10);
   tiers.insertItem.run('walmart', 1, 'r1', 'clr', 'Home', null);
@@ -59,25 +59,31 @@ test('Walmart builds cards from the online lookups and store deals', async () =>
   tiers.insertItem.run('walmart', 2, 'r2', 'mkt', 'Home', 'reduced');
   tiers.markBuilt(1, 'r1'); tiers.markBuilt(2, 'r2');
   for (const [id, name] of [['clr', 'Blanket'], ['rb', 'Mixer'], ['mkt', 'Chair']]) {
-    tiers.upsertProduct.run('walmart', id, 'r2', JSON.stringify({ id, name, price: 10, category: 'Home' }));
+    tiers.saveProduct('r2', { id, name, price: 10, category: 'Home' });
   }
   db.saveOnlineLookup('walmart', 'clr', { isWalmart: true, price: 8, wasPrice: 12, onlineOnly: true, availableOnline: true }, day);
   db.saveOnlineLookup('walmart', 'rb', { isWalmart: true, price: 20, wasPrice: 25, onlineOnly: false, availableOnline: true }, day);
   db.saveOnlineLookup('walmart', 'mkt', { isWalmart: false, price: 5 }, day); // marketplace online: no online deal
   db.recordStorePrices('walmart', '573', [{ itemId: 'rb', title: 'Mixer', price: 15, wasPrice: 25, seller: 'Walmart.com', inStock: true }], day);
   db.refreshMarkdowns('walmart');
-  const adapter = new WalmartAdapter({ source: { pool: null, poolStamp: 1 }, mode: 'live', tracker });
-  adapter.storeDb = db;
-  adapter.tierStore = tiers;
-  adapter.loadStoreConfig = () => ({ config: { stores: [{ id: '573', label: "Lee's Summit" }], departments: ['Home'] }, errors: [] });
+  const adapter = new WalmartAdapter({
+    source: {}, mode: 'live', tracker, storeData: db, tierStore: tiers,
+    loadStoreConfig: () => ({ config: { stores: [{ id: '573', label: "Lee's Summit" }], departments: ['Home'] }, errors: [] }),
+  });
   const byId = Object.fromEntries((await adapter.allDealCards()).map((c) => [c.product.id, c]));
   assert.deepEqual(Object.keys(byId).sort(), ['clr', 'rb']);
   assert.deepEqual([byId.clr.online.label, byId.clr.online.percentOff, byId.clr.soldOnline, byId.clr.soldInStores], ['Clearance', 33, true, false]);
   assert.deepEqual([byId.rb.online.label, byId.rb.store.label, byId.rb.store.price, byId.rb.soldInStores], ['Rollback', 'Rollback', 15, true]);
   assert.equal(adapter.onlineDeal('rb').wasPrice, 25);
+  assert.equal(adapter.onlineDeal('mkt'), null, 'a marketplace offer online');
+  // The online price dropped since the last recorded day, and was never lower.
+  for (let d = 1; d <= 7; d++) tracker.record('walmart', 'rb', 24, new Date(Date.now() - d * 86400000));
+  adapter.cardCache = null;
+  const rb = (await adapter.allDealCards()).find((c) => c.product.id === 'rb');
+  assert.deepEqual([rb.dropPercent, rb.atLowest], [17, true]);
   // Rollback online with no Walmart.com was-price: not an online deal.
   tiers.insertItem.run('walmart', 2, 'r2', 'flat', 'Home', 'rollback');
-  tiers.upsertProduct.run('walmart', 'flat', 'r2', JSON.stringify({ id: 'flat', name: 'Soda', price: 91.54, category: 'Home' }));
+  tiers.saveProduct('r2', { id: 'flat', name: 'Soda', price: 91.54, category: 'Home' });
   db.saveOnlineLookup('walmart', 'flat', { isWalmart: true, price: 91.54, wasPrice: null, onlineOnly: false, availableOnline: true }, day);
   adapter.cardCache = null;
   assert.equal((await adapter.allDealCards()).some((c) => c.product.id === 'flat'), false);
@@ -92,4 +98,24 @@ test('Walmart builds cards from the online lookups and store deals', async () =>
   adapter.cardCache = null;
   shelf = (await adapter.allDealCards()).find((c) => c.product.id === 'shelf');
   assert.equal(shelf.soldOnline, false, 'the lookup says it is not sold online');
+});
+
+test('price signals: the drop since the last recorded price, and lowest-ever after a week of history', () => {
+  const days = (prices) => prices.map((price, i) => ({ date: `2026-11-0${i + 1}`, price }));
+  assert.deepEqual(priceSignals(8, days([10, 10, 9]), '2026-11-04'), { dropPercent: 11, atLowest: false }, 'too little history for "lowest"');
+  assert.deepEqual(priceSignals(8, days([10, 10, 9, 9, 9, 9, 9]), '2026-11-08'), { dropPercent: 11, atLowest: true });
+  assert.deepEqual(priceSignals(9, days([10, 7, 9, 9, 9, 9, 9]), '2026-11-08'), { dropPercent: 0, atLowest: false });
+  assert.deepEqual(priceSignals(8, days([9, 8]), '2026-11-02'), { dropPercent: 11, atLowest: false }, 'today\'s own entry is ignored');
+  assert.deepEqual(priceSignals(8, []), { dropPercent: 0, atLowest: false });
+});
+
+test('a retailer without its own deal cards gets them from its deal candidates and local clearance', async () => {
+  const adapter = new WalmartAdapter(); // demo mode
+  const cards = await adapter.allDealCards({ zip: '72712' });
+  assert.ok(cards.length > 10);
+  assert.ok(cards.every((c) => c.online || c.store));
+  assert.ok(cards.some((c) => c.online?.label === 'Clearance') && cards.some((c) => c.online?.label === 'Rollback'));
+  assert.ok(cards.some((c) => c.store?.storesWithDeal >= 1 && c.store.label === 'Clearance'));
+  assert.ok(!cards.some((c) => c.product.id.startsWith('511')), 'no marketplace items');
+  assert.equal((await adapter.allDealCards()).filter((c) => c.store).length, 0, 'store deals need a ZIP');
 });

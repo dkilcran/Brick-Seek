@@ -153,31 +153,5 @@
     ]
   },
   "markdownPercent": 10,
-  "restartChecks": "2026-10-30 20:10",
-  "filters": [
-    "special_offers:Clearance",
-    "retailer_type:Walmart"
-  ],
-  "searchTerms": [],
-  "useSerpApi": false,
-  "discoveryStores": [
-    "573",
-    "1599"
-  ],
-  "maxPages": 5,
-  "monthlySearchBudget": 250,
-  "fullSweep": "2026-10-30",
-  "inspect": {
-    "run": "2026-10-30a",
-    "items": [
-      "673610207",
-      "24016954",
-      "39908952",
-      "46091553"
-    ],
-    "stores": [
-      "573"
-    ],
-    "searchDepartment": "Toys"
-  }
+  "restartChecks": "2026-10-30 20:10"
 }

@@ -75,10 +75,6 @@ export class WalmartDemoSource {
     return item ? this.toProduct(item) : null;
   }
 
-  async categories() {
-    return CATEGORIES;
-  }
-
   async departments() {
     return CATEGORIES;
   }
@@ -164,15 +160,6 @@ export class WalmartDemoSource {
       points.push({ date: dayKey(date), price });
     }
     return points;
-  }
-
-  /** Demo prices change once a day. */
-  get poolStamp() {
-    return dayKey(this.now());
-  }
-
-  poolStats() {
-    return { uniqueItems: CATALOG.length, feeds: [{ name: 'demo catalog', pages: 1, items: CATALOG.length, error: null }] };
   }
 
   async dealCandidates({ category } = {}) {

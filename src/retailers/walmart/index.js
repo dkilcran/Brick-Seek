@@ -1,40 +1,40 @@
-import { RetailerAdapter } from '../RetailerAdapter.js';
+// Walmart. Demo mode serves synthetic data; live mode (with Walmart I/O keys)
+// reads Walmart's affiliate API, runs the daily store checks, and serves
+// pages from what those saved.
+import { RetailerAdapter, STOCK_STATUS } from '../RetailerAdapter.js';
 import { PriceTracker } from '../../lib/priceTracker.js';
-import { ItemChecks } from '../../lib/itemChecks.js';
-import { PoolStore } from '../../lib/poolStore.js';
+import { DEAL_LABELS, discount, priceSignals } from '../../lib/allDeals.js';
 import { DEFAULT_SCAN_CONFIG_PATH, loadScanConfig } from '../../lib/scanConfig.js';
-import { SerpApiClient, StoreScanDb, StoreScanner } from './storeScan.js';
-import { StoreChecker } from './storeChecker.js';
-import { TierStore } from './tierLists.js';
-import { FeedMeasure } from './feedMeasure.js';
 import { scheduleDayKey } from '../../lib/scanSchedule.js';
-import { walmartProductUrl } from './identifiers.js';
-import { discount } from '../../lib/allDeals.js';
-import { STOCK_STATUS } from '../RetailerAdapter.js';
+import { parseWalmartInput, walmartProductUrl } from './identifiers.js';
 import { WalmartDemoSource } from './demoSource.js';
 import { WalmartLiveSource } from './liveSource.js';
-import { parseWalmartInput } from './identifiers.js';
+import { StorePrices } from './storePrices.js';
+import { StoreChecker } from './storeChecker.js';
+import { TierStore } from './tierLists.js';
 
-/**
- * Deal labels for store prices (store_markdowns.kind). Clearance, Rollback and
- * Reduced Price are Walmart's own; Markdown is ours (cheaper than the item's
- * highest valid store price, including this store's earlier price). A
- * was-price alone gets no label.
- */
-export const DEAL_LABELS = {
-  clearance: 'Clearance',
-  rollback: 'Rollback',
-  reduced: 'Reduced Price',
-  offer: 'Rollback / Reduced Price',
-  markdown: 'Markdown',
-};
+const SEARCH_PAGE = 25;
+const STORES_SHOWN = 15; // nearest stores listed on a product page
+const CHECKS_PER_HOUR = 120; // visitors' "Check store" lookups, so they can't crowd out the daily checks
+const CHECK_REUSE_MS = 15 * 60000;
 
 export class WalmartAdapter extends RetailerAdapter {
-  constructor({ source, mode = 'demo', tracker = new PriceTracker() } = {}) {
+  /**
+   * Live mode also takes the saved store data, the tier lists and a settings
+   * loader (see fromEnv); without them the adapter serves the source as is.
+   */
+  constructor({ source, mode = 'demo', tracker = new PriceTracker(), storeData = null, tierStore = null, loadStoreConfig = null } = {}) {
     super();
     this.source = source ?? new WalmartDemoSource();
     this._mode = mode;
     this.tracker = tracker;
+    /** @type {StorePrices|null} saved store prices and deal labels (live mode) */
+    this.storeData = storeData;
+    /** @type {TierStore|null} */
+    this.tierStore = tierStore;
+    this.loadStoreConfig = loadStoreConfig;
+    this.recentChecks = new Map(); // "store|item" -> { at, result }
+    this.checkTimes = [];
   }
 
   /** @param {{ tracker?: PriceTracker }} shared  the app-wide price history store */
@@ -42,73 +42,44 @@ export class WalmartAdapter extends RetailerAdapter {
     // Live whenever credentials are present, unless WALMART_MODE says otherwise.
     const hasKeys = Boolean(env.WALMART_CONSUMER_ID && (env.WALMART_PRIVATE_KEY || env.WALMART_PRIVATE_KEY_PATH));
     const mode = (env.WALMART_MODE || (hasKeys ? 'live' : 'demo')).toLowerCase();
-    if (mode === 'live') {
-      if (!hasKeys) {
-        throw new Error('WALMART_MODE=live needs WALMART_CONSUMER_ID and WALMART_PRIVATE_KEY or WALMART_PRIVATE_KEY_PATH');
-      }
-      const loadConfig = () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH);
-      // Refresh the product list once a day at schedule.productListAt (Chicago time).
-      // The daily tier lists replace the old bulk download once they've built a pool.
-      const poolRefreshDue = (fetchedAt, now) => {
-        if (source.poolFromTiers) return false;
-        const hour = loadConfig().config?.schedule?.productListHour ?? 4;
-        return scheduleDayKey(new Date(fetchedAt), hour) !== scheduleDayKey(now, hour);
-      };
-      // Store-level prices for the stores in config/store-scan.json: free checks
-      // through Walmart's item lookup, plus SerpApi discovery when a key is set.
-      const storeDb = new StoreScanDb(tracker.db);
-      const source = new WalmartLiveSource({
-        consumerId: env.WALMART_CONSUMER_ID,
-        keyVersion: env.WALMART_KEY_VERSION ?? '1',
-        // Hosting platforms often only take env vars, so accept the PEM inline too.
-        privateKey: env.WALMART_PRIVATE_KEY ? env.WALMART_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
-        privateKeyPath: env.WALMART_PRIVATE_KEY_PATH,
-        publisherId: env.WALMART_PUBLISHER_ID,
-        poolPages: Number(env.WALMART_POOL_PAGES) || undefined,
-        poolRefreshMs: Number(env.WALMART_POOL_REFRESH_MINUTES) * 60000 || undefined,
-        itemChecks: new ItemChecks(tracker.db),
-        poolStore: new PoolStore(tracker.db),
-        // An explicit WALMART_POOL_REFRESH_MINUTES keeps the old interval behavior.
-        poolRefreshDue: env.WALMART_POOL_REFRESH_MINUTES ? undefined : poolRefreshDue,
-        zipStoreCache: {
-          get: (zip) => storeDb.zipStores('walmart', zip),
-          set: (zip, stores) => storeDb.saveZipStores('walmart', zip, stores),
-        },
+    if (mode !== 'live') {
+      return new WalmartAdapter({
+        source: new WalmartDemoSource({ publisherId: env.WALMART_PUBLISHER_ID }),
+        // Demo prices are synthetic, so keep them out of the real history database.
+        tracker: new PriceTracker(),
       });
-      const adapter = new WalmartAdapter({ source, mode: 'live', tracker });
-      storeDb.ensureMarkdowns('walmart');
-      adapter.storeDb = storeDb;
-      adapter.loadStoreConfig = loadConfig;
-      adapter.tierStore = new TierStore(storeDb);
-      adapter.storeChecker = new StoreChecker({ source, db: storeDb, tiers: adapter.tierStore, loadConfig });
-      adapter.feedMeasure = new FeedMeasure({ source, db: storeDb, tiers: adapter.tierStore, loadConfig });
-      // SerpApi store searches only when turned on in the settings (useSerpApi).
-      if (env.SERPAPI_KEY && loadConfig().config?.useSerpApi) {
-        adapter.storeScanner = new StoreScanner({
-          client: new SerpApiClient({ apiKey: env.SERPAPI_KEY }),
-          db: storeDb,
-          loadConfig,
-          departments: () => source.taxonomy(),
-          onlinePrices: (ids) => source.onlinePrices(ids),
-        });
-      }
-      return adapter;
     }
-    return new WalmartAdapter({
-      source: new WalmartDemoSource({ publisherId: env.WALMART_PUBLISHER_ID }),
-      mode: 'demo',
-      // Demo prices are synthetic, so keep them out of the real history database.
-      tracker: new PriceTracker(),
+    if (!hasKeys) {
+      throw new Error('WALMART_MODE=live needs WALMART_CONSUMER_ID and WALMART_PRIVATE_KEY or WALMART_PRIVATE_KEY_PATH');
+    }
+    const storeData = new StorePrices(tracker.db);
+    const tierStore = new TierStore(storeData);
+    storeData.dropLegacy();
+    storeData.ensureMarkdowns('walmart');
+    const source = new WalmartLiveSource({
+      consumerId: env.WALMART_CONSUMER_ID,
+      keyVersion: env.WALMART_KEY_VERSION ?? '1',
+      // Hosting platforms often only take env vars, so accept the PEM inline too.
+      privateKey: env.WALMART_PRIVATE_KEY ? env.WALMART_PRIVATE_KEY.replace(/\\n/g, '\n') : undefined,
+      privateKeyPath: env.WALMART_PRIVATE_KEY_PATH,
+      publisherId: env.WALMART_PUBLISHER_ID,
+      zipStoreCache: {
+        get: (zip) => storeData.zipStores('walmart', zip),
+        set: (zip, stores) => storeData.saveZipStores('walmart', zip, stores),
+      },
     });
+    const loadStoreConfig = () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH);
+    const adapter = new WalmartAdapter({ source, mode: 'live', tracker, storeData, tierStore, loadStoreConfig });
+    adapter.storeChecker = new StoreChecker({
+      source, db: storeData, tiers: tierStore, loadConfig: loadStoreConfig,
+      // Each day's online prices of the deal lists: the history behind "Price drop" and "Lowest price ever".
+      onLists: (products) => tracker.recordMany('walmart', products),
+    });
+    return adapter;
   }
 
   get id() {
     return 'walmart';
-  }
-
-  /** walmart.com link for an item, with affiliate tracking when WALMART_PUBLISHER_ID is set. */
-  productUrl(itemId) {
-    return walmartProductUrl(itemId, this.source.publisherId);
   }
 
   get name() {
@@ -125,16 +96,15 @@ export class WalmartAdapter extends RetailerAdapter {
 
   get features() {
     return {
-      // Links to the retailer earn a commission (shown in the site's disclosure).
-      affiliateLinks: Boolean(this.source.publisherId),
       search: true,
       inventory: true,
-      storeQuantities: this._mode === 'demo',
       deals: true,
       priceHistory: true,
-      // Walmart's public API has no per-store prices, so only demo data has this.
-      // Store-level prices come from demo data, or from the store scan (SerpApi) when set up.
+      // Store-level prices: synthetic in demo mode, from the store checks when live.
       localClearance: this._mode === 'demo' || Boolean(this.storeData),
+      storeQuantities: this._mode === 'demo', // Walmart's API only says in stock or not
+      // Links to the retailer earn a commission (shown in the site's disclosure).
+      affiliateLinks: Boolean(this.source.publisherId),
     };
   }
 
@@ -142,15 +112,39 @@ export class WalmartAdapter extends RetailerAdapter {
     return 'Walmart item #, UPC, walmart.com link, or keywords';
   }
 
-  async searchProducts(query, opts = {}) {
-    return (await this.searchPaged(query, opts)).products;
+  /** walmart.com link for an item, with affiliate tracking when WALMART_PUBLISHER_ID is set. */
+  productUrl(itemId) {
+    return walmartProductUrl(itemId, this.source.publisherId);
+  }
+
+  storeConfig() {
+    return this.loadStoreConfig?.()?.config ?? null;
+  }
+
+  /**
+   * Deal lists show only the departments in config/store-scan.json (items
+   * with no department are kept).
+   * @returns {(category: string|null) => boolean}
+   */
+  departmentFilter() {
+    const departments = this.storeConfig()?.departments;
+    if (!departments?.length) return () => true;
+    const allowed = new Set(departments);
+    return (category) => !category || allowed.has(category);
+  }
+
+  // ---- products --------------------------------------------------------------
+
+  async searchProducts(query) {
+    return (await this.searchPaged(query)).products;
   }
 
   /**
    * One page (25) of product search results: only items Walmart itself sells
-   * (online or in stores; never marketplace sellers), in Walmart's relevance order, up to Walmart's 1,000-result
-   * limit. On the last page, items our store checks know that match the words
-   * are added (Walmart's search doesn't always list them).
+   * (online or in stores; never marketplace sellers), in Walmart's relevance
+   * order, up to Walmart's 1,000-result limit. On the last page, items the
+   * store checks know that match the words are added (Walmart's search
+   * doesn't list everything).
    * @returns {Promise<{ products: object[], total: number, nextStart: number|null }>}
    */
   async searchPaged(query, { start = 1 } = {}) {
@@ -161,30 +155,21 @@ export class WalmartAdapter extends RetailerAdapter {
       return { products: product ? [product] : [], total: product ? 1 : 0, nextStart: null };
     }
     if (!this.source.searchPage) {
-      const products = await this.source.search(parsed.value, {});
+      const products = await this.source.search(parsed.value);
       return { products, total: products.length, nextStart: null };
     }
-    // Sold by Walmart (online-only items included); the store lists add the in-store filter.
     const { products, total } = await this.source.searchPage({
       query: parsed.value, filters: ['retailer_type:Walmart'], start, keepOnlineOnly: true,
     });
-    const next = start + 25;
+    const next = start + SEARCH_PAGE;
     const nextStart = products.length && next < 1000 && next <= total ? next : null;
     let saved = [];
     if (nextStart === null) {
       const seen = new Set(products.map((p) => p.id));
-      saved = (this.storeData?.searchItems(this.id, parsed.value, { limit: 25 }) ?? [])
-        .filter((id) => !seen.has(id)).map((id) => this.storedProduct(id)).filter(Boolean).slice(0, 25);
+      saved = (this.storeData?.searchItems(this.id, parsed.value, { limit: SEARCH_PAGE }) ?? [])
+        .filter((id) => !seen.has(id)).map((id) => this.storedProduct(id)).filter(Boolean).slice(0, SEARCH_PAGE);
     }
     return { products: [...products, ...saved].map((p) => this.withReference(p)), total, nextStart };
-  }
-
-  /** item_id -> deal reference price from the store checks, reused until the markdowns change. Null without store data. */
-  referenceMap() {
-    const db = this.storeData;
-    if (!db) return null;
-    if (this.refMap?.version !== db.markdownVersion) this.refMap = { version: db.markdownVersion, map: db.itemReferences(this.id) };
-    return this.refMap.map;
   }
 
   async lookupProduct(input) {
@@ -202,217 +187,131 @@ export class WalmartAdapter extends RetailerAdapter {
     return product && this.withReference(product);
   }
 
-  /** The product with its discount measured against store data instead of Walmart's msrp (when live). */
-  withReference(product) {
-    const refs = this.referenceMap();
-    if (!refs) return product;
-    const ref = refs.get(product.id);
-    return { ...product, msrp: ref > product.price ? ref : null, currentOfferPrice: null };
-  }
-
   /**
-   * A product from saved data, so visitor pages don't wait on Walmart: today's
-   * deal pool, then the tier 1/2 search results, then what the store checks saw.
-   * Only items Walmart itself sells; anything else is looked up live.
+   * A product from saved data, so pages don't wait on Walmart: the tier 1/2
+   * lists, then what the store checks saw. Only items Walmart itself sells;
+   * anything else is looked up live.
    */
   storedProduct(id) {
     const key = String(id);
-    const pooled = this.source.pool?.byId?.get?.(key);
-    if (pooled?.seller?.isRetailer) return pooled;
-    const tiered = this.tierStore?.product(key);
-    if (tiered) return { ...tiered, url: this.productUrl(key) };
-    const info = this.storeData?.itemInfo?.(this.id, key);
-    if (!info) return null;
+    const listed = this.tierStore?.product(key);
+    if (listed) return { ...listed, url: this.productUrl(key) };
+    if (!this.storeData?.soldInStores(this.id, key)) return null;
+    const info = this.storeData.item(this.id, key);
     return {
-      retailer: this.id, id: key, sku: key, upc: null, name: info.title ?? `Item ${key}`, brand: null,
-      category: info.department ?? null, imageUrl: info.image_url ?? null, url: this.productUrl(key),
+      retailer: this.id, id: key, sku: key, upc: null, name: info?.title ?? `Item ${key}`, brand: null,
+      category: info?.department ?? null, imageUrl: info?.image_url ?? null, url: this.productUrl(key),
       // Only store prices are known; the online offer wasn't looked up.
       price: null, msrp: null, seller: { name: 'Walmart.com', isRetailer: true },
-      rating: null, reviewCount: null, specialOffer: null, inStockOnline: null, storeOnly: true,
+      rating: null, reviewCount: null, specialOffer: null, inStockOnline: null, onlineOnly: false,
     };
   }
+
+  /**
+   * In live mode a product's msrp is what its discount is measured against:
+   * the store checks' reference price (see refreshMarkdowns), or none.
+   * Walmart's own msrp field is unreliable (a $0.98 stuffing mix at $1,149.99).
+   */
+  withReference(product) {
+    if (!this.storeData) return product;
+    if (this.references?.version !== this.storeData.markdownVersion) {
+      this.references = { version: this.storeData.markdownVersion, byItem: this.storeData.itemReferences(this.id) };
+    }
+    const ref = this.references.byItem.get(product.id);
+    return { ...product, msrp: ref > product.price ? ref : null };
+  }
+
+  async getPriceHistory(productId) {
+    const product = await this.getProduct(productId);
+    return product ? this.getPriceHistoryFor(product) : null;
+  }
+
+  /** The online price history: synthetic in demo mode, the recorded prices when live. */
+  async getPriceHistoryFor(product) {
+    return (await this.source.priceHistory?.(product)) ?? this.tracker.history(this.id, product.id);
+  }
+
+  async getDepartments() {
+    return this.source.departments();
+  }
+
+  // ---- stores ----------------------------------------------------------------
 
   async findStores(zip, opts = {}) {
     return this.source.stores(zip, opts);
   }
 
+  /** Stores near a ZIP with this product's price and stock at each. */
   async checkInventory(productId, zip, opts = {}) {
     const product = await this.getProduct(productId);
     if (!product) return null;
-    let results;
-    if (this.storeData && this.source.stores) {
-      // One list: Walmart's 15 stores nearest the ZIP (nearest first), plus any
-      // other store among its 50 nearest where we have this item's price (e.g.
-      // the tracked stores near work), so the page has a single store list.
-      const nearby = await this.source.stores(zip, { limit: 50 });
-      const priced = new Set(this.storeData.latestPrices(this.id, nearby.map((s) => s.id), { itemId: product.id }).map((r) => r.store_id));
-      results = nearby
-        .map((store, i) => ({ ...store, rank: i + 1 }))
-        .filter((s) => s.rank <= 15 || priced.has(s.id))
-        .map((store) => ({ store, price: null, quantity: null, status: STOCK_STATUS.UNKNOWN, aisle: null, clearance: false }));
-    } else {
-      results = await this.source.inventory(product, zip, opts);
-    }
-    this.applyScannedPrices(product, results);
+    if (!this.storeData) return { product, results: await this.source.inventory(product, zip, opts) };
+    // One list: Walmart's nearest stores (nearest first), plus any farther store
+    // among its 50 nearest where this item has a saved price (e.g. the tracked
+    // stores near work). Walmart gives no distances, only the order (store.rank).
+    const nearby = await this.source.stores(zip, { limit: 50 });
+    const prices = new Map(this.storeData.latestPrices(this.id, nearby.map((s) => s.id), product.id).map((r) => [r.store_id, r]));
+    const deals = this.storeData.itemMarkdowns(this.id, product.id);
+    const results = nearby
+      .map((store, i) => ({ ...store, rank: i + 1 }))
+      .filter((store) => store.rank <= STORES_SHOWN || prices.has(store.id))
+      .map((store) => {
+        const row = prices.get(store.id);
+        // No guessing from the online price: a store without a saved price
+        // shows none, and the page offers "Check store".
+        if (typeof row?.price !== 'number') {
+          return { store, price: null, quantity: null, status: STOCK_STATUS.UNKNOWN, aisle: null, clearance: false, checked: false };
+        }
+        const kind = deals.get(store.id)?.kind;
+        return {
+          store, price: row.price, quantity: null, aisle: null, checked: true, seenOn: row.date,
+          status: row.in_stock === 1 ? STOCK_STATUS.IN_STOCK : row.in_stock === 0 ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
+          label: DEAL_LABELS[kind] ?? null,
+          clearance: kind === 'clearance',
+          wasPrice: row.was_price > row.price ? row.was_price : null,
+        };
+      });
     return { product, results };
   }
 
   /**
-   * Look up one item at one store now (Walmart's item lookup with storeId),
-   * save it, and return the store's price and stock. A check of the same
-   * store and item in the last 15 minutes is reused, and live checks are
-   * capped per hour so visitors can't crowd out the daily store checks.
+   * Look up one item at one store now, save it, and return the store's price
+   * and stock. A check of the same store and item in the last 15 minutes is
+   * reused, and live checks are capped per hour.
    */
   async checkStore(itemId, storeId, { now = Date.now() } = {}) {
     if (!this.source.storeLookup || !this.storeData) return null;
     const key = `${storeId}|${itemId}`;
-    this.recentChecks ??= new Map();
     const recent = this.recentChecks.get(key);
-    if (recent && now - recent.at < 15 * 60000) return { ...recent.result, reused: true };
-    this.checkTimes = (this.checkTimes ?? []).filter((t) => now - t < 3600000);
-    if (this.checkTimes.length >= 120) {
-      const err = new Error('Too many store checks right now; try again in a few minutes');
-      err.status = 429;
-      throw err;
+    if (recent && now - recent.at < CHECK_REUSE_MS) return { ...recent.result, reused: true };
+    this.checkTimes = this.checkTimes.filter((t) => now - t < 3600000);
+    if (this.checkTimes.length >= CHECKS_PER_HOUR) {
+      throw Object.assign(new Error('Too many store checks right now; try again in a few minutes'), { status: 429 });
     }
     this.checkTimes.push(now);
-    const { found, onlineOnly } = await this.source.storeLookup([String(itemId)], String(storeId));
-    if (onlineOnly?.length) this.storeData.dropItems(this.id, onlineOnly);
-    const item = found[0];
-    const hour = this.storeConfig()?.schedule?.productListHour ?? 4;
-    const day = scheduleDayKey(new Date(now), hour);
+    const lookup = await this.source.storeLookup([String(itemId)], String(storeId));
+    const day = scheduleDayKey(new Date(now), this.storeConfig()?.schedule?.productListHour ?? 4);
+    this.storeData.recordStoreLookup(this.id, String(storeId), lookup, day);
+    const item = lookup.found[0];
+    const none = (note) => ({ storeId: String(storeId), price: null, status: STOCK_STATUS.UNKNOWN, note });
     let result;
-    if (onlineOnly?.length) {
-      result = { storeId: String(storeId), price: null, status: STOCK_STATUS.UNKNOWN, note: 'Walmart sells this online only, not in stores' };
-    } else if (!item) {
-      result = { storeId: String(storeId), price: null, status: STOCK_STATUS.UNKNOWN, note: 'Walmart has no listing for this item at this store' };
-    } else {
-      this.storeData.recordStorePrices(this.id, String(storeId), [item], day);
-      result = item.isWalmart
-        ? {
-          storeId: String(storeId), price: item.price, wasPrice: item.wasPrice, clearance: item.clearance,
-          status: item.inStock === true ? STOCK_STATUS.IN_STOCK : item.inStock === false ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
-          seenOn: day, checked: true,
-        }
-        : { storeId: String(storeId), price: null, status: STOCK_STATUS.UNKNOWN, note: `Sold by ${item.seller ?? 'another seller'} here, not Walmart` };
+    if (lookup.onlineOnly.length) result = none('Walmart sells this online only, not in stores');
+    else if (!item) result = none('Walmart has no listing for this item at this store');
+    else if (!item.isWalmart) result = none(`Sold by ${item.seller ?? 'another seller'} here, not Walmart`);
+    else {
+      result = {
+        storeId: String(storeId), price: item.price, wasPrice: item.wasPrice, clearance: item.clearance,
+        status: item.inStock === true ? STOCK_STATUS.IN_STOCK : item.inStock === false ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
+        seenOn: day, checked: true,
+      };
     }
     if (this.recentChecks.size > 2000) this.recentChecks.clear();
     this.recentChecks.set(key, { at: now, result });
     return result;
   }
 
-  /** Saved store prices (free checks and SerpApi), when live. */
-  get storeData() {
-    return this.storeDb ?? this.storeScanner?.db ?? null;
-  }
-
-  storeConfig() {
-    return (this.loadStoreConfig ?? this.storeScanner?.loadConfig)?.()?.config ?? null;
-  }
-
-  /** Overlay saved store prices onto stock-check rows for stores that were checked. */
-  applyScannedPrices(product, results) {
-    // A marketplace seller's online price says nothing about Walmart's store price.
-    if (product.seller?.isRetailer === false) for (const result of results) result.price = null;
-    const db = this.storeData;
-    if (!db || !results.length) return;
-    const rows = db.latestPrices(this.id, results.map((r) => r.store.id), { itemId: product.id });
-    const byStore = new Map(rows.map((r) => [r.store_id, r]));
-    const deals = db.itemMarkdowns(this.id, product.id);
-    for (const result of results) {
-      const row = byStore.get(result.store.id);
-      // The online price is only a guess at a store's price, so stores without a
-      // saved store price show none (the page offers "Check store").
-      if (!row || typeof row.price !== 'number') {
-        result.price = null;
-        result.checked = false;
-        continue;
-      }
-      result.checked = true;
-      result.price = row.price;
-      result.status = row.in_stock === 1 ? STOCK_STATUS.IN_STOCK : row.in_stock === 0 ? STOCK_STATUS.OUT_OF_STOCK : result.status;
-      const deal = deals.get(result.store.id);
-      result.label = DEAL_LABELS[deal?.kind] ?? null;
-      result.clearance = deal?.kind === 'clearance';
-      result.wasPrice = row.was_price > row.price ? row.was_price : null;
-      result.seenOn = row.date;
-    }
-  }
-
-  async getDealCandidates(opts = {}) {
-    const products = await this.source.dealCandidates(opts);
-    // Record each new pool once; this builds the history behind "price drops" and "lowest ever".
-    if (!opts.category && this.source.poolStamp !== this.recordedStamp) {
-      this.tracker.recordMany(this.id, products);
-      this.recordedStamp = this.source.poolStamp;
-    }
-    const keep = this.departmentFilter();
-    const kept = keep ? products.filter((p) => keep(p.category)) : products;
-    return this.withStoreReferences(kept, opts.category);
-  }
-
   /**
-   * Walmart's msrp and "best offer" prices are unreliable (a $0.98 stuffing
-   * mix listed at $1,149.99), so with store data, deals are measured only
-   * against what the store checks found: Walmart's was-price for its own
-   * Clearance / Rollback / Reduced Price offer at a store, or the item's
-   * highest valid store price (see refreshMarkdowns). Items with neither get
-   * no discount. Reused until the pool or the markdowns change.
-   */
-  withStoreReferences(products, category = '') {
-    const db = this.storeData;
-    if (!db) return products;
-    const key = `${this.source.poolStamp}|${db.markdownVersion}|${category ?? ''}|${products.length}`;
-    if (this.refCache?.key === key) return this.refCache.output;
-    const refs = this.referenceMap();
-    const output = products.map((p) => {
-      const ref = refs.get(p.id);
-      return { ...p, msrp: ref > p.price ? ref : null, currentOfferPrice: null };
-    });
-    this.refCache = { key, output };
-    return output;
-  }
-
-  /**
-   * Deal lists show only the departments in config/store-scan.json (items
-   * with no department are kept). Null when there's no such setting.
-   */
-  departmentFilter() {
-    const departments = this.storeConfig()?.departments;
-    if (!departments?.length) return null;
-    const allowed = new Set(departments);
-    return (category) => !category || allowed.has(category);
-  }
-
-  /** Changes whenever the deal pool does; used to cache ranking. */
-  get dealPoolStamp() {
-    // Discounts come from the markdown table too, so a rebuild re-ranks.
-    const base = this.source.rankStamp ?? this.source.poolStamp;
-    if (base == null) return null;
-    return this.storeData ? `${base}.${this.storeData.markdownVersion}` : base;
-  }
-
-  /** True while the deal pool is still loading after a restart. */
-  get dealsLoading() {
-    return Boolean(this.source.poolLoading);
-  }
-
-  dealPoolStats() {
-    return this.source.poolStats();
-  }
-
-  fieldSurvey() {
-    return this.source.fieldSurvey?.() ?? null;
-  }
-
-  async getLocalClearance(zip, opts = {}) {
-    if (!this.features.localClearance) return super.getLocalClearance(zip, opts);
-    if (this.storeData) return this.scannedClearance(zip, opts);
-    return this.source.localClearance(zip, opts);
-  }
-
-  /**
-   * Scanned stores where Walmart itself sells this item, cheapest first. An
+   * Checked stores where Walmart itself sells this item, cheapest first. An
    * item can be Walmart's in store while a marketplace seller has it online.
    */
   storeOffers(itemId) {
@@ -432,172 +331,129 @@ export class WalmartAdapter extends RetailerAdapter {
         label: DEAL_LABELS[deal?.kind] ?? null,
         inStock: r.in_stock === null ? null : r.in_stock === 1,
         seenOn: r.date,
-        clearance: deal?.kind === 'clearance',
       };
     });
   }
 
+  // ---- deals -----------------------------------------------------------------
+
+  /** Products that may be on deal online: the tier 1/2 lists when live, the whole catalog in demo mode. */
+  async getDealCandidates(opts = {}) {
+    return this.tierStore ? [...this.tierStore.products().values()] : this.source.dealCandidates(opts);
+  }
+
+  async getLocalClearance(zip, opts = {}) {
+    if (this.storeData) return this.storeDeals(await this.checkedStoresNear(zip));
+    return this.source.localClearance(zip, opts);
+  }
+
+  /** The checked stores among Walmart's 50 nearest to a ZIP, nearest first. */
+  async checkedStoresNear(zip) {
+    const checked = new Set(this.storeData.scannedStores(this.id));
+    return (await this.source.stores(zip, { limit: 50 })).filter((s) => checked.has(s.id));
+  }
+
   /**
-   * All Deals cards (see lib/allDeals.js), unfiltered: Walmart.com deals from
-   * today's Clearance / Rollback / Reduced Price lists (Walmart as the online
-   * seller), and the best store deal near `zip` (every tracked store without
-   * one). Reused for 5 minutes, or until the deals change.
+   * Deals on the shelf at the given stores (see refreshMarkdowns), in the
+   * settings' departments and not known to be out of stock.
+   */
+  storeDeals(stores) {
+    const storeById = new Map(stores.map((s) => [s.id, s]));
+    const keep = this.departmentFilter();
+    return this.storeData.markdownRows(this.id, stores.map((s) => s.id))
+      .filter((r) => r.in_stock !== 0 && keep(r.department))
+      .map((r) => {
+        const ref = r.ref_price > r.price ? r.ref_price : null;
+        return {
+          product: {
+            retailer: this.id, id: r.item_id, name: r.title ?? `Item ${r.item_id}`, category: r.department,
+            imageUrl: r.image_url, url: this.productUrl(r.item_id), price: r.price, msrp: ref,
+            seller: { name: 'Walmart.com', isRetailer: true },
+          },
+          store: { ...storeById.get(r.store_id), seenOn: r.date },
+          price: r.price,
+          refPrice: ref,
+          quantity: null,
+          kind: r.kind,
+          discountPercent: discount(r.price, ref).percentOff,
+        };
+      });
+  }
+
+  /**
+   * All Deals cards (see lib/allDeals.js), unfiltered. Online: items on today's
+   * Clearance / Rollback / Reduced Price lists that Walmart.com itself sells.
+   * In store: each item's cheapest deal at the checked stores near `zip`
+   * (every tracked store without one). Rebuilt when the deals or lists
+   * change, at most every 5 minutes.
    */
   async allDealCards({ zip } = {}) {
+    if (!this.storeData || !this.tierStore) return super.allDealCards({ zip });
     const db = this.storeData;
-    if (!db || !this.tierStore) return [];
-    const key = `${zip ?? ''}|${db.markdownVersion}|${this.source.poolStamp}|${Math.floor(Date.now() / 300000)}`;
+    const key = `${zip ?? ''}|${db.markdownVersion}|${this.tierStore.builtRun(1)}|${Math.floor(Date.now() / 300000)}`;
     if (this.cardCache?.key === key) return this.cardCache.cards;
-    const keep = this.departmentFilter() ?? (() => true);
     const cards = new Map();
-    const card = (id, base) => {
-      if (!cards.has(id)) cards.set(id, { product: base, online: null, store: null, soldOnline: false, soldInStores: false });
-      return cards.get(id);
+    const cardFor = (product) => {
+      if (!cards.has(product.id)) cards.set(product.id, { product, online: null, store: null, soldOnline: true, soldInStores: true, dropPercent: 0, atLowest: false });
+      return cards.get(product.id);
     };
 
-    // Store deals: the cheapest deal per item at the stores near the ZIP.
-    const scanned = new Set(db.scannedStores(this.id));
     const stores = zip
-      ? (await this.source.stores(zip, { limit: 50 })).filter((s) => scanned.has(s.id))
+      ? await this.checkedStoresNear(zip)
       : (this.storeConfig()?.stores ?? []).map((s) => ({ retailer: this.id, id: s.id, name: s.label ?? `Walmart #${s.id}` }));
-    const counts = new Map();
-    for (const r of this.readClearance(db, stores, {})) {
-      counts.set(r.product.id, (counts.get(r.product.id) ?? 0) + 1);
-      const c = card(r.product.id, {
-        retailer: this.id, id: r.product.id, name: r.product.name, imageUrl: r.product.imageUrl, category: r.product.category, url: r.product.url,
-      });
-      if (!c.store || r.price < c.store.price) {
-        const ref = r.product.msrp > r.price ? r.product.msrp : null;
-        c.store = { price: r.price, refPrice: ref, kind: r.kind, label: r.label, store: r.store, seenOn: r.store?.seenOn ?? null, ...discount(r.price, ref) };
-      }
-      c.soldInStores = true;
+    const storesWithDeal = new Map();
+    for (const r of this.storeDeals(stores)) {
+      const { retailer, id, name, imageUrl, category, url } = r.product;
+      const card = cardFor({ retailer, id, name, imageUrl, category, url });
+      storesWithDeal.set(id, (storesWithDeal.get(id) ?? 0) + 1);
+      if (card.store && card.store.price <= r.price) continue;
+      card.store = {
+        price: r.price, refPrice: r.refPrice, kind: r.kind, label: DEAL_LABELS[r.kind], store: r.store, seenOn: r.store.seenOn,
+        ...discount(r.price, r.refPrice),
+      };
     }
-    for (const [id, n] of counts) cards.get(id).store.storesWithDeal = n;
+    for (const [id, n] of storesWithDeal) cards.get(id).store.storesWithDeal = n;
 
-    // Walmart.com deals: items on today's lists, priced by the online lookup
-    // (or, before today's lookup, by the morning search).
-    const offers = this.tierStore.offers();
-    const info = db.onlineInfo(this.id, [...offers.keys(), ...cards.keys()]);
-    for (const [id, kind] of offers) {
-      const i = info.get(id);
-      const pooled = this.source.pool?.byId?.get?.(id) ?? this.tierStore.product(id);
-      const looked = Boolean(i?.online_lookup_date);
-      const price = looked ? i.online_price : (i?.online_price ?? pooled?.price ?? null);
-      if (!(price > 0)) continue; // not Walmart's online offer
-      const name = pooled?.name ?? i?.title;
-      if (!name || !keep(pooled?.category ?? i?.department)) continue;
-      const was = looked ? i.online_was : null;
-      // Rollback / Reduced Price online only when Walmart.com shows a was-price (being on
-      // Walmart's list isn't enough; many have none online); Clearance shows regardless.
-      if (kind !== 'clearance' && !(was > price)) continue;
-      const c = card(id, {
-        retailer: this.id, id, name, imageUrl: pooled?.imageUrl ?? i?.image_url ?? null,
-        category: pooled?.category ?? i?.department ?? null, url: this.productUrl(id),
-      });
-      c.online = { price, wasPrice: was, kind, label: DEAL_LABELS[kind], ...discount(price, was) };
+    const keep = this.departmentFilter();
+    for (const [id, kind] of this.tierStore.offers()) {
+      const listed = this.tierStore.product(id);
+      const info = db.item(this.id, id);
+      // Walmart.com's price from today's lookup; before it has run, from the list itself.
+      const looked = Boolean(info?.online_lookup_date);
+      const price = looked ? info.online_price : (info?.online_price ?? listed?.price ?? null);
+      if (!(price > 0)) continue; // a marketplace seller's offer online
+      const name = listed?.name ?? info?.title;
+      const category = listed?.category ?? info?.department ?? null;
+      if (!name || !keep(category)) continue;
+      const wasPrice = looked ? info.online_was : null;
+      // Rollback / Reduced Price need a was-price on Walmart.com (many items on
+      // Walmart's lists have none online); Clearance shows regardless.
+      if (kind !== 'clearance' && !(wasPrice > price)) continue;
+      const card = cardFor({ retailer: this.id, id, name, imageUrl: listed?.imageUrl ?? info?.image_url ?? null, category, url: this.productUrl(id) });
+      card.online = { price, wasPrice, kind, label: DEAL_LABELS[kind], ...discount(price, wasPrice) };
+      Object.assign(card, priceSignals(price, this.tracker.history(this.id, id)));
     }
-    // Where each item is sold, from the online lookup when there is one.
-    for (const [id, c] of cards) {
-      const i = info.get(id);
-      const onlineOnly = i?.online_only === 1;
-      // Unknown until the online lookup says otherwise: only a known "not online" is store-only.
-      c.soldOnline = onlineOnly || i?.online_available !== 0;
-      // The lists and store checks only cover items carried in stores.
-      c.soldInStores = !onlineOnly || Boolean(c.store);
+    // Where each item is sold, as far as the online lookup has said.
+    for (const [id, card] of cards) {
+      const info = db.item(this.id, id);
+      const onlineOnly = info?.online_only === 1;
+      card.soldOnline = onlineOnly || info?.online_available !== 0;
+      card.soldInStores = !onlineOnly || Boolean(card.store);
     }
-    const out = [...cards.values()].filter((c) => c.online || c.store);
+    const out = [...cards.values()];
     this.cardCache = { key, cards: out };
     return out;
   }
 
-  /** Walmart.com's deal for one item (for the product page), or null. */
+  /** Walmart.com's deal on one item (for the product page), or null. */
   onlineDeal(itemId) {
-    const kind = this.tierStore?.offers().get(String(itemId));
-    if (!kind || !this.storeData) return null;
-    const i = this.storeData.onlineInfo(this.id, [itemId]).get(String(itemId));
-    if (!(i?.online_price > 0)) return null;
-    if (kind !== 'clearance' && !(i.online_was > i.online_price)) return null;
-    return { price: i.online_price, wasPrice: i.online_was, kind, label: DEAL_LABELS[kind], onlineOnly: i.online_only === 1, ...discount(i.online_price, i.online_was) };
-  }
-
-  /** Marked-down items at checked stores near a ZIP. */
-  async scannedClearance(zip, { category } = {}) {
-    const db = this.storeData;
-    const scanned = new Set(db.scannedStores(this.id));
-    const stores = (await this.source.stores(zip, { limit: 50 })).filter((s) => scanned.has(s.id));
-    // The markdown table only changes when it's rebuilt, so reuse the result until then.
-    const departments = this.storeConfig()?.departments ?? [];
-    const key = `${db.markdownVersion}|${stores.map((s) => s.id).join(',')}|${category ?? ''}|${departments.join(',')}`;
-    this.clearanceCache ??= new Map();
-    const cached = this.clearanceCache.get(key);
-    if (cached) return cached;
-    const rows = this.readClearance(db, stores, { category });
-    if (this.clearanceCache.size >= 20) this.clearanceCache.clear();
-    this.clearanceCache.set(key, rows);
-    return rows;
-  }
-
-  readClearance(db, stores, { category }) {
-    const storeById = new Map(stores.map((s) => [s.id, s]));
-    const keep = this.departmentFilter() ?? (() => true);
-    // Precomputed deals: Walmart's Clearance flag, Rollback or Reduced Price, or our
-    // Markdown (cheaper than the item's highest valid store price).
-    return db.markdownRows(this.id, stores.map((s) => s.id))
-      .filter((r) => r.in_stock !== 0)
-      .filter((r) => (!category || r.department === category) && keep(r.department))
-      .map((r) => {
-        // Walmart's offers are measured against its was-price at that store; our
-        // markdowns against the item's highest valid store price (including this
-        // store's earlier price). The default online offer is often another
-        // seller's or out of date, so it isn't used.
-        const ref = r.ref_price > r.price ? r.ref_price : null;
-        const product = {
-          retailer: this.id, id: r.item_id, sku: r.item_id, upc: null, name: r.title ?? `Item ${r.item_id}`,
-          brand: null, category: r.department, imageUrl: r.image_url, url: this.productUrl(r.item_id),
-          msrp: ref ?? r.price, price: r.price,
-          seller: { name: 'Walmart.com', isRetailer: true },
-          rating: null, reviewCount: null, specialOffer: r.kind, inStockOnline: null,
-        };
-        return {
-          product,
-          store: { ...storeById.get(r.store_id), seenOn: r.date },
-          price: r.price,
-          quantity: null,
-          kind: r.kind,
-          label: DEAL_LABELS[r.kind] ?? null,
-          discountPercent: ref ? Math.round((1 - r.price / ref) * 100) : 0,
-        };
-      });
-  }
-
-  /** walmart.com prices for item ids (live mode only). */
-  async onlinePrices(ids) {
-    return this.source.onlinePrices ? this.source.onlinePrices(ids) : new Map();
-  }
-
-  /** Every product department the retailer has, for settings like the store scan. */
-  async getDepartments() {
-    return this.source.departments();
-  }
-
-  /** Departments that have Walmart-sold items in the deal pool, most items first. */
-  async getCategories() {
-    const counts = new Map();
-    for (const p of await this.getDealCandidates({ wait: false })) {
-      if (!p.seller?.isRetailer || !p.category) continue;
-      counts.set(p.category, (counts.get(p.category) ?? 0) + 1);
-    }
-    return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name]) => name);
-  }
-
-  async getPriceHistory(productId, opts = {}) {
-    const product = await this.getProduct(productId);
-    if (!product) return null;
-    return this.getPriceHistoryFor(product, opts);
-  }
-
-  async getPriceHistoryFor(product, opts = {}) {
-    const fromSource = await this.source.priceHistory(product, opts);
-    return fromSource ?? this.tracker.history(this.id, product.id);
+    const kind = this.tierStore?.offerOf(itemId);
+    const info = kind && this.storeData?.item(this.id, itemId);
+    if (!(info?.online_price > 0)) return null;
+    if (kind !== 'clearance' && !(info.online_was > info.online_price)) return null;
+    return {
+      price: info.online_price, wasPrice: info.online_was, kind, label: DEAL_LABELS[kind], onlineOnly: info.online_only === 1,
+      ...discount(info.online_price, info.online_was),
+    };
   }
 }

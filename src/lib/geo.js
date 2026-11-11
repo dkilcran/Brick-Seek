@@ -1,5 +1,5 @@
-// ZIP code helpers. We only need coarse geography (state lookup + distances),
-// so a ZIP3 -> state table is enough without shipping a full ZIP database.
+// ZIP code helpers. Only the state is needed (for demo store addresses), so a
+// ZIP3 -> state table is enough without shipping a full ZIP database.
 
 const ZIP3_RANGES = [
   [5, 5, 'NY'], [6, 9, 'PR'], [10, 27, 'MA'], [28, 29, 'RI'], [30, 38, 'NH'],
@@ -26,15 +26,4 @@ export function stateForZip(zip) {
   const zip3 = Number(zip.slice(0, 3));
   const range = ZIP3_RANGES.find(([lo, hi]) => zip3 >= lo && zip3 <= hi);
   return range ? range[2] : null;
-}
-
-export function haversineMiles(a, b) {
-  const toRad = (d) => (d * Math.PI) / 180;
-  const R = 3958.8;
-  const dLat = toRad(b.lat - a.lat);
-  const dLon = toRad(b.lon - a.lon);
-  const h =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
-  return 2 * R * Math.asin(Math.sqrt(h));
 }

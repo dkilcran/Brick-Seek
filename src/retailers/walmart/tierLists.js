@@ -1,17 +1,18 @@
-// Lists of items Walmart sells in stores, built from Walmart's free search:
-//   tier 1: Clearance            (rebuilt daily)
+// Lists of items Walmart itself sells, which the store checks then look up:
+//   tier 1: Clearance               (rebuilt daily)
 //   tier 2: Rollback, Reduced Price (rebuilt daily)
-//   tier 3: everything            (rebuilt weekly)
-// Each search returns at most 1,000 results (25 per page), so a search with
-// more is split into price bands, then $1 bands, then a $1 band is read
-// sorted low-to-high and high-to-low. The work is a queue of single-page
-// search jobs saved in SQLite, so a restart resumes where it left off.
+//   tier 3: everything in stores    (rebuilt weekly)
+// Built from Walmart's search (in stores, sold by Walmart) and, for tiers 1-2,
+// Walmart's deal feeds. A search returns at most 1,000 results (25 per page),
+// so one with more is split into price bands, then $1 bands, then a $1 band
+// is read sorted low-to-high and high-to-low. The work is a queue of
+// single-page search jobs saved in SQLite, so a restart resumes where it left off.
 
 export const PAGE = 25;
-/** Taxonomy children that are shop pages rather than product subcategories. */
-export const NOT_SUBCATEGORY = /^shop |shop by|featured|endeca|sweepstakes|ideas|lookbook|inspiration|manual|values|personalized|gift|deals|new arrivals|trending|savings|clearance|rollback/i;
 export const CAP = 1000; // Walmart: "Start should be less than 1000"
 const FIRST_BANDS = [[0, 5], [5, 10], [10, 20], [20, 50], [50, 100], [100, 200], [200, 500], [500, 100000]];
+/** Taxonomy children that are shop pages rather than product subcategories. */
+const NOT_SUBCATEGORY = /^shop |shop by|featured|endeca|sweepstakes|ideas|lookbook|inspiration|manual|values|personalized|gift|deals|new arrivals|trending|savings|clearance|rollback/i;
 
 /** 'rollback' or 'reduced' from a job's special_offers filter (null for other filters). */
 function offerOf(filters) {
@@ -22,7 +23,7 @@ function offerOf(filters) {
 }
 
 export class TierStore {
-  /** @param {import('./storeScan.js').StoreScanDb} store  shares its database and meta table */
+  /** @param {import('./storePrices.js').StorePrices} store  shares its database and saved values */
   constructor(store, retailer = 'walmart') {
     this.store = store;
     this.db = store.db;
@@ -39,7 +40,8 @@ export class TierStore {
         lo         INTEGER,         -- price band, null = no band
         hi         INTEGER,
         sort       TEXT,            -- null, 'ascending' or 'descending' (price)
-        start      INTEGER NOT NULL
+        start      INTEGER NOT NULL,
+        category   TEXT             -- limit the search to this Walmart (sub)category id
       );
       CREATE INDEX IF NOT EXISTS search_queue_by_run ON search_queue (retailer, run, id);
       CREATE TABLE IF NOT EXISTS tier_items (
@@ -48,9 +50,10 @@ export class TierStore {
         run        TEXT NOT NULL,   -- the build that found it; old builds are dropped when a new one completes
         item_id    TEXT NOT NULL,
         department TEXT NOT NULL,
+        offer      TEXT,            -- tier 2: 'rollback' or 'reduced'
         PRIMARY KEY (retailer, tier, run, item_id)
       ) WITHOUT ROWID;
-      -- Product details from tier 1/2 searches, for the home page deal sections.
+      -- Product details (JSON) of tier 1/2 items, for deal cards and product pages.
       CREATE TABLE IF NOT EXISTS tier_products (
         retailer TEXT NOT NULL,
         item_id  TEXT NOT NULL,
@@ -59,19 +62,13 @@ export class TierStore {
         PRIMARY KEY (retailer, item_id)
       ) WITHOUT ROWID;
     `);
-    // A search job limited to a Walmart (sub)category id (search's categoryId).
-    if (!this.db.prepare('PRAGMA table_info(search_queue)').all().some((c) => c.name === 'category')) {
-      this.db.exec('ALTER TABLE search_queue ADD COLUMN category TEXT');
-    }
-    // Which Walmart offer list found a tier 2 item: 'rollback' or 'reduced'.
-    if (!this.db.prepare('PRAGMA table_info(tier_items)').all().some((c) => c.name === 'offer')) {
-      this.db.exec('ALTER TABLE tier_items ADD COLUMN offer TEXT');
-    }
     this.insertJob = this.db.prepare(`INSERT INTO search_queue
       (retailer, run, tier, department, query, filters, lo, hi, sort, start, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     this.insertItem = this.db.prepare(`INSERT OR IGNORE INTO tier_items (retailer, tier, run, item_id, department, offer) VALUES (?, ?, ?, ?, ?, ?)`);
     this.upsertProduct = this.db.prepare(`INSERT INTO tier_products (retailer, item_id, run, data) VALUES (?, ?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET run = excluded.run, data = excluded.data`);
+    /** @type {Map<string, object>|null} tier_products in memory, loaded on first use */
+    this.productCache = null;
   }
 
   enqueue(run, job) {
@@ -80,10 +77,10 @@ export class TierStore {
   }
 
   /**
-   * Queue one search per Walmart subcategory of the departments, by its own
-   * name within that subcategory (search's categoryId), e.g. "Area Rugs" in
-   * Home > Decor > Area Rugs' parent. Reaches far more of the shelf than the
-   * department words alone (measured: ~24,000 in-store items Tier 3 lacked).
+   * Queue one search per Walmart subcategory of the departments: its own name,
+   * limited to that subcategory (search's categoryId). Reaches far more of the
+   * shelf than the department words alone (measured: ~24,000 in-store items
+   * tier 3 lacked).
    * @param {{ name: string, id: string, children?: object[] }[]} taxonomy
    * @returns {number} subcategories queued
    */
@@ -165,7 +162,7 @@ export class TierStore {
         this.insertItem.run(this.retailer, job.tier, run, p.id, job.department, offerOf(job.filters));
         // The search only returns Walmart-sold items, so its price is Walmart's online price.
         if (p.seller?.isRetailer !== false && p.price > 0) this.store.saveOnlinePrice(this.retailer, p.id, p.price, run.slice(0, 10));
-        if (job.tier <= 2) this.upsertProduct.run(this.retailer, p.id, run, JSON.stringify(p));
+        if (job.tier <= 2) this.saveProduct(run, p);
       }
       if (job.start === 1) this.planFollowUps(run, job, total);
       this.db.prepare('DELETE FROM search_queue WHERE id = ?').run(job.id);
@@ -174,9 +171,6 @@ export class TierStore {
       this.db.exec('ROLLBACK');
       throw err;
     }
-    // Stats by day (the run's date part), labeled by tier and department.
-    this.store.recordDiscovery(this.retailer, run.slice(0, 10), `T${job.tier} ${job.department}`, Math.floor((job.start - 1) / PAGE) + 1,
-      products.map((p) => ({ itemId: p.id, inPool: false })));
     return { found: products.length, total };
   }
 
@@ -200,7 +194,7 @@ export class TierStore {
     for (let start = 1 + PAGE; start < CAP && start <= total; start += PAGE) this.enqueue(run, { ...job, start });
   }
 
-  /** The completed build for a tier (meta), and its items. */
+  /** The completed build (run name) a tier's current list comes from, or null. */
   builtRun(tier) {
     return this.store.getMeta(`tierBuilt:${this.retailer}:${tier}`);
   }
@@ -211,6 +205,7 @@ export class TierStore {
     this.db.prepare('DELETE FROM tier_items WHERE retailer = ? AND tier = ? AND run <> ?').run(this.retailer, tier, run);
   }
 
+  /** Item ids on a tier's current list. */
   itemIds(tier) {
     const run = this.builtRun(tier);
     if (!run) return [];
@@ -235,7 +230,7 @@ export class TierStore {
    * Add one page of a Walmart deal feed (/paginated/items with specialOffer and
    * soldByWmt) to a run's lists: Clearance to tier 1, Rollback / Reduced Price
    * to tier 2. Items another seller sells, or outside the kept departments, are
-   * skipped. Counts what the morning search had already found, to compare.
+   * skipped. Counts how many the search had already found.
    * @param {{ offer: 'clearance'|'rollback'|'reduced', department: string }} job
    * @param {(item) => object} toProduct  the source's item -> product
    */
@@ -257,7 +252,7 @@ export class TierStore {
           this.insertItem.run(this.retailer, tier, run, p.id, job.department, tier === 2 ? job.offer : null);
           out.added += 1;
         }
-        this.upsertProduct.run(this.retailer, p.id, run, JSON.stringify(p));
+        this.saveProduct(run, p);
         if (p.price > 0) this.store.saveOnlinePrice(this.retailer, p.id, p.price, run.slice(0, 10));
       }
       this.db.exec('COMMIT');
@@ -286,15 +281,40 @@ export class TierStore {
     return out;
   }
 
-  /** One saved tier 1/2 product (Walmart-sold, from today's search), or null. */
-  product(itemId) {
-    const row = this.db.prepare('SELECT data FROM tier_products WHERE retailer = ? AND item_id = ?').get(this.retailer, String(itemId));
-    return row ? JSON.parse(row.data) : null;
+  /** One item's online deal label on today's lists (see offers), or null. */
+  offerOf(itemId) {
+    const row = (tier) => {
+      const run = this.builtRun(tier);
+      return run && this.db.prepare('SELECT offer FROM tier_items WHERE retailer = ? AND tier = ? AND run = ? AND item_id = ?')
+        .get(this.retailer, tier, run, String(itemId));
+    };
+    if (row(1)) return 'clearance';
+    const listed = row(2);
+    return listed ? listed.offer ?? 'offer' : null;
   }
 
-  /** Products from the given tier 1/2 build, for the deal sections; older ones are dropped. */
-  products(run) {
+  /** Save a tier 1/2 item's details (and keep the in-memory copy current). */
+  saveProduct(run, product) {
+    this.upsertProduct.run(this.retailer, product.id, run, JSON.stringify(product));
+    this.productCache?.set(product.id, product);
+  }
+
+  /** Details of every tier 1/2 item: id -> product. Kept in memory; pages read it often. */
+  products() {
+    this.productCache ??= new Map(
+      this.db.prepare('SELECT item_id, data FROM tier_products WHERE retailer = ?').all(this.retailer).map((r) => [r.item_id, JSON.parse(r.data)]),
+    );
+    return this.productCache;
+  }
+
+  /** One tier 1/2 item's details, or null. */
+  product(itemId) {
+    return this.products().get(String(itemId)) ?? null;
+  }
+
+  /** When a tier 1/2 build completes: forget products only older builds had. */
+  dropOldProducts(run) {
     this.db.prepare('DELETE FROM tier_products WHERE retailer = ? AND run <> ?').run(this.retailer, run);
-    return this.db.prepare('SELECT data FROM tier_products WHERE retailer = ? AND run = ?').all(this.retailer, run).map((r) => JSON.parse(r.data));
+    this.productCache = null;
   }
 }

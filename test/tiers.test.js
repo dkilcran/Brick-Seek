@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PriceTracker } from '../src/lib/priceTracker.js';
-import { StoreScanDb } from '../src/retailers/walmart/storeScan.js';
+import { StorePrices } from '../src/retailers/walmart/storePrices.js';
 import { StoreChecker } from '../src/retailers/walmart/storeChecker.js';
 import { TierStore, CAP, PAGE } from '../src/retailers/walmart/tierLists.js';
 
@@ -26,7 +26,7 @@ function fakeSearch(catalog) {
 }
 
 const newStores = () => {
-  const db = new StoreScanDb(new PriceTracker().db);
+  const db = new StorePrices(new PriceTracker().db);
   return { db, tiers: new TierStore(db) };
 };
 
@@ -80,8 +80,6 @@ function makeDay({ start, catalog, config: extra = {} }) {
       clock = new Date(clock.getTime() + 60000); // each search takes a minute
       return search.searchPage(q);
     },
-    pool: null,
-    setPool(products) { this.pool = products; },
     onlineLookups: [],
     async onlinePrices(ids) {
       this.onlineLookups.push([...ids]);
@@ -109,11 +107,15 @@ function makeDay({ start, catalog, config: extra = {} }) {
     baseFilters: ['retailer_type:Walmart'],
     tierFilters: { 1: ['special_offers:Clearance'], 2: ['special_offers:Rollback'] },
     schedule: { productListHour: 4, storeChecksHour: 5, endHour: 20, tier3RebuildDay: 'Monday' },
+    dealFeeds: false, tier3Subcategories: false, markdownGap: 0.1,
     ...extra,
   };
-  const checker = new StoreChecker({ source, db, tiers, now: () => clock, loadConfig: () => ({ config, errors: [] }) });
+  const listed = [];
+  const checker = new StoreChecker({
+    source, db, tiers, now: () => clock, loadConfig: () => ({ config, errors: [] }), onLists: (products) => listed.push(products),
+  });
   return {
-    db, tiers, source, lookups, checker, config,
+    db, tiers, source, lookups, checker, config, listed,
     advance: (ms) => { clock = new Date(clock.getTime() + ms); },
     setClock: (iso) => { clock = new Date(iso); },
     async runUntilIdle(max = 5000) { for (let i = 0; i < max && (await checker.step()); i++); },
@@ -134,7 +136,7 @@ test('a full day runs in the agreed order', async () => {
   assert.equal(day.checker.state.phase, 'checks');
   assert.deepEqual(day.tiers.itemIds(1).sort(), ['t1a', 't1b']);
   assert.deepEqual(day.tiers.itemIds(2).sort(), ['t1a', 't2a']);
-  assert.equal(day.source.pool.length, 3);
+  assert.deepEqual(day.listed.map((products) => products.map((p) => p.id).sort()), [['t1a', 't1b', 't2a']], 'the lists\' products are reported once');
   assert.equal(day.lookups.length, 0, 'no store lookups before 5:00');
 
   day.setClock('2026-11-02T11:00:00Z'); // 5:00am
@@ -265,7 +267,7 @@ test('tier 3 batches wrap around at the end of the list without repeating within
 });
 
 test('after the search, Walmart\'s deal feeds add to the lists; online-only items are skipped in store checks', async () => {
-  const day = makeDay({ start: '2026-11-03T10:30:00Z', catalog: CATALOG });
+  const day = makeDay({ start: '2026-11-03T10:30:00Z', catalog: CATALOG, config: { dealFeeds: true } });
   const feedPages = {
     'clearance:': { items: [{ itemId: 't1a', name: 'A', salePrice: 5 }, { itemId: 'f1', name: 'Feed clearance', salePrice: 3 }, { itemId: 'mk', name: 'Seller', salePrice: 1, sellerInfo: 'Toy Co' }],
       nextPage: '/v1/paginated/items?category=4171&specialOffer=clearance&soldByWmt=true&lastDoc=x' },
@@ -297,7 +299,7 @@ test('after the search, Walmart\'s deal feeds add to the lists; online-only item
 });
 
 test('the tier 3 rebuild also searches each subcategory by name within it', async () => {
-  const day = makeDay({ start: '2026-11-02T11:00:00Z', catalog: CATALOG }); // Monday: rebuild day
+  const day = makeDay({ start: '2026-11-02T11:00:00Z', catalog: CATALOG, config: { tier3Subcategories: true } }); // Monday: rebuild day
   day.source.taxonomy = async () => [
     { name: 'Toys', id: '4171', children: [{ name: 'Dolls', id: '4171_1' }, { name: 'Shop by Age', id: '4171_9' }] },
     { name: 'Clothing', id: '5438', children: [{ name: 'Shirts', id: '5438_1' }] },

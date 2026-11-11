@@ -62,7 +62,8 @@ function thumb(product) {
   return `<div class="thumb">${product.imageUrl ? `<img src="${esc(product.imageUrl)}" alt="" loading="lazy">` : initials(product.brand ?? product.name)}</div>`;
 }
 
-function productCard(product, { zip, price = product.price, was = product.msrp, extra = '', note = '' } = {}) {
+function productCard(product, { zip } = {}) {
+  const { price, msrp: was } = product;
   const off = pctOff(price, was);
   const href = `#/r/${esc(product.retailer)}/item/${encodeURIComponent(product.id)}${zip ? `?zip=${zip}` : ''}`;
   return `<a class="card product-card" href="${href}">
@@ -71,9 +72,7 @@ function productCard(product, { zip, price = product.price, was = product.msrp, 
     <div class="price-row">
       <span class="price">${money(price)}</span>
       ${off ? `<span class="was">${money(was)}</span><span class="badge off">${off}% off</span>` : ''}
-      ${extra}
     </div>
-    ${note}
     ${product.onlineOnly ? '<div class="badges"><span class="badge signal">Online only</span></div>' : ''}
     <div class="muted" style="font-size:13px">Item #${esc(product.id)}${product.upc ? ` · UPC ${esc(product.upc)}` : ''}</div>
   </a>`;
@@ -350,7 +349,6 @@ function badgeClass(label) {
   if (label === 'Clearance') return 'clearance';
   if (/^(Rollback|Reduced Price)/.test(label)) return 'rollback';
   if (label === 'Markdown') return 'markdown';
-  if (label === 'In-store only') return 'instore';
   return 'signal';
 }
 
@@ -379,7 +377,7 @@ async function itemView(retailerId, id, query) {
 
   const off = pctOff(product.price, product.msrp);
   $app.innerHTML = `
-    <p><a href="#/?retailer=${esc(r.id)}">← New search</a></p>
+    <p><a href="#/?retailer=${esc(r.id)}">← All Deals</a></p>
     <div class="product-head">
       ${thumb(product)}
       <div>
@@ -584,7 +582,6 @@ function sortProducts(products, sort) {
   return by ? products.map((p, i) => [by(p), i, p]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2]) : products;
 }
 
-// Deal types on the Deals page; pick any combination. The store ones need a ZIP.
 // ---------- router ----------
 async function render() {
   const { parts, query } = parseHash();

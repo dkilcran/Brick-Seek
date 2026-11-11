@@ -25,12 +25,9 @@ export class RetailerRegistry {
   }
 }
 
-/** One price history database shared by every retailer. */
+/** One database (DATABASE_PATH) shared by every retailer. */
 export function createPriceTracker(env = process.env) {
-  return new PriceTracker({
-    dbPath: env.DATABASE_PATH || 'data/clearance-tracker.db',
-    legacyJsonPath: env.PRICE_HISTORY_FILE || 'data/price-history.json',
-  });
+  return new PriceTracker({ dbPath: env.DATABASE_PATH || 'data/clearance-tracker.db' });
 }
 
 export function createDefaultRegistry(env = process.env, { tracker = createPriceTracker(env) } = {}) {
