@@ -247,7 +247,8 @@ export class WalmartAdapter extends RetailerAdapter {
     if (!byStore.size) return [];
     const labels = new Map((this.storeConfig()?.stores ?? []).map((s) => [s.id, s.label]));
     const stores = zip
-      ? (await this.source.stores(zip, { limit: 50 })).map((s) => ({ id: s.id, name: s.name }))
+      // Walmart's store names repeat ("Supercenter"), so add the street address.
+      ? (await this.source.stores(zip, { limit: 50 })).map((s) => ({ id: s.id, name: labels.get(s.id) ?? [s.name, s.address].filter(Boolean).join(', ') }))
       : [...labels].map(([id, label]) => ({ id, name: label ?? `Walmart #${id}` }));
     return stores.filter((s) => byStore.has(s.id)).map((store) => ({ store, points: byStore.get(store.id) }));
   }

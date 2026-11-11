@@ -341,14 +341,14 @@ test('product pages come from saved data instead of Walmart', async () => {
 test('the price history route adds each nearby store\'s prices', async () => {
   const { createRoutes, matchRoute } = await import('../src/api.js');
   const { RetailerRegistry } = await import('../src/retailers/registry.js');
-  const nearby = [{ id: '573', name: 'Lee' }, { id: '4590', name: 'Lee SW' }, { id: '1599', name: 'Overland Park' }];
+  const nearby = [{ id: '573', name: 'Lee' }, { id: '4590', name: 'Lee SW', address: '3410 SW Market St' }, { id: '1599', name: 'Overland Park' }];
   const { adapter, db } = liveAdapter({ source: { stores: async () => nearby }, stores: [{ id: '1599', label: 'OP Metcalf' }] });
   db.recordStorePrices('walmart', '4590', [walmartRow('700', 5, { title: 'Lamp' })], today());
   db.recordStorePrices('walmart', '1599', [walmartRow('700', 4, { title: 'Lamp' })], today());
   const routes = createRoutes(new RetailerRegistry().register(adapter));
   const call = (path, qs = '') => { const m = matchRoute(routes, 'GET', path); return m.route.handler({ params: m.params, query: new URLSearchParams(qs) }); };
   const withZip = await call('/api/walmart/products/700/history', 'zip=64081');
-  assert.deepEqual(withZip.stores.map((s) => [s.store.name, s.points.at(-1).price]), [['Lee SW', 5], ['Overland Park', 4]], 'nearest first');
+  assert.deepEqual(withZip.stores.map((s) => [s.store.name, s.points.at(-1).price]), [['Lee SW, 3410 SW Market St', 5], ['OP Metcalf', 4]], 'nearest first, with addresses');
   assert.deepEqual((await call('/api/walmart/products/700/history')).stores.map((s) => s.store.name), ['OP Metcalf'], 'tracked stores without a ZIP');
   await assert.rejects(call('/api/walmart/products/700/history', 'zip=abc'), /ZIP/);
 });
