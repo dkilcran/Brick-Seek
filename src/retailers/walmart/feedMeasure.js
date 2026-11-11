@@ -1,3 +1,5 @@
+import { NOT_SUBCATEGORY } from './tierLists.js';
+
 // One-off measurements of Walmart's bulk feeds (/paginated/items) against our
 // search-built tier lists:
 //  - deals: the Clearance, Rollback and Reduced Price feeds for each configured
@@ -17,8 +19,6 @@ export const STORE_BRANDS = [
   'Marketside', "Sam's Choice", 'bettergoods', 'Freshness Guaranteed', 'Play Day', 'Kid Connection', 'Adventure Force', 'My Life As',
   'Athletic Works', 'EverStart', 'SuperTech', 'Auto Drive', 'Expert Grill', 'Backyard Grill', 'Spark. Create. Imagine.',
 ];
-// Taxonomy children that are shop pages rather than product subcategories.
-const NOT_SUBCATEGORY = /^shop |shop by|featured|endeca|sweepstakes|ideas|lookbook|inspiration|manual|values|personalized|gift|deals|new arrivals|trending|savings|clearance|rollback/i;
 const BATCH = 20;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

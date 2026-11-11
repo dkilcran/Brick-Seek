@@ -499,8 +499,9 @@ export class WalmartLiveSource {
    * Walmart-sold products and the total result count.
    */
   /** @param {{ keepOnlineOnly?: boolean }} opts  the store lists drop online-only items; product search keeps them */
-  async searchPage({ query, filters, lo = null, hi = null, start = 1, sort = null, keepOnlineOnly = false }) {
+  async searchPage({ query, filters, lo = null, hi = null, start = 1, sort = null, keepOnlineOnly = false, categoryId = null }) {
     const params = { query, facet: 'on', 'facet.filter': filters, start, numItems: 25 };
+    if (categoryId) params.categoryId = categoryId; // limits the search to a (sub)category
     if (lo != null && hi != null) params['facet.range'] = `price:[${lo} TO ${hi}]`;
     if (sort) Object.assign(params, { sort: 'price', order: sort });
     const data = await this.request('/search', params, { cache: false });

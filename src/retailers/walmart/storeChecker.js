@@ -279,6 +279,16 @@ export class StoreChecker {
         this.finish(state);
         return false;
       }
+      // Once per rebuild: also search every subcategory of the departments by name
+      // (queued after the department searches; the queue survives restarts).
+      const subKey = `tier3:subcats:${this.retailer}:${run}`;
+      if (config.tier3Subcategories !== false && this.source.taxonomy && !this.db.getMeta(subKey)) {
+        const n = this.tiers.enqueueSubcategories(run, {
+          tier: 3, taxonomy: await this.source.taxonomy(), departments: config.departments, baseFilters: config.baseFilters,
+        });
+        this.db.setMeta(subKey, n);
+        return true;
+      }
       const job = this.tiers.nextJob(run);
       if (job) {
         await this.tiers.runJob(run, job, this.source, { keep: this.keepProduct(config) });
@@ -441,7 +451,10 @@ export class StoreChecker {
       },
       tier3: {
         listItems: this.tiers.count(3),
-        rebuilding: building ? { run: building, queued: this.tiers.queueSize(building), found: this.tiers.count(3, building) } : null,
+        rebuilding: building ? {
+          run: building, queued: this.tiers.queueSize(building), found: this.tiers.count(3, building),
+          subcategories: this.db.getMeta(`tier3:subcats:${this.retailer}:${building}`),
+        } : null,
         cursor: this.db.getMeta(`tier3:cursor:${this.retailer}`), lookupsToday: s.tier3Lookups,
       },
       storePricesSaved: s.rows,

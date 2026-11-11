@@ -8,6 +8,8 @@
 // search jobs saved in SQLite, so a restart resumes where it left off.
 
 export const PAGE = 25;
+/** Taxonomy children that are shop pages rather than product subcategories. */
+export const NOT_SUBCATEGORY = /^shop |shop by|featured|endeca|sweepstakes|ideas|lookbook|inspiration|manual|values|personalized|gift|deals|new arrivals|trending|savings|clearance|rollback/i;
 export const CAP = 1000; // Walmart: "Start should be less than 1000"
 const FIRST_BANDS = [[0, 5], [5, 10], [10, 20], [20, 50], [50, 100], [100, 200], [200, 500], [500, 100000]];
 
@@ -57,12 +59,16 @@ export class TierStore {
         PRIMARY KEY (retailer, item_id)
       ) WITHOUT ROWID;
     `);
+    // A search job limited to a Walmart (sub)category id (search's categoryId).
+    if (!this.db.prepare('PRAGMA table_info(search_queue)').all().some((c) => c.name === 'category')) {
+      this.db.exec('ALTER TABLE search_queue ADD COLUMN category TEXT');
+    }
     // Which Walmart offer list found a tier 2 item: 'rollback' or 'reduced'.
     if (!this.db.prepare('PRAGMA table_info(tier_items)').all().some((c) => c.name === 'offer')) {
       this.db.exec('ALTER TABLE tier_items ADD COLUMN offer TEXT');
     }
     this.insertJob = this.db.prepare(`INSERT INTO search_queue
-      (retailer, run, tier, department, query, filters, lo, hi, sort, start) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+      (retailer, run, tier, department, query, filters, lo, hi, sort, start, category) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
     this.insertItem = this.db.prepare(`INSERT OR IGNORE INTO tier_items (retailer, tier, run, item_id, department, offer) VALUES (?, ?, ?, ?, ?, ?)`);
     this.upsertProduct = this.db.prepare(`INSERT INTO tier_products (retailer, item_id, run, data) VALUES (?, ?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET run = excluded.run, data = excluded.data`);
@@ -70,7 +76,33 @@ export class TierStore {
 
   enqueue(run, job) {
     this.insertJob.run(this.retailer, run, job.tier, job.department, job.query, JSON.stringify(job.filters),
-      job.lo ?? null, job.hi ?? null, job.sort ?? null, job.start ?? 1);
+      job.lo ?? null, job.hi ?? null, job.sort ?? null, job.start ?? 1, job.category ?? null);
+  }
+
+  /**
+   * Queue one search per Walmart subcategory of the departments, by its own
+   * name within that subcategory (search's categoryId), e.g. "Area Rugs" in
+   * Home > Decor > Area Rugs' parent. Reaches far more of the shelf than the
+   * department words alone (measured: ~24,000 in-store items Tier 3 lacked).
+   * @param {{ name: string, id: string, children?: object[] }[]} taxonomy
+   * @returns {number} subcategories queued
+   */
+  enqueueSubcategories(run, { tier, taxonomy, departments, baseFilters }) {
+    let n = 0;
+    this.db.exec('BEGIN');
+    try {
+      for (const dept of taxonomy.filter((c) => departments.includes(c.name))) {
+        for (const subcat of (dept.children ?? []).filter((c) => c.id && !NOT_SUBCATEGORY.test(c.name))) {
+          this.enqueue(run, { tier, department: dept.name, query: subcat.name, filters: [...baseFilters], category: subcat.id });
+          n += 1;
+        }
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+    return n;
   }
 
   /**
@@ -117,7 +149,7 @@ export class TierStore {
   async runJob(run, job, source, { keep = () => true } = {}) {
     let result;
     try {
-      result = await source.searchPage({ query: job.query, filters: job.filters, lo: job.lo, hi: job.hi, start: job.start, sort: job.sort });
+      result = await source.searchPage({ query: job.query, filters: job.filters, lo: job.lo, hi: job.hi, start: job.start, sort: job.sort, categoryId: job.category ?? null });
     } catch (err) {
       // A bad page (or Walmart refusing a sort) skips just this job; rate limits are retried by the client.
       if (!/\b400\b/.test(err.message)) throw err;

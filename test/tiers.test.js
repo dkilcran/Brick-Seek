@@ -295,3 +295,24 @@ test('after the search, Walmart\'s deal feeds add to the lists; online-only item
   assert.ok(day.lookups.some((l) => l.ids.includes('f1')), 'feed items get store checks');
   assert.ok(!day.lookups.some((l) => l.ids.includes('web')), 'online-only items are skipped');
 });
+
+test('the tier 3 rebuild also searches each subcategory by name within it', async () => {
+  const day = makeDay({ start: '2026-11-02T11:00:00Z', catalog: CATALOG }); // Monday: rebuild day
+  day.source.taxonomy = async () => [
+    { name: 'Toys', id: '4171', children: [{ name: 'Dolls', id: '4171_1' }, { name: 'Shop by Age', id: '4171_9' }] },
+    { name: 'Clothing', id: '5438', children: [{ name: 'Shirts', id: '5438_1' }] },
+  ];
+  const search = day.source.searchPage.bind(day.source);
+  const withCategory = [];
+  day.source.searchPage = async (q) => {
+    if (q.categoryId) {
+      withCategory.push([q.query, q.categoryId]);
+      return { total: 2, products: [{ id: 'd1', name: 'Doll', price: 9, category: 'Toys', seller: { isRetailer: true } }, { id: 'x1', name: 'Item', price: 5, category: 'Toys', seller: { isRetailer: true } }] };
+    }
+    return search(q);
+  };
+  await day.runUntilIdle();
+  assert.deepEqual(withCategory, [['Dolls', '4171_1']], 'only product subcategories of the configured departments');
+  assert.ok(day.tiers.itemIds(3).includes('d1'), 'subcategory finds join tier 3');
+  assert.equal(day.db.getMeta('tier3:subcats:walmart:2026-11-02:t3'), 1);
+});
