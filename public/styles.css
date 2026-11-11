@@ -50,6 +50,7 @@ input:focus, select:focus { outline: 2px solid var(--retailer); outline-offset: 
 
 .section-title { display: flex; align-items: baseline; justify-content: space-between; margin: 32px 0 12px; }
 .section-title h2 { margin: 0; font-size: 20px; }
+.section-title select { max-width: 60%; padding: 6px 10px; }
 .muted { color: var(--muted); }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
 .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }

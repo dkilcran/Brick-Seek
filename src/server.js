@@ -62,7 +62,10 @@ export function createApp(registry = createDefaultRegistry()) {
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT ?? 3000);
   const registry = createDefaultRegistry();
-  for (const adapter of registry.list()) adapter.storeChecker?.start();
+  for (const adapter of registry.list()) {
+    adapter.storeChecker?.start();
+    adapter.warmCards?.({ delayMs: 5000 });
+  }
   // Once a day: drop old price history.
   const pruneAll = () => {
     registry.tracker.prune();

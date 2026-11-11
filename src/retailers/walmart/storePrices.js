@@ -11,6 +11,7 @@ const MARKDOWN_RULES = '4';
 const SOLD_BY_WALMART = "IN ('walmart', 'walmart.com')";
 
 const dayBefore = (now, days) => new Date(now - days * 86400000).toISOString().slice(0, 10);
+const dayAfter = (day) => new Date(Date.parse(`${day}T00:00:00Z`) + 86400000).toISOString().slice(0, 10);
 const flag = (v) => (v == null ? null : v ? 1 : 0);
 
 export class StorePrices {
@@ -19,6 +20,8 @@ export class StorePrices {
     this.db = db;
     /** Bumps whenever store_markdowns changes, so pages can cache what they read from it. */
     this.markdownVersion = 0;
+    /** Called after each refreshMarkdowns (e.g. to rebuild the deal lists ahead of visitors). */
+    this.onRefresh = null;
     /** Bumps whenever an item's online price or online-only flag is saved. */
     this.onlineVersion = 0;
     /** Markdown threshold (settings: markdownPercent); see refreshMarkdowns. */
@@ -301,6 +304,7 @@ export class StorePrices {
       this.db.exec('ROLLBACK');
       throw err;
     }
+    this.onRefresh?.();
   }
 
   // ---- reading -----------------------------------------------------------------
@@ -358,6 +362,44 @@ export class StorePrices {
   /** An item's saved details and Walmart.com offer (a store_items row), or undefined. */
   item(retailer, itemId) {
     return this.getItem.get(retailer, String(itemId));
+  }
+
+  /**
+   * An item's Walmart-sold price at each store over the last `days`, one point
+   * per day from the first change the log has in that window to the last
+   * check; a day between carries the last known price. A price that hasn't
+   * changed in the window is just its last check.
+   * @returns {Map<string, { date: string, price: number, wasPrice: number|null, clearance: boolean }[]>} store id -> points, oldest first
+   */
+  storeHistory(retailer, itemId, { days = PRICE_DAYS, now = Date.now() } = {}) {
+    const since = dayBefore(now, days);
+    const changes = this.db.prepare(`SELECT store_id, date, price, was_price, clearance FROM store_prices
+      WHERE retailer = ? AND item_id = ? AND date >= ? AND price > 0 AND lower(seller) ${SOLD_BY_WALMART} ORDER BY store_id, date`)
+      .all(retailer, String(itemId), since);
+    const latest = this.db.prepare(`SELECT store_id, date, price, was_price, clearance FROM store_latest
+      WHERE retailer = ? AND item_id = ? AND date >= ? AND price > 0 AND lower(seller) ${SOLD_BY_WALMART}`)
+      .all(retailer, String(itemId), since);
+    const byStore = new Map();
+    for (const r of [...changes, ...latest]) {
+      if (!byStore.has(r.store_id)) byStore.set(r.store_id, []);
+      byStore.get(r.store_id).push(r);
+    }
+    const out = new Map();
+    for (const [storeId, rows] of byStore) {
+      rows.sort((a, b) => a.date.localeCompare(b.date));
+      const points = [];
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        const end = rows[i + 1]?.date ?? r.date;
+        // Carry this price forward up to the next change (or just this day).
+        for (let d = r.date; d === r.date || d < end; d = dayAfter(d)) {
+          const point = { date: d, price: r.price, wasPrice: r.was_price > r.price ? r.was_price : null, clearance: r.clearance === 1 };
+          if (points.at(-1)?.date === d) points[points.length - 1] = point; else points.push(point);
+        }
+      }
+      out.set(storeId, points);
+    }
+    return out;
   }
 
   /** store_items rows for many items: id -> row (items never seen are left out). */

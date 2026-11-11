@@ -338,6 +338,33 @@ test('product pages come from saved data instead of Walmart', async () => {
   assert.equal(liveCalls, 1, 'unknown items are looked up live');
 });
 
+test('the price history route adds each nearby store\'s prices', async () => {
+  const { createRoutes, matchRoute } = await import('../src/api.js');
+  const { RetailerRegistry } = await import('../src/retailers/registry.js');
+  const nearby = [{ id: '573', name: 'Lee' }, { id: '4590', name: 'Lee SW' }, { id: '1599', name: 'Overland Park' }];
+  const { adapter, db } = liveAdapter({ source: { stores: async () => nearby }, stores: [{ id: '1599', label: 'OP Metcalf' }] });
+  db.recordStorePrices('walmart', '4590', [walmartRow('700', 5, { title: 'Lamp' })], today());
+  db.recordStorePrices('walmart', '1599', [walmartRow('700', 4, { title: 'Lamp' })], today());
+  const routes = createRoutes(new RetailerRegistry().register(adapter));
+  const call = (path, qs = '') => { const m = matchRoute(routes, 'GET', path); return m.route.handler({ params: m.params, query: new URLSearchParams(qs) }); };
+  const withZip = await call('/api/walmart/products/700/history', 'zip=64081');
+  assert.deepEqual(withZip.stores.map((s) => [s.store.name, s.points.at(-1).price]), [['Lee SW', 5], ['Overland Park', 4]], 'nearest first');
+  assert.deepEqual((await call('/api/walmart/products/700/history')).stores.map((s) => s.store.name), ['OP Metcalf'], 'tracked stores without a ZIP');
+  await assert.rejects(call('/api/walmart/products/700/history', 'zip=abc'), /ZIP/);
+});
+
+test('deal lists are built ahead of visitors for no ZIP and the settings\' ZIPs', async () => {
+  const asked = [];
+  const { adapter, db } = liveAdapter({ source: { stores: async (zip) => { asked.push(zip); return []; } }, tiers: true });
+  adapter.loadStoreConfig = () => ({ config: { zips: ['64081', '66211'], stores: [], departments: [] }, errors: [] });
+  db.onRefresh = () => adapter.warmCards({ delayMs: 0 });
+  db.refreshMarkdowns('walmart');
+  db.refreshMarkdowns('walmart'); // a burst builds once
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual([...adapter.cardCache.keys()].sort(), ['', '64081', '66211']);
+  assert.deepEqual(asked, ['64081', '66211']);
+});
+
 test('discounts come from the store data, not Walmart\'s msrp', async () => {
   const { adapter, db } = liveAdapter();
   db.recordStorePrices('walmart', 'A', [walmartRow('fish', 1)], today());

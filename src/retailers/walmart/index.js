@@ -73,6 +73,7 @@ export class WalmartAdapter extends RetailerAdapter {
     });
     const loadStoreConfig = () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH);
     const adapter = new WalmartAdapter({ source, mode: 'live', tracker, storeData, tierStore, loadStoreConfig });
+    storeData.onRefresh = () => adapter.warmCards();
     adapter.storeChecker = new StoreChecker({
       source, db: storeData, tiers: tierStore, loadConfig: loadStoreConfig,
       // Each day's online prices of the deal lists: the history behind "Price drop" and "Lowest price ever".
@@ -232,6 +233,23 @@ export class WalmartAdapter extends RetailerAdapter {
   /** The online price history: synthetic in demo mode, the recorded prices when live. */
   async getPriceHistoryFor(product) {
     return (await this.source.priceHistory?.(product)) ?? this.tracker.history(this.id, product.id);
+  }
+
+  /**
+   * The item's price over the last 14 days at each store that has one: the
+   * stores among Walmart's 50 nearest to `zip` (nearest first), or every
+   * tracked store without a ZIP.
+   * @returns {Promise<{ store: { id: string, name: string }, points: { date: string, price: number, wasPrice: number|null, clearance: boolean }[] }[]>}
+   */
+  async storePriceHistory(itemId, zip) {
+    if (!this.storeData) return [];
+    const byStore = this.storeData.storeHistory(this.id, itemId);
+    if (!byStore.size) return [];
+    const labels = new Map((this.storeConfig()?.stores ?? []).map((s) => [s.id, s.label]));
+    const stores = zip
+      ? (await this.source.stores(zip, { limit: 50 })).map((s) => ({ id: s.id, name: s.name }))
+      : [...labels].map(([id, label]) => ({ id, name: label ?? `Walmart #${id}` }));
+    return stores.filter((s) => byStore.has(s.id)).map((store) => ({ store, points: byStore.get(store.id) }));
   }
 
   async getDepartments() {
@@ -454,6 +472,26 @@ export class WalmartAdapter extends RetailerAdapter {
     if (this.cardCache.size >= CARD_SETS) this.cardCache.delete(this.cardCache.keys().next().value);
     this.cardCache.set(zip ?? '', { key, online, at: Date.now(), cards: out });
     return out;
+  }
+
+  /**
+   * Build the deal lists for no ZIP and the settings' ZIPs ahead of visitors
+   * (each build holds the server for a few seconds on Render). Runs a second
+   * after the last call, so a burst of deal rebuilds builds once.
+   */
+  warmCards({ delayMs = 1000 } = {}) {
+    clearTimeout(this.warmTimer);
+    this.warmTimer = setTimeout(async () => {
+      for (const zip of [undefined, ...(this.storeConfig()?.zips ?? [])]) {
+        try {
+          await this.allDealCards({ zip });
+        } catch (err) {
+          console.warn(`walmart: building the deal list for ${zip ?? 'no ZIP'} failed: ${err.message}`);
+        }
+        await new Promise((r) => setImmediate(r)); // let waiting requests in between builds
+      }
+    }, delayMs);
+    this.warmTimer.unref?.();
   }
 
   /** Walmart.com's deal on one item (for the product page), or null. */

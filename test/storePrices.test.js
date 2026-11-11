@@ -175,3 +175,31 @@ test('leftovers of removed features are dropped once', () => {
   assert.equal(db.getMeta('feedMeasure:walmart'), null);
   assert.deepEqual(db.getMeta('check:state'), { day: '2026-11-04' });
 });
+
+test('store price history: one point per day per store, carried forward between checks', () => {
+  const db = new StorePrices(new PriceTracker().db);
+  const save = (store, date, price, extra = {}) => db.recordStorePrices('walmart', store, [{ itemId: '1', price, seller: 'Walmart.com', inStock: true, ...extra }], date);
+  save('573', '2026-11-01', 5);
+  save('573', '2026-11-02', 5);
+  save('573', '2026-11-04', 3, { clearance: true, wasPrice: 5 });
+  save('573', '2026-11-05', 3, { clearance: true, wasPrice: 5 });
+  save('4590', '2026-11-05', 4);
+  db.recordStorePrices('walmart', '1599', [{ itemId: '1', price: 1, seller: 'Rug Co', inStock: true }], '2026-11-05');
+  const history = db.storeHistory('walmart', '1', { now: Date.parse('2026-11-06T12:00:00Z') });
+  assert.deepEqual(history.get('573').map((p) => [p.date, p.price, p.clearance]), [
+    ['2026-11-01', 5, false], ['2026-11-02', 5, false], ['2026-11-03', 5, false], ['2026-11-04', 3, true], ['2026-11-05', 3, true],
+  ]);
+  assert.equal(history.get('573').at(-1).wasPrice, 5);
+  assert.deepEqual(history.get('4590').map((p) => [p.date, p.price]), [['2026-11-05', 4]]);
+  assert.equal(history.has('1599'), false, 'another seller\'s price');
+  assert.deepEqual([...db.storeHistory('walmart', '1', { now: Date.parse('2026-11-30T12:00:00Z') }).keys()], [], 'older than 14 days');
+});
+
+test('each deal label rebuild calls onRefresh', () => {
+  const db = new StorePrices(new PriceTracker().db);
+  let calls = 0;
+  db.onRefresh = () => { calls += 1; };
+  db.refreshMarkdowns('walmart');
+  db.refreshMarkdowns('walmart');
+  assert.equal(calls, 2);
+});

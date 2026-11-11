@@ -25,6 +25,7 @@ import { localParts, scheduleDayKey } from '../../lib/scanSchedule.js';
 const FEED_OFFERS = ['clearance', 'rollback', 'reduced']; // specialOffer values of Walmart's deal feeds
 const MAX_FEED_PAGES = 600; // safety cap per night over all feeds (about 60 pages measured)
 const BATCH = 20; // most item ids per lookup
+const TIER3_REFRESH_LOOKUPS = 1000; // tier 3 lookups between deal label rebuilds (~35 minutes)
 const REQUIRED = new Set(['lists', 'checks']);
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -311,8 +312,8 @@ export class StoreChecker {
       ...state, tier3Slice: { ...slice, storeIndex: slice.storeIndex + 1 },
       tier3Lookups: state.tier3Lookups + 1, rows: state.rows + saved,
     };
-    // Keep the deal lists current while tier 3 runs (about every 7 minutes).
-    if ((state.tier3Lookups + 1) % 200 === 0) this.db.refreshMarkdowns(this.retailer);
+    // Add tier 3 finds to the deal lists as it runs (about every 35 minutes).
+    if ((state.tier3Lookups + 1) % TIER3_REFRESH_LOOKUPS === 0) this.db.refreshMarkdowns(this.retailer);
     return true;
   }
 

@@ -27,8 +27,9 @@ npm test
   a time. An item number, UPC or walmart.com link opens the product page.
 - **Product page**: the online deal, one list of the 15 nearest stores (plus
   farther tracked stores with a saved price) with each store's price, stock and
-  deal label, "Check store" / "Check all stores" for a live lookup, and the
-  online price history.
+  deal label, "Check store" / "Check all stores" for a live lookup, and a
+  price history chart for Walmart.com or any store with a saved price (store
+  prices go back 14 days).
 - The ZIP in the top bar picks the nearby stores; it is remembered.
 
 ## How the data is collected (Walmart, live mode)
@@ -41,7 +42,7 @@ night (Chicago time), paced at about 28 calls a minute:
    `config/store-scan.json`, then Walmart's deal feeds (sold by Walmart only).
 2. **5:00, store checks:** the item lookup with a store number returns that
    store's price, stock, Clearance flag and was-price. Deal items are checked at
-   the 3 daily stores and 2 rotating ones, Clearance and store deals at the
+   the 3 daily stores and 4 rotating ones, Clearance and store deals at the
    other tracked stores, and Walmart.com's own price for every deal item.
 3. **Mondays, Tier 3:** the list of everything Walmart sells in stores in those
    departments is rebuilt from department and subcategory searches.
@@ -117,7 +118,7 @@ config/store-scan.json      stores, departments, schedule (see config/README.md)
 | `GET /api/:retailer/products/:id` | product details, store offers and online deal |
 | `GET /api/:retailer/products/:id/inventory?zip=&sort=distance\|price` | the store list for a ZIP |
 | `GET /api/:retailer/products/:id/check-store?store=` | live lookup at one store (live mode) |
-| `GET /api/:retailer/products/:id/history` | online price history |
+| `GET /api/:retailer/products/:id/history?zip=` | online price history, and each store's (nearby ones with `zip`) |
 | `GET /api/:retailer/stores?zip=` | nearby stores |
 | `GET /api/:retailer/store-check` | progress of the daily cycle |
 | `GET /api/:retailer/scan-config` | the settings, checked against Walmart's departments |

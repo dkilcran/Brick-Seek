@@ -109,11 +109,13 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       return result;
     }],
 
-    ['GET', '/api/:retailer/products/:id/history', async ({ params }) => {
+    // The online price history, and with storePriceHistory the price at each store.
+    ['GET', '/api/:retailer/products/:id/history', async ({ params, query }) => {
       const adapter = requireRetailer(registry, params.retailer);
+      const zip = query.get('zip') ? requireZip(query.get('zip')) : null;
       const history = await adapter.getPriceHistory(params.id);
       if (!history) throw new HttpError(404, 'Product not found');
-      return { history };
+      return { history, stores: (await adapter.storePriceHistory?.(params.id, zip)) ?? [] };
     }],
 
     ['GET', '/api/:retailer/stores', async ({ params, query }) => {

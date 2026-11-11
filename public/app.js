@@ -413,7 +413,9 @@ async function itemView(retailerId, id, query) {
       </div>
     </div>
     <div id="inventory"></div>
-    ${r.features.priceHistory ? '<div class="section-title"><h2>Price history</h2><span class="muted">online price</span></div><div class="card" id="history"><div class="loading">Loading…</div></div>' : ''}`;
+    ${r.features.priceHistory ? `<div class="section-title"><h2>Price history</h2>
+      <select id="hist-src" aria-label="Price history for" hidden></select></div>
+      <div class="card" id="history"><div class="loading">Loading…</div></div>` : ''}`;
 
   const $inv = $app.querySelector('#inventory');
   if (!inv) {
@@ -429,13 +431,33 @@ async function itemView(retailerId, id, query) {
   }
 
   if (r.features.priceHistory) {
+    const $history = $app.querySelector('#history');
     try {
-      const { history } = await api(`/api/${r.id}/products/${encodeURIComponent(id)}/history`);
-      $app.querySelector('#history').innerHTML = priceChart(history);
+      const { history, stores = [] } = await api(`/api/${r.id}/products/${encodeURIComponent(id)}/history${/^\d{5}$/.test(zip ?? '') ? `?zip=${zip}` : ''}`);
+      renderHistory($app.querySelector('#hist-src'), $history, history, stores);
     } catch (err) {
-      $app.querySelector('#history').innerHTML = `<div class="error">${esc(err.message)}</div>`;
+      $history.innerHTML = `<div class="error">${esc(err.message)}</div>`;
     }
   }
+}
+
+/** The price history chart: Walmart.com's price, or the price at one store (picked from a list). */
+function renderHistory($select, $el, online, stores) {
+  const draw = (key) => {
+    const store = stores.find((s) => s.store.id === key);
+    $el.innerHTML = store
+      ? `${priceChart(store.points)}<p class="muted" style="font-size:13px;margin:8px 0 0">Price at ${esc(store.store.name)}. A day without a check shows the last price seen; store prices are kept 14 days.</p>`
+      : priceChart(online);
+  };
+  if (stores.length) {
+    $select.innerHTML = `<option value="online">Online (walmart.com)</option>${stores.map((s) =>
+      `<option value="${esc(s.store.id)}">${esc(s.store.name)} · ${money(s.points.at(-1).price)}</option>`).join('')}`;
+    $select.hidden = false;
+    // Start with the online price when there is one, else the nearest store.
+    $select.value = online.length ? 'online' : stores[0].store.id;
+    $select.addEventListener('change', () => draw($select.value));
+  }
+  draw($select.value || 'online');
 }
 
 function renderInventory($el, r, product, inv, { radius, sort }) {
