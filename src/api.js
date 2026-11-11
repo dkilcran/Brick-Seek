@@ -197,7 +197,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
         clearanceFlag: count((i) => String(i.clearance)),
         sample: items.slice(0, 5).map((i) => ({
           itemId: i.itemId, name: i.name?.slice(0, 50), seller: i.sellerInfo ?? null, salePrice: i.salePrice, stock: i.stock,
-          clearance: i.clearance, strikeThroughPrice: i.strikeThroughPrice ?? null,
+          clearance: i.clearance, strikeThroughPrice: i.strikeThroughPrice ?? null, categoryPath: i.categoryPath ?? null,
         })),
         ...(query.get('fields') === '1' ? {
           fields: items.reduce((m, i) => { for (const k of Object.keys(i)) m[k] = (m[k] ?? 0) + 1; return m; }, {}),
