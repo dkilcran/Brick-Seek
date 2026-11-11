@@ -91,20 +91,6 @@ export class StoreChecker {
     return h >= config.schedule.endHour || h < config.schedule.productListHour;
   }
 
-  static weekdayOf(day) {
-    return WEEKDAYS[new Date(`${day}T12:00:00Z`).getUTCDay()];
-  }
-
-  hourNow() {
-    return localParts(this.now()).hour;
-  }
-
-  /** Past the end time: from endAt until the next day's lists start. */
-  pastEnd(config) {
-    const h = this.hourNow();
-    return h >= config.schedule.endHour || h < config.schedule.productListHour;
-  }
-
   /** Search results to keep: items in the settings' departments (or with no department). */
   keepProduct(config) {
     const allowed = new Set(config.departments ?? []);

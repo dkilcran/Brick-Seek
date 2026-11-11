@@ -50,6 +50,22 @@ export class PriceTracker {
     return this.select.all(retailer, String(productId)).map((r) => ({ date: r.date, price: r.price }));
   }
 
+  /**
+   * For many products at once: days recorded, the last price before `today`
+   * and the lowest price before `today` (what lib/allDeals.js signalsFrom needs).
+   * @returns {Map<string, { days: number, previous: number|null, lowest: number|null }>}
+   */
+  summaries(retailer, productIds, today = new Date().toISOString().slice(0, 10)) {
+    this.summarize ??= this.db.prepare(`
+      SELECT h.product_id AS id, COUNT(*) AS days, MIN(CASE WHEN h.date < :today THEN h.price END) AS lowest,
+        (SELECT p.price FROM price_history p WHERE p.retailer = :retailer AND p.product_id = h.product_id AND p.date < :today
+         ORDER BY p.date DESC LIMIT 1) AS previous
+      FROM json_each(:ids) j CROSS JOIN price_history h ON h.retailer = :retailer AND h.product_id = j.value
+      GROUP BY h.product_id`);
+    const rows = this.summarize.all({ retailer, today, ids: JSON.stringify(productIds.map(String)) });
+    return new Map(rows.map((r) => [r.id, { days: r.days, previous: r.previous, lowest: r.lowest }]));
+  }
+
   /** Drop rows older than the retention window. */
   prune(now = new Date()) {
     const cutoff = new Date(now.getTime() - RETENTION_DAYS * 86400000).toISOString().slice(0, 10);

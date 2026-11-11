@@ -45,10 +45,23 @@ export function discount(price, ref) {
  */
 export function priceSignals(price, history = [], today = new Date().toISOString().slice(0, 10)) {
   const past = history.filter((p) => p.date < today);
-  const previous = past.at(-1)?.price ?? null;
-  const dropPercent = previous > price ? Math.round((1 - price / previous) * 100) : 0;
-  const atLowest = history.length >= MIN_HISTORY_DAYS && past.length > 0 && price <= Math.min(...past.map((p) => p.price));
-  return { dropPercent, atLowest };
+  return signalsFrom(price, {
+    days: history.length,
+    previous: past.at(-1)?.price ?? null,
+    lowest: past.length ? Math.min(...past.map((p) => p.price)) : null,
+  });
+}
+
+/**
+ * The same from a summary of the history (see PriceTracker.summaries).
+ * @param {{ days?: number, previous?: number|null, lowest?: number|null }} summary
+ *   days recorded (today included), the last price before today, the lowest before today
+ */
+export function signalsFrom(price, { days = 0, previous = null, lowest = null } = {}) {
+  return {
+    dropPercent: previous > price ? Math.round((1 - price / previous) * 100) : 0,
+    atLowest: days >= MIN_HISTORY_DAYS && lowest != null && price <= lowest,
+  };
 }
 
 /** Labels a filter can pick: the deal kinds plus price-history badges. */

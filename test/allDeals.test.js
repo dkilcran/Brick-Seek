@@ -78,26 +78,34 @@ test('Walmart builds cards from the online lookups and store deals', async () =>
   assert.equal(adapter.onlineDeal('mkt'), null, 'a marketplace offer online');
   // The online price dropped since the last recorded day, and was never lower.
   for (let d = 1; d <= 7; d++) tracker.record('walmart', 'rb', 24, new Date(Date.now() - d * 86400000));
-  adapter.cardCache = null;
+  adapter.cardCache.clear();
   const rb = (await adapter.allDealCards()).find((c) => c.product.id === 'rb');
   assert.deepEqual([rb.dropPercent, rb.atLowest], [17, true]);
   // Rollback online with no Walmart.com was-price: not an online deal.
   tiers.insertItem.run('walmart', 2, 'r2', 'flat', 'Home', 'rollback');
   tiers.saveProduct('r2', { id: 'flat', name: 'Soda', price: 91.54, category: 'Home' });
   db.saveOnlineLookup('walmart', 'flat', { isWalmart: true, price: 91.54, wasPrice: null, onlineOnly: false, availableOnline: true }, day);
-  adapter.cardCache = null;
+  adapter.cardCache.clear();
   assert.equal((await adapter.allDealCards()).some((c) => c.product.id === 'flat'), false);
   assert.equal(adapter.onlineDeal('flat'), null);
   // A store deal with no online lookup yet isn't called store-only.
   db.recordStorePrices('walmart', '573', [{ itemId: 'shelf', title: 'Lamp', price: 3, clearance: true, seller: 'Walmart.com', inStock: true }], day);
-  db.refreshMarkdowns('walmart');
-  adapter.cardCache = null;
+  db.refreshMarkdowns('walmart'); // new store deals: the cards are rebuilt
   let shelf = (await adapter.allDealCards()).find((c) => c.product.id === 'shelf');
   assert.equal(shelf.soldOnline, true);
   db.saveOnlineLookup('walmart', 'shelf', { isWalmart: true, price: 5, onlineOnly: false, availableOnline: false }, day);
-  adapter.cardCache = null;
+  assert.equal((await adapter.allDealCards()).find((c) => c.product.id === 'shelf').soldOnline, true, 'online changes wait up to 5 minutes');
+  adapter.cardCache.clear();
   shelf = (await adapter.allDealCards()).find((c) => c.product.id === 'shelf');
   assert.equal(shelf.soldOnline, false, 'the lookup says it is not sold online');
+
+  // Card sets are kept per ZIP.
+  const source = { stores: async () => [{ retailer: 'walmart', id: '573', name: 'Lee' }] };
+  adapter.source = source;
+  const near = await adapter.allDealCards({ zip: '64081' });
+  const all = await adapter.allDealCards();
+  assert.equal(await adapter.allDealCards({ zip: '64081' }), near, 'reused');
+  assert.equal(await adapter.allDealCards(), all);
 });
 
 test('price signals: the drop since the last recorded price, and lowest-ever after a week of history', () => {

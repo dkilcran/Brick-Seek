@@ -1,6 +1,6 @@
 // Small deterministic PRNG helpers so demo data is stable across requests.
 
-export function hashString(str) {
+function hashString(str) {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i);
@@ -9,7 +9,7 @@ export function hashString(str) {
   return h >>> 0;
 }
 
-export function mulberry32(seed) {
+function mulberry32(seed) {
   let a = seed >>> 0;
   return function next() {
     a = (a + 0x6d2b79f5) >>> 0;

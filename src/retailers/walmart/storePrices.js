@@ -5,7 +5,7 @@
 
 const PRICE_DAYS = 14; // store prices older than this aren't shown, and history is pruned
 /** A store price at least this far below the item's highest valid store price is a Markdown. */
-export const MARKDOWN_GAP = 0.1;
+const MARKDOWN_GAP = 0.1;
 /** Bump when the labeling rules change, so startup rebuilds store_markdowns with them. */
 const MARKDOWN_RULES = '4';
 const SOLD_BY_WALMART = "IN ('walmart', 'walmart.com')";
@@ -19,6 +19,8 @@ export class StorePrices {
     this.db = db;
     /** Bumps whenever store_markdowns changes, so pages can cache what they read from it. */
     this.markdownVersion = 0;
+    /** Bumps whenever an item's online price or online-only flag is saved. */
+    this.onlineVersion = 0;
     /** Markdown threshold (settings: markdownPercent); see refreshMarkdowns. */
     this.markdownGap = MARKDOWN_GAP;
     db.exec(`
@@ -150,6 +152,7 @@ export class StorePrices {
   /** Walmart's own online price for an item as seen on `date` (from a Walmart-sold search or feed result). */
   saveOnlinePrice(retailer, itemId, price, date) {
     this.setOnline.run(retailer, String(itemId), price > 0 ? price : null, date);
+    this.onlineVersion += 1;
   }
 
   /**
@@ -163,6 +166,7 @@ export class StorePrices {
     this.setOnlineLookup.run(retailer, String(itemId), walmart && o.price > 0 ? o.price : null, date,
       walmart && o.wasPrice > o.price ? o.wasPrice : null,
       o ? (o.onlineOnly ? 1 : 0) : null, walmart ? (o.availableOnline ? 1 : 0) : null, date);
+    this.onlineVersion += 1;
   }
 
   /** Mark items as sold online only (a store lookup said so). */
@@ -170,6 +174,7 @@ export class StorePrices {
     const mark = this.db.prepare(`INSERT INTO store_items (retailer, item_id, online_only) VALUES (?, ?, 1)
       ON CONFLICT (retailer, item_id) DO UPDATE SET online_only = 1`);
     for (const id of ids) mark.run(retailer, String(id));
+    this.onlineVersion += 1;
   }
 
   /** Forget items' current store prices everywhere (e.g. Walmart sells them online only). */
@@ -353,6 +358,12 @@ export class StorePrices {
   /** An item's saved details and Walmart.com offer (a store_items row), or undefined. */
   item(retailer, itemId) {
     return this.getItem.get(retailer, String(itemId));
+  }
+
+  /** store_items rows for many items: id -> row (items never seen are left out). */
+  items(retailer, itemIds) {
+    this.getItems ??= this.db.prepare('SELECT s.* FROM json_each(?) j CROSS JOIN store_items s ON s.retailer = ? AND s.item_id = j.value');
+    return new Map(this.getItems.all(JSON.stringify(itemIds.map(String)), retailer).map((r) => [r.item_id, r]));
   }
 
   /** True when Walmart itself sells the item at some checked store. */

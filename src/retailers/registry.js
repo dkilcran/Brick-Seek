@@ -26,7 +26,7 @@ export class RetailerRegistry {
 }
 
 /** One database (DATABASE_PATH) shared by every retailer. */
-export function createPriceTracker(env = process.env) {
+function createPriceTracker(env = process.env) {
   return new PriceTracker({ dbPath: env.DATABASE_PATH || 'data/clearance-tracker.db' });
 }
 

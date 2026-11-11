@@ -132,7 +132,7 @@ test('a full day runs in the agreed order', async () => {
   // Monday Nov 2 2026, 4:30am Chicago (CST, UTC-6)
   const day = makeDay({ start: '2026-11-02T10:30:00Z', catalog: CATALOG });
   await day.runUntilIdle();
-  // Lists are built, the deal pool set; checks wait for 5:00.
+  // Lists are built; checks wait for 5:00.
   assert.equal(day.checker.state.phase, 'checks');
   assert.deepEqual(day.tiers.itemIds(1).sort(), ['t1a', 't1b']);
   assert.deepEqual(day.tiers.itemIds(2).sort(), ['t1a', 't2a']);

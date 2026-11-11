@@ -33,3 +33,19 @@ test('persists to disk and prunes rows older than a year', () => {
   assert.deepEqual(b.history('walmart', '42').map((p) => p.price), [25, 20]);
   b.close();
 });
+
+test('history summaries for many products match the per-product signals', async () => {
+  const { priceSignals, signalsFrom } = await import('../src/lib/allDeals.js');
+  const tracker = new PriceTracker();
+  const prices = { a: [10, 9, 9, 9, 9, 9, 9, 8], b: [5, 7], c: [] };
+  for (const [id, list] of Object.entries(prices)) {
+    list.forEach((price, i) => tracker.record('walmart', id, price, new Date(Date.UTC(2026, 10, 1 + i))));
+  }
+  const today = '2026-11-08';
+  const summaries = tracker.summaries('walmart', ['a', 'b', 'c'], today);
+  assert.deepEqual(summaries.get('a'), { days: 8, previous: 9, lowest: 9 });
+  assert.equal(summaries.has('c'), false);
+  for (const [id, now] of [['a', 8], ['b', 6], ['c', 4]]) {
+    assert.deepEqual(signalsFrom(now, summaries.get(id)), priceSignals(now, tracker.history('walmart', id), today), id);
+  }
+});

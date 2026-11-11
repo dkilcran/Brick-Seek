@@ -3,7 +3,7 @@
 // pages from what those saved.
 import { RetailerAdapter, STOCK_STATUS } from '../RetailerAdapter.js';
 import { PriceTracker } from '../../lib/priceTracker.js';
-import { DEAL_LABELS, discount, priceSignals } from '../../lib/allDeals.js';
+import { DEAL_LABELS, discount, signalsFrom } from '../../lib/allDeals.js';
 import { DEFAULT_SCAN_CONFIG_PATH, loadScanConfig } from '../../lib/scanConfig.js';
 import { scheduleDayKey } from '../../lib/scanSchedule.js';
 import { parseWalmartInput, walmartProductUrl } from './identifiers.js';
@@ -17,6 +17,8 @@ const SEARCH_PAGE = 25;
 const STORES_SHOWN = 15; // nearest stores listed on a product page
 const CHECKS_PER_HOUR = 120; // visitors' "Check store" lookups, so they can't crowd out the daily checks
 const CHECK_REUSE_MS = 15 * 60000;
+const CARD_SETS = 10; // deal card sets kept, one per ZIP (about 2 MB each)
+const ONLINE_REBUILD_MS = 5 * 60000; // while online prices are being saved, cards are rebuilt at most this often
 
 export class WalmartAdapter extends RetailerAdapter {
   /**
@@ -35,6 +37,7 @@ export class WalmartAdapter extends RetailerAdapter {
     this.loadStoreConfig = loadStoreConfig;
     this.recentChecks = new Map(); // "store|item" -> { at, result }
     this.checkTimes = [];
+    this.cardCache = new Map(); // zip -> { key, online, at, cards }
   }
 
   /** @param {{ tracker?: PriceTracker }} shared  the app-wide price history store */
@@ -384,14 +387,16 @@ export class WalmartAdapter extends RetailerAdapter {
    * All Deals cards (see lib/allDeals.js), unfiltered. Online: items on today's
    * Clearance / Rollback / Reduced Price lists that Walmart.com itself sells.
    * In store: each item's cheapest deal at the checked stores near `zip`
-   * (every tracked store without one). Rebuilt when the deals or lists
-   * change, at most every 5 minutes.
+   * (every tracked store without one). Kept per ZIP and rebuilt when the
+   * store deals or lists change, or (at most every 5 minutes) online prices.
    */
   async allDealCards({ zip } = {}) {
     if (!this.storeData || !this.tierStore) return super.allDealCards({ zip });
     const db = this.storeData;
-    const key = `${zip ?? ''}|${db.markdownVersion}|${this.tierStore.builtRun(1)}|${Math.floor(Date.now() / 300000)}`;
-    if (this.cardCache?.key === key) return this.cardCache.cards;
+    const key = `${db.markdownVersion}|${this.tierStore.builtRun(1)}`;
+    const cached = this.cardCache.get(zip ?? '');
+    if (cached?.key === key && (cached.online === db.onlineVersion || Date.now() - cached.at < ONLINE_REBUILD_MS)) return cached.cards;
+    const online = db.onlineVersion;
     const cards = new Map();
     const cardFor = (product) => {
       if (!cards.has(product.id)) cards.set(product.id, { product, online: null, store: null, soldOnline: true, soldInStores: true, dropPercent: 0, atLowest: false });
@@ -415,9 +420,13 @@ export class WalmartAdapter extends RetailerAdapter {
     for (const [id, n] of storesWithDeal) cards.get(id).store.storesWithDeal = n;
 
     const keep = this.departmentFilter();
-    for (const [id, kind] of this.tierStore.offers()) {
+    const offers = this.tierStore.offers();
+    const ids = [...new Set([...offers.keys(), ...cards.keys()])];
+    const infos = db.items(this.id, ids);
+    const history = this.tracker.summaries(this.id, [...offers.keys()]);
+    for (const [id, kind] of offers) {
       const listed = this.tierStore.product(id);
-      const info = db.item(this.id, id);
+      const info = infos.get(id);
       // Walmart.com's price from today's lookup; before it has run, from the list itself.
       const looked = Boolean(info?.online_lookup_date);
       const price = looked ? info.online_price : (info?.online_price ?? listed?.price ?? null);
@@ -431,17 +440,19 @@ export class WalmartAdapter extends RetailerAdapter {
       if (kind !== 'clearance' && !(wasPrice > price)) continue;
       const card = cardFor({ retailer: this.id, id, name, imageUrl: listed?.imageUrl ?? info?.image_url ?? null, category, url: this.productUrl(id) });
       card.online = { price, wasPrice, kind, label: DEAL_LABELS[kind], ...discount(price, wasPrice) };
-      Object.assign(card, priceSignals(price, this.tracker.history(this.id, id)));
+      Object.assign(card, signalsFrom(price, history.get(id)));
     }
     // Where each item is sold, as far as the online lookup has said.
     for (const [id, card] of cards) {
-      const info = db.item(this.id, id);
+      const info = infos.get(id);
       const onlineOnly = info?.online_only === 1;
       card.soldOnline = onlineOnly || info?.online_available !== 0;
       card.soldInStores = !onlineOnly || Boolean(card.store);
     }
     const out = [...cards.values()];
-    this.cardCache = { key, cards: out };
+    this.cardCache.delete(zip ?? '');
+    if (this.cardCache.size >= CARD_SETS) this.cardCache.delete(this.cardCache.keys().next().value);
+    this.cardCache.set(zip ?? '', { key, online, at: Date.now(), cards: out });
     return out;
   }
 

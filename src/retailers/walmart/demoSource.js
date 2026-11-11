@@ -14,7 +14,7 @@ const CITIES = ['Springfield', 'Riverton', 'Fairview', 'Greenville', 'Franklin',
 const FORMATS = ['Supercenter', 'Supercenter', 'Supercenter', 'Neighborhood Market', 'Store'];
 const ENDINGS = [0.0, 0.88, 0.97, 0.98];
 
-export function walmartPrice(value, rng) {
+function walmartPrice(value, rng) {
   const dollars = Math.max(0, Math.floor(value));
   const cents = rng ? pick(rng, ENDINGS) : 0.0;
   return Math.max(0.5, Number((dollars + cents).toFixed(2)));
