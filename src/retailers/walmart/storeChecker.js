@@ -12,9 +12,13 @@
 //                4. tier 1 + store-only deals (Clearance flag at a store, or a
 //                   Markdown) at all other stores
 //                5. Walmart.com's price and was-price for every deal item
-//   tier3build (schedule.tier3RebuildDay, after checks): rebuild the tier 3
+//   newItems   (config.nightlyNewItems, after checks): add each department's
+//              newest Walmart listings (its feed after the newest id seen)
+//              to the tier 3 list
+//   tier3build (schedule.tier3RebuildDay, after that): rebuild the tier 3
 //              list (everything sold in stores) from department and
-//              subcategory searches; continues the next day if needed
+//              subcategory searches and the store-brand feeds, keeping items
+//              already seen on a shelf; continues the next day if needed
 //   tier3      until schedule.endAt (20:00): the next tier 3 items at the
 //              daily stores, continuing from where the previous day stopped
 //
@@ -24,10 +28,20 @@ import { localParts, scheduleDayKey } from '../../lib/scanSchedule.js';
 
 const FEED_OFFERS = ['clearance', 'rollback', 'reduced']; // specialOffer values of Walmart's deal feeds
 const MAX_FEED_PAGES = 600; // safety cap per night over all feeds (about 60 pages measured)
+const NEW_ITEM_PAGES = 25; // per department per night; a department further behind catches up over the next nights
+// Finding a department's newest listings the first time: ids step up from the
+// newest on the tier 3 list until past them, then halve to within this many ids
+// (about 2-10 pages of Walmart-sold listings at Home's density).
+const SEEK_FIRST_STEP = 1e8;
+const SEEK_PRECISION = 2e7;
+const MAX_BRAND_PAGES = 2000; // safety cap per tier 3 rebuild over all store-brand feeds
 const BATCH = 20; // most item ids per lookup
 const TIER3_REFRESH_LOOKUPS = 1000; // tier 3 lookups between deal label rebuilds (~35 minutes)
 const REQUIRED = new Set(['lists', 'checks']);
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** Feed progress without its job list, for the status page. */
+const summarizeFeeds = (f) => (f ? { feedsDone: f.index, feeds: f.jobs.length, pages: f.pages, items: f.items, added: f.added, otherSeller: f.otherSeller, otherDepartments: f.skipped } : null);
 
 export class StoreChecker {
   /**
@@ -98,6 +112,23 @@ export class StoreChecker {
     return (p) => !allowed.size || !p.category || allowed.has(p.category);
   }
 
+  /** The settings' departments with their Walmart category ids. */
+  async departmentCategories(config) {
+    const categories = new Map((await this.source.taxonomy()).map((c) => [c.name, c.id]));
+    return config.departments.filter((d) => categories.has(d)).map((department) => ({ department, category: categories.get(department) }));
+  }
+
+  /** One page of a Walmart feed (/paginated/items): its items and the next page's query, or null at the end. */
+  async feedPage(query) {
+    const data = await this.source.request('/paginated/items', query, { cache: false });
+    // nextPage is a path whose query string asks for the following page.
+    const next = data?.nextPage ? Object.fromEntries(new URL(data.nextPage, 'https://x.invalid').searchParams) : null;
+    if (next) delete next.publisherId;
+    return { items: data?.items ?? [], next };
+  }
+
+  toProduct = (item) => this.source.toProduct(item);
+
   /** Queue the department searches of a list build: one per department query and filter set. */
   queueSearches(run, config, tiers) {
     this.tiers.dropQueue(run);
@@ -165,6 +196,7 @@ export class StoreChecker {
     switch (state.phase) {
       case 'lists': return this.listsStep(state, config);
       case 'checks': return this.checksStep(state, config);
+      case 'newItems': return this.newItemsStep(state, config);
       case 'tier3build': return this.tier3BuildStep(state, config);
       case 'tier3': return this.tier3Step(state, config);
       default: return false; // done for today
@@ -184,22 +216,17 @@ export class StoreChecker {
     // find thousands of deal items the other doesn't, including Walmart.com-only deals.
     if (config.dealFeeds) {
       if (!state.feeds) {
-        const categories = new Map((await this.source.taxonomy()).map((c) => [c.name, c.id]));
-        const jobs = config.departments.filter((d) => categories.has(d))
-          .flatMap((department) => FEED_OFFERS.map((offer) => ({ department, category: categories.get(department), offer })));
+        const jobs = (await this.departmentCategories(config))
+          .flatMap(({ department, category }) => FEED_OFFERS.map((offer) => ({ department, category, offer })));
         this.state = { ...state, feeds: { jobs, index: 0, query: null, pages: 0, items: 0, otherSeller: 0, added: 0, alreadyListed: 0, skipped: 0 } };
         return true;
       }
       const f = state.feeds;
       if (f.index < f.jobs.length) {
         const feed = f.jobs[f.index];
-        const query = f.query ?? { category: feed.category, specialOffer: feed.offer, soldByWmt: 'true' };
-        const data = await this.source.request('/paginated/items', query, { cache: false });
-        const got = this.tiers.addFeedItems(state.listRun, feed, data?.items, { toProduct: (item) => this.source.toProduct(item), keep });
-        // nextPage is a path whose query string asks for the following page.
-        let next = data?.nextPage ? Object.fromEntries(new URL(data.nextPage, 'https://x.invalid').searchParams) : null;
-        if (next) delete next.publisherId;
-        if (f.pages + 1 >= MAX_FEED_PAGES) next = null;
+        const page = await this.feedPage(f.query ?? { category: feed.category, specialOffer: feed.offer, soldByWmt: 'true' });
+        const got = this.tiers.addFeedItems(state.listRun, feed, page.items, { toProduct: this.toProduct, keep });
+        const next = f.pages + 1 >= MAX_FEED_PAGES ? null : page.next;
         this.state = {
           ...state,
           feeds: {
@@ -228,7 +255,9 @@ export class StoreChecker {
     const seg = this.segments(state, config)[state.segment];
     if (!seg) {
       this.db.refreshMarkdowns(this.retailer); // with today's online prices
-      this.state = { ...state, phase: this.tier3Phase(state, config), checksDoneAt: this.now().toISOString() };
+      // A rebuild due today starts first, so the new listings also go into it.
+      const tier3 = this.tier3Phase(state, config);
+      this.state = { ...state, phase: config.nightlyNewItems ? 'newItems' : tier3, checksDoneAt: this.now().toISOString() };
       return true;
     }
     if (state.segmentTotal === null) {
@@ -265,6 +294,93 @@ export class StoreChecker {
     return true;
   }
 
+  /**
+   * One feed page of the nightly new listings: each department's feed (sold by
+   * Walmart) after the newest item id seen, added to the tier 3 list (and to a
+   * rebuild in progress). Walmart numbers new listings above existing ones,
+   * but files unpriced listings (e.g. video episodes) above those, so a page
+   * with no priced item ends the department and the next night starts after
+   * the newest priced one. The first time, it starts near the newest listings
+   * (see seekNewest) instead of reading years of older ones.
+   */
+  async newItemsStep(state, config) {
+    const current = this.tiers.builtRun(3);
+    const f = state.newItems;
+    if (!current || this.pastEnd(config) || f?.index >= f?.jobs.length) {
+      this.state = { ...state, phase: this.tier3Phase(state, config), newItemsDoneAt: this.now().toISOString() }; // tier3build if one is under way
+      return true;
+    }
+    if (!f) {
+      this.state = { ...state, newItems: { jobs: await this.departmentCategories(config), index: 0, query: null, pages: 0, jobPages: 0, items: 0, added: 0, otherSeller: 0, skipped: 0 } };
+      return true;
+    }
+    const job = f.jobs[f.index];
+    const cursorKey = `newItems:cursor:${this.retailer}:${job.department}`;
+    const cursor = this.db.getMeta(cursorKey);
+    if (!cursor) {
+      const newestListed = f.seek ? null : this.tiers.maxTier3Id(job.department);
+      const from = f.seek ?? (newestListed && { lo: Number(newestListed), hi: null, step: SEEK_FIRST_STEP });
+      if (!from) {
+        this.state = { ...state, newItems: { ...f, index: f.index + 1 } };
+        return true;
+      }
+      const seek = await this.seekNewest(job, from);
+      if (seek.hi !== null && seek.hi - seek.lo <= SEEK_PRECISION) this.db.setMeta(cursorKey, String(seek.lo));
+      this.state = { ...state, newItems: { ...f, seek: this.db.getMeta(cursorKey) ? null : seek, pages: f.pages + 1, seekPages: (f.seekPages ?? 0) + 1 } };
+      return true;
+    }
+    const page = await this.feedPage(f.query ?? { category: job.category, soldByWmt: 'true', lastDoc: cursor });
+    const building = this.db.getMeta(`tier3:building:${this.retailer}`);
+    const got = this.tiers.addFeedItems(building ? [current, building] : [current], { tier: 3, department: job.department }, page.items,
+      { toProduct: this.toProduct, keep: this.keepProduct(config) });
+    if (got.lastPricedId && Number(got.lastPricedId) > Number(cursor)) this.db.setMeta(cursorKey, got.lastPricedId);
+    const done = !page.next || got.lastPricedId === null || f.jobPages + 1 >= NEW_ITEM_PAGES;
+    this.state = {
+      ...state,
+      newItems: {
+        ...f, index: done ? f.index + 1 : f.index, query: done ? null : page.next, pages: f.pages + 1, jobPages: done ? 0 : f.jobPages + 1,
+        items: f.items + got.items, added: f.added + got.added, otherSeller: f.otherSeller + got.otherSeller, skipped: f.skipped + got.skipped,
+      },
+    };
+    return true;
+  }
+
+  /**
+   * One probe of where a department's newest priced listing is: `lo` is an id
+   * with priced listings after it, `hi` one without (null until found).
+   * Steps up (doubling) until past the newest, then halves the gap.
+   */
+  async seekNewest(job, { lo, hi, step }) {
+    const probe = hi === null ? lo + step : Math.floor((lo + hi) / 2);
+    const page = await this.feedPage({ category: job.category, soldByWmt: 'true', lastDoc: String(probe) });
+    const priced = page.items.some((item) => item.salePrice > 0);
+    if (priced) return { lo: probe, hi, step: hi === null ? step * 2 : step };
+    return { lo, hi: probe, step };
+  }
+
+  /**
+   * One page of the store-brand feeds (config.tier3Brands, sold by Walmart, per
+   * department) into a tier 3 rebuild. Returns false once they're all read.
+   */
+  async brandFeedStep(run, config) {
+    const key = `tier3:brands:${this.retailer}:${run}`;
+    const f = this.db.getMeta(key);
+    if (!f) {
+      const jobs = (await this.departmentCategories(config)).flatMap((d) => config.tier3Brands.map((brand) => ({ ...d, brand })));
+      this.db.setMeta(key, { jobs, index: 0, query: null, pages: 0, items: 0, added: 0, otherSeller: 0, skipped: 0 });
+      return true;
+    }
+    if (f.index >= f.jobs.length || f.pages >= MAX_BRAND_PAGES) return false;
+    const job = f.jobs[f.index];
+    const page = await this.feedPage(f.query ?? { category: job.category, brand: job.brand, soldByWmt: 'true' });
+    const got = this.tiers.addFeedItems(run, { tier: 3, department: job.department }, page.items, { toProduct: this.toProduct, keep: this.keepProduct(config) });
+    this.db.setMeta(key, {
+      ...f, index: page.next ? f.index : f.index + 1, query: page.next, pages: f.pages + 1,
+      items: f.items + got.items, added: f.added + got.added, otherSeller: f.otherSeller + got.otherSeller, skipped: f.skipped + got.skipped,
+    });
+    return true;
+  }
+
   /** One search page of the weekly tier 3 rebuild; then the new list becomes current. */
   async tier3BuildStep(state, config) {
     const run = this.db.getMeta(`tier3:building:${this.retailer}`);
@@ -289,6 +405,12 @@ export class StoreChecker {
       this.state = { ...state, searches: state.searches + 1 };
       return true;
     }
+    if (config.tier3Brands.length && await this.brandFeedStep(run, config)) return true;
+    const carriedOver = this.tiers.carryOverShelfItems(this.tiers.builtRun(3), run);
+    this.db.setMeta(`tier3:lastBuild:${this.retailer}`, {
+      run, items: this.tiers.count(3, run), carriedOver, brandFeeds: this.db.getMeta(`tier3:brands:${this.retailer}:${run}`), finishedAt: this.now().toISOString(),
+    });
+    this.db.setMeta(`tier3:brands:${this.retailer}:${run}`, null);
     this.tiers.markBuilt(3, run);
     this.db.setMeta(`tier3:building:${this.retailer}`, null);
     this.db.setMeta(`tier3:cursor:${this.retailer}`, '');
@@ -417,12 +539,19 @@ export class StoreChecker {
         segmentLookupsDone: s.phase === 'checks' ? s.offset : null,
         lookups: s.lookups, doneAt: s.checksDoneAt,
       },
+      newItems: s.newItems ? {
+        departmentsDone: s.newItems.index, departments: s.newItems.jobs.length, pages: s.newItems.pages,
+        items: s.newItems.items, added: s.newItems.added, otherSeller: s.newItems.otherSeller, otherDepartments: s.newItems.skipped,
+        doneAt: s.newItemsDoneAt ?? null,
+      } : null,
       tier3: {
         listItems: this.tiers.count(3),
         rebuilding: building ? {
           run: building, queued: this.tiers.queueSize(building), found: this.tiers.count(3, building),
           subcategories: this.db.getMeta(`tier3:subcats:${this.retailer}:${building}`),
+          brandFeeds: summarizeFeeds(this.db.getMeta(`tier3:brands:${this.retailer}:${building}`)),
         } : null,
+        lastBuild: (({ brandFeeds, ...b } = {}) => (b.run ? { ...b, brandFeeds: summarizeFeeds(brandFeeds) } : null))(this.db.getMeta(`tier3:lastBuild:${this.retailer}`) ?? undefined),
         cursor: this.db.getMeta(`tier3:cursor:${this.retailer}`), lookupsToday: s.tier3Lookups,
       },
       storePricesSaved: s.rows,

@@ -9,6 +9,8 @@ import { parseClock } from './scanSchedule.js';
 export const DEFAULT_SCAN_CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'store-scan.json');
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const FILTER = /^[a-z_]+:.+$/; // e.g. "special_offers:Clearance"
+// Walmart's own brands: their feeds are small and mostly carried in stores.
+const DEFAULT_TIER3_BRANDS = ['Mainstays', 'Great Value', 'Hyper Tough', 'Ozark Trail'];
 
 /**
  * @returns {{ config: object|null, errors: string[] }}
@@ -62,6 +64,8 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
   for (const f of [...baseFilters, ...tierFilters[1], ...tierFilters[2]]) {
     if (!FILTER.test(f)) errors.push(`Filter ${JSON.stringify(f)} should look like "special_offers:Clearance"`);
   }
+  const tier3Brands = raw.tier3Brands == null ? DEFAULT_TIER3_BRANDS : strings(raw.tier3Brands);
+  if (raw.tier3Brands != null && !Array.isArray(raw.tier3Brands)) errors.push('"tier3Brands" should be a list of brand names, like ["Mainstays"]');
   const markdownPercent = raw.markdownPercent == null ? 10 : Number(raw.markdownPercent);
   if (!(markdownPercent > 0 && markdownPercent < 100)) errors.push('"markdownPercent" should be a number between 0 and 100, like 10');
 
@@ -79,6 +83,8 @@ export function loadScanConfig(path = DEFAULT_SCAN_CONFIG_PATH) {
       tierFilters,
       dealFeeds: raw.dealFeeds !== false,
       tier3Subcategories: raw.tier3Subcategories !== false,
+      tier3Brands,
+      nightlyNewItems: raw.nightlyNewItems !== false,
       markdownGap: markdownPercent > 0 && markdownPercent < 100 ? markdownPercent / 100 : 0.1,
       // Change this value to restart today's store checks with the current settings.
       restartChecks: raw.restartChecks ? String(raw.restartChecks) : null,

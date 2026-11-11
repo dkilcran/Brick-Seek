@@ -44,8 +44,10 @@ night (Chicago time), paced at about 28 calls a minute:
    store's price, stock, Clearance flag and was-price. Deal items are checked at
    the 3 daily stores and 4 rotating ones, Clearance and store deals at the
    other tracked stores, and Walmart.com's own price for every deal item.
-3. **Mondays, Tier 3:** the list of everything Walmart sells in stores in those
-   departments is rebuilt from department and subcategory searches.
+3. **Tier 3:** the list of everything Walmart sells in stores in those
+   departments is rebuilt on Mondays from department and subcategory searches
+   and Walmart's store-brand feeds; each night Walmart's newest listings in
+   those departments are added.
 4. **Until 20:00:** Tier 3 items are checked at the daily stores, a slice a
    day, to find store-level Markdowns Walmart doesn't tag.
 

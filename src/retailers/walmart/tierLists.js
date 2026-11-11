@@ -2,8 +2,9 @@
 //   tier 1: Clearance               (rebuilt daily)
 //   tier 2: Rollback, Reduced Price (rebuilt daily)
 //   tier 3: everything in stores    (rebuilt weekly)
-// Built from Walmart's search (in stores, sold by Walmart) and, for tiers 1-2,
-// Walmart's deal feeds. A search returns at most 1,000 results (25 per page),
+// Built from Walmart's search (in stores, sold by Walmart) and Walmart's feeds
+// (sold by Walmart): the deal feeds for tiers 1-2; for tier 3 the store-brand
+// feeds weekly and each department's newest listings nightly. A search returns at most 1,000 results (25 per page),
 // so one with more is split into price bands, then $1 bands, then a $1 band
 // is read sorted low-to-high and high-to-low. The work is a queue of
 // single-page search jobs saved in SQLite, so a restart resumes where it left off.
@@ -218,6 +219,29 @@ export class TierStore {
     return this.db.prepare('SELECT COUNT(*) n FROM tier_items WHERE retailer = ? AND tier = ? AND run = ?').get(this.retailer, tier, run).n;
   }
 
+  /** The highest item id (as a number) on any tier 3 list in a department, or null. */
+  maxTier3Id(department) {
+    const row = this.db.prepare(`SELECT MAX(CAST(item_id AS INTEGER)) AS id FROM tier_items
+      WHERE retailer = ? AND tier = 3 AND department = ?`).get(this.retailer, department);
+    return row?.id == null ? null : String(row.id);
+  }
+
+  /**
+   * Copy into a new tier 3 build the items of the old one that the store checks
+   * have seen on a shelf (a current Walmart-sold store price), so items found
+   * outside the weekly searches (e.g. the nightly new listings) stay listed.
+   * @returns {number} items copied
+   */
+  carryOverShelfItems(fromRun, toRun) {
+    if (!fromRun || fromRun === toRun) return 0;
+    return this.db.prepare(`INSERT OR IGNORE INTO tier_items (retailer, tier, run, item_id, department, offer)
+      SELECT t.retailer, 3, :to, t.item_id, t.department, NULL FROM tier_items t
+      WHERE t.retailer = :retailer AND t.tier = 3 AND t.run = :from AND EXISTS (
+        SELECT 1 FROM store_latest l WHERE l.retailer = t.retailer AND l.item_id = t.item_id
+          AND l.price > 0 AND lower(l.seller) IN ('walmart', 'walmart.com'))`)
+      .run({ retailer: this.retailer, from: fromRun, to: toRun }).changes;
+  }
+
   /** The next `limit` tier-3 items after `afterId` (in item-id order), for slices that continue across days. */
   tier3Batch(afterId, limit) {
     const run = this.builtRun(3);
@@ -227,17 +251,22 @@ export class TierStore {
   }
 
   /**
-   * Add one page of a Walmart deal feed (/paginated/items with specialOffer and
-   * soldByWmt) to a run's lists: Clearance to tier 1, Rollback / Reduced Price
-   * to tier 2. Items another seller sells, or outside the kept departments, are
-   * skipped. Counts how many the search had already found.
-   * @param {{ offer: 'clearance'|'rollback'|'reduced', department: string }} job
+   * Add one page of a Walmart feed (/paginated/items with soldByWmt) to a run's
+   * lists. Deal feeds (job.offer): Clearance to tier 1, Rollback / Reduced
+   * Price to tier 2. Tier 3 feeds (job.tier 3): items with a price, added to
+   * every run given (unpriced listings such as video episodes are left out).
+   * Items another seller sells, or outside the kept departments, are skipped.
+   * Counts how many were already listed, and the highest priced item id.
+   * @param {string|string[]} runs
+   * @param {{ offer?: 'clearance'|'rollback'|'reduced', tier?: 3, department: string }} job
    * @param {(item) => object} toProduct  the source's item -> product
    */
-  addFeedItems(run, job, items, { toProduct, keep = () => true }) {
-    const tier = job.offer === 'clearance' ? 1 : 2;
+  addFeedItems(runs, job, items, { toProduct, keep = () => true }) {
+    const tier = job.tier ?? (job.offer === 'clearance' ? 1 : 2);
+    const targets = [].concat(runs);
+    const run = targets[0];
     const has = this.db.prepare('SELECT 1 FROM tier_items WHERE retailer = ? AND tier = ? AND run = ? AND item_id = ?');
-    const out = { items: 0, otherSeller: 0, added: 0, alreadyListed: 0, skipped: 0 };
+    const out = { items: 0, otherSeller: 0, added: 0, alreadyListed: 0, skipped: 0, unpriced: 0, lastPricedId: null };
     this.db.exec('BEGIN');
     try {
       for (const item of items ?? []) {
@@ -246,13 +275,13 @@ export class TierStore {
         const seller = String(item.sellerInfo ?? '').trim();
         if ((seller && !/^walmart(\.com)?$/i.test(seller)) || item.marketplace === true) { out.otherSeller += 1; continue; }
         const p = toProduct(item);
+        if (tier === 3 && !(p.price > 0)) { out.unpriced += 1; continue; }
+        if (p.price > 0 && (out.lastPricedId === null || Number(p.id) > Number(out.lastPricedId))) out.lastPricedId = p.id;
         if (!keep(p)) { out.skipped += 1; continue; }
         if (has.get(this.retailer, tier, run, p.id)) out.alreadyListed += 1;
-        else {
-          this.insertItem.run(this.retailer, tier, run, p.id, job.department, tier === 2 ? job.offer : null);
-          out.added += 1;
-        }
-        this.saveProduct(run, p);
+        else out.added += 1;
+        for (const r of targets) this.insertItem.run(this.retailer, tier, r, p.id, job.department, tier === 2 ? job.offer : null);
+        if (tier <= 2) this.saveProduct(run, p);
         if (p.price > 0) this.store.saveOnlinePrice(this.retailer, p.id, p.price, run.slice(0, 10));
       }
       this.db.exec('COMMIT');

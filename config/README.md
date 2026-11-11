@@ -28,11 +28,17 @@ Every step is one free call to Walmart (a search page, a feed page, or a
    4. tier 1 + store-level deals (Walmart's Clearance flag at a store, or a
       **Markdown**, see below) at all other stores
    5. Walmart.com's own price and was-price for every deal item
-3. On `schedule.tier3RebuildDay` (Monday): rebuild the **tier 3** list
+3. With `nightlyNewItems`: each department's newest Walmart listings (its
+   feed, sold by Walmart, after the newest item seen the night before) join
+   the tier 3 list. Walmart numbers new listings above older ones; the first
+   night finds where they start, so older listings aren't read.
+4. On `schedule.tier3RebuildDay` (Monday): rebuild the **tier 3** list
    (everything sold by Walmart in stores in your departments) from department
-   searches and, with `tier3Subcategories`, every subcategory; if it isn't
-   done by `endAt` it continues the next day.
-4. Until `schedule.endAt` (20:00): the next tier 3 items at the `dailyStores`,
+   searches, every subcategory (`tier3Subcategories`) and the store-brand
+   feeds (`tier3Brands`). Items from last week's list that a store check has
+   seen on a shelf in the last 14 days are kept. If it isn't done by `endAt`
+   it continues the next day.
+5. Until `schedule.endAt` (20:00): the next tier 3 items at the `dailyStores`,
    continuing where the previous day stopped, so the whole list keeps cycling.
 
 Steps 1-2 always finish, even past `endAt`. Walmart's search returns at most
@@ -53,6 +59,8 @@ crowded $1 band is read sorted both ways.
 | `baseFilters` | Filters on every search: `retailer_type:Walmart` (sold by Walmart), `fulfillment_method:In-store` (carried in stores). |
 | `tiers` | The deal filters for tier 1 (`"1"`) and tier 2 (`"2"`); each filter is its own search pass. |
 | `tier3Subcategories` | `true` (default): the weekly Tier 3 rebuild also searches every Walmart subcategory of your departments by its own name, limited to that subcategory (in stores, sold by Walmart). About 900 subcategories, ~4,200 searches; it continues the next day if unfinished. `false` turns it off. |
+| `tier3Brands` | Brands whose Walmart feeds (sold by Walmart, per department) join the weekly Tier 3 rebuild. Default: Walmart's own brands Mainstays, Great Value, Hyper Tough, Ozark Trail. `[]` turns it off. Walmart's brand filter is loose, so some other brands come along. |
+| `nightlyNewItems` | `true` (default): each night after the store checks, add each department's newest Walmart listings to Tier 3. `false` turns it off. |
 | `dealFeeds` | `true` (default): after the morning search, also read Walmart's Clearance, Rollback and Reduced Price feeds (sold by Walmart only) into the lists. `false` turns them off. |
 | `markdownPercent` | A store price at least this many percent below the item's highest valid store price (current, sold by Walmart, at any store, or that store's own earlier price) is labeled **Markdown**. Default 10. |
 | `restartChecks` | Change this to any new value to restart today's cycle right away. |

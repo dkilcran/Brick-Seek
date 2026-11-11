@@ -13,10 +13,5 @@ filter, disk limits, affiliate links).
 
 - **ZIP as a store limiter** in the top bar (deal pages limited to stores near
   it), noted Nov 5 as "at some point".
-- **Store-brand feeds for Tier 3** (Mainstays, Great Value, Hyper Tough, Ozark
-  Trail): ~28,000 more in-store items; deferred because national brands are
-  more useful to compare.
-- **New items each night** via the feeds' `lastDoc` (newer listings have
-  higher item ids), instead of waiting for Monday's Tier 3 rebuild.
 - **Store stock counts**: Walmart's API only says in stock or not; counts
   need another source (e.g. Walmart Data Ventures, paid).
