@@ -13,6 +13,13 @@
   database made by the previous commit before pushing (a failed boot keeps
   the old version running on Render).
 - Give a time estimate before multi-step work and report the actual time.
+  Estimates have run 3-12x too long (Nov 10: 2-3 h -> 55 min; 1.5 h -> 7 min;
+  2-2.5 h -> 13 min), from pricing steps at a person's speed. Count the fixed
+  waits instead: a Render deploy ~60-70 s, a Walmart rate-limit wait ~30-60 s,
+  a production-size timing run ~20 s; then a code change with tests, push and
+  live check is 5-15 min, a Walmart measurement 1-2 min, a large refactor
+  about an hour. The machine's clock is accurate (it matches the live
+  server's Date header); compare each actual time with the estimate.
 
 ## What the data sources really return (learned the hard way)
 
