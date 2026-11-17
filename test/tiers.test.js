@@ -448,3 +448,18 @@ test('tier 3: a search page that finds nothing new ends that search', async () =
   while ((job = t2.nextJob('r'))) await t2.runJob('r', job, deals);
   assert.deepEqual(deals.requests.map((r) => r.start), [1, 26, 51]);
 });
+
+test('tier 3 store lookups drop items Walmart no longer knows from the list', async () => {
+  const day = makeDay({ start: '2026-11-03T10:30:00Z', catalog: CATALOG }); // Tuesday
+  for (const id of ['x1', 'gone']) day.tiers.insertItem.run('walmart', 3, 'old', id, 'Toys', null);
+  day.tiers.markBuilt(3, 'old');
+  const lookup = day.source.storeLookup.bind(day.source);
+  day.source.storeLookup = async (ids, storeId) => {
+    const res = await lookup(ids.filter((id) => id !== 'gone'), storeId);
+    return { ...res, missing: ids.filter((id) => id === 'gone') };
+  };
+  await day.runUntilIdle();
+  day.setClock('2026-11-03T11:00:00Z');
+  await day.runUntilIdle();
+  assert.deepEqual(day.tiers.itemIds(3), ['x1']);
+});

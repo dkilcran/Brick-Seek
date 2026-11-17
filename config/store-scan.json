@@ -152,7 +152,7 @@
       "special_offers:Reduced Price"
     ]
   },
-  "tier3Brands": ["Mainstays", "Great Value", "Hyper Tough", "Ozark Trail"],
+  "tier3Brands": [],
   "nightlyNewItems": true,
   "markdownPercent": 10,
   "restartChecks": "2026-10-30 20:10"

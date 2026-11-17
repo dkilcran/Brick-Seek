@@ -9,8 +9,9 @@ import { parseClock } from './scanSchedule.js';
 export const DEFAULT_SCAN_CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'store-scan.json');
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const FILTER = /^[a-z_]+:.+$/; // e.g. "special_offers:Clearance"
-// Walmart's own brands: their feeds are small and mostly carried in stores.
-const DEFAULT_TIER3_BRANDS = ['Mainstays', 'Great Value', 'Hyper Tough', 'Ozark Trail'];
+// Off by default: the brand feeds are mostly old listings Walmart's item lookup
+// no longer knows (Nov 17: 14 of 15 sampled Mainstays listings in Home).
+const DEFAULT_TIER3_BRANDS = [];
 
 /**
  * @returns {{ config: object|null, errors: string[] }}

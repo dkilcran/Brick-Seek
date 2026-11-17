@@ -68,9 +68,13 @@
   say whether an item is in stores; a lookup does (~73% of deal-feed items are
   online only). Ordered by item id; `lastDoc=<id>` starts after an id (newer
   listings have higher ids). Without a deal filter they're huge (Home, sold by
-  Walmart: 6.65M; `available=true`: 2.5M, ~10% in stores), but `brand=` with a
-  Walmart store brand (Mainstays, Great Value, Hyper Tough, Ozark Trail) is
-  small and ~95% in stores. `brand=` is loose (other brands come along).
+  Walmart: 6.65M; `available=true`: 2.5M, ~10% in stores). `brand=` with a
+  Walmart store brand is not small (Home Mainstays: 64,500) and is mostly old
+  listings: Nov 17, 14 of 15 sampled were unknown to `/items` (`{}`), so
+  brand feeds are off. `brand=` is also loose (other brands come along).
+- **`/items` with `storeId` leaves out ids Walmart doesn't know** (old,
+  removed listings); an item not carried at that store still answers
+  (e.g. "Not available").
 - **Top of a department feed** (Home, Nov 11): real listings end around id
   21.4B; above them come unpriced items, priced digital video episodes filed
   as Home decor (ids ending 001-003, "Not available", unknown to `/items`)

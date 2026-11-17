@@ -272,6 +272,12 @@ export class TierStore {
       .run({ retailer: this.retailer, from: fromRun, to: toRun }).changes;
   }
 
+  /** Remove items from every tier 3 list (current and any rebuild). */
+  dropFromTier3(ids) {
+    const drop = this.db.prepare('DELETE FROM tier_items WHERE retailer = ? AND tier = 3 AND item_id = ?');
+    for (const id of ids) drop.run(this.retailer, String(id));
+  }
+
   /** The next `limit` tier-3 items after `afterId` (in item-id order), for slices that continue across days. */
   tier3Batch(afterId, limit) {
     const run = this.builtRun(3);

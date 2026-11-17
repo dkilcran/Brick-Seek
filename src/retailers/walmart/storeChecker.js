@@ -444,7 +444,10 @@ export class StoreChecker {
       slice = { ids, storeIndex: 0 };
     }
     const storeId = daily[slice.storeIndex];
-    const saved = this.db.recordStoreLookup(this.retailer, storeId, await this.source.storeLookup(slice.ids, storeId), state.day);
+    const lookup = await this.source.storeLookup(slice.ids, storeId);
+    const saved = this.db.recordStoreLookup(this.retailer, storeId, lookup, state.day);
+    // Items Walmart's lookup doesn't know at all (old, removed listings) leave the tier 3 list.
+    if (lookup.missing?.length) this.tiers.dropFromTier3(lookup.missing);
     this.state = {
       ...state, tier3Slice: { ...slice, storeIndex: slice.storeIndex + 1 },
       tier3Lookups: state.tier3Lookups + 1, rows: state.rows + saved,
