@@ -8,6 +8,9 @@
 // so one with more is split into price bands, then $1 bands, then a $1 band
 // is read sorted low-to-high and high-to-low. The work is a queue of
 // single-page search jobs saved in SQLite, so a restart resumes where it left off.
+// Tier 3 searches overlap heavily (department, subcategory, price bands), so
+// there a page that finds nothing new ends its search: its later pages and
+// narrower searches are dropped.
 
 export const PAGE = 25;
 export const CAP = 1000; // Walmart: "Start should be less than 1000"
@@ -169,22 +172,33 @@ export class TierStore {
     const { total } = result;
     // Searches for one department also return items from others (e.g. clothing for "seasonal").
     const products = result.products.filter(keep);
+    let added = 0;
     this.db.exec('BEGIN');
     try {
       for (const p of products) {
-        this.insertItem.run(this.retailer, job.tier, run, p.id, job.department, offerOf(job.filters));
+        added += this.insertItem.run(this.retailer, job.tier, run, p.id, job.department, offerOf(job.filters)).changes;
         // The search only returns Walmart-sold items, so its price is Walmart's online price.
         if (p.seller?.isRetailer !== false && p.price > 0) this.store.saveOnlinePrice(this.retailer, p.id, p.price, run.slice(0, 10));
         if (job.tier <= 2) this.saveProduct(run, p);
       }
-      if (job.start === 1) this.planFollowUps(run, job, total);
+      const exhausted = job.tier === 3 && added === 0;
+      if (job.start === 1 && !exhausted) this.planFollowUps(run, job, total);
+      if (exhausted && job.start > 1) this.dropLaterPages(run, job);
       this.db.prepare('DELETE FROM search_queue WHERE id = ?').run(job.id);
       this.db.exec('COMMIT');
     } catch (err) {
       this.db.exec('ROLLBACK');
       throw err;
     }
-    return { found: products.length, total };
+    return { found: products.length, added, total };
+  }
+
+  /** Drop the queued later pages of the search `job` belongs to. */
+  dropLaterPages(run, job) {
+    this.db.prepare(`DELETE FROM search_queue WHERE retailer = ? AND run = ? AND tier = ? AND department = ? AND query = ?
+      AND filters = ? AND lo IS ? AND hi IS ? AND sort IS ? AND category IS ? AND start > ?`)
+      .run(this.retailer, run, job.tier, job.department, job.query, JSON.stringify(job.filters),
+        job.lo ?? null, job.hi ?? null, job.sort ?? null, job.category ?? null, job.start);
   }
 
   planFollowUps(run, job, total) {

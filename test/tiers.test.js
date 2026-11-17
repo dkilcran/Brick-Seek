@@ -426,3 +426,25 @@ test('shelf listings: priced, a normal id, not a video episode', async () => {
   assert.equal(isShelfListing({ itemId: 22004750001, stock: 'Not available' }), false, 'unpriced');
   assert.equal(isShelfListing({ itemId: 190052277878, salePrice: 125.8 }), false, '12-digit id');
 });
+
+test('tier 3: a search page that finds nothing new ends that search', async () => {
+  const { tiers } = newStores();
+  const known = Array.from({ length: 50 }, (_, i) => ({ id: `k${i}`, price: 2 }));
+  const fresh = Array.from({ length: 30 }, (_, i) => ({ id: `n${i}`, price: 2 }));
+  // Page 1 new, page 2 all already listed, page 3 would have new ones.
+  const source = fakeSearch({ all: [...fresh.slice(0, 25), ...known.slice(0, 25), ...fresh.slice(25)] });
+  for (const k of known) tiers.insertItem.run('walmart', 3, 'r', k.id, 'Toys', null);
+  tiers.startRun('r', { tiers: [{ tier: 3, filterSets: [[]] }], departments: ['Toys'], queriesFor: () => ['toys'], baseFilters: [] });
+  let job;
+  while ((job = tiers.nextJob('r'))) await tiers.runJob('r', job, source);
+  assert.deepEqual(source.requests.map((r) => r.start), [1, 26], 'page 3 dropped after an all-known page 2');
+  assert.equal(tiers.count(3, 'r'), 75);
+
+  // Tiers 1 and 2 stay exhaustive.
+  const { tiers: t2 } = newStores();
+  const deals = fakeSearch({ 'special_offers:Clearance': [...fresh.slice(0, 25), ...known.slice(0, 25), ...fresh.slice(25)] });
+  for (const k of known.slice(0, 25)) t2.insertItem.run('walmart', 1, 'r', k.id, 'Toys', null);
+  t2.startRun('r', { tiers: [{ tier: 1, filterSets: [['special_offers:Clearance']] }], departments: ['Toys'], queriesFor: () => ['toys'], baseFilters: [] });
+  while ((job = t2.nextJob('r'))) await t2.runJob('r', job, deals);
+  assert.deepEqual(deals.requests.map((r) => r.start), [1, 26, 51]);
+});
