@@ -367,7 +367,9 @@ const feedOver = (listings, size = 2) => (q) => {
 
 test('each night, the newest listings join tier 3; the first night finds where they start', async () => {
   const day = makeDay({ start: '2026-11-03T10:30:00Z', catalog: CATALOG, config: { nightlyNewItems: true } }); // Tuesday
-  for (const id of ['100', '205']) day.tiers.insertItem.run('walmart', 3, 'old', id, 'Toys', null);
+  // Junk an earlier run put on the list: an episode-shaped id (passed over) and a
+  // stray id with nothing real after it (the search for the newest steps down from it).
+  for (const id of ['100', '205', '40000000002', '30000000500']) day.tiers.insertItem.run('walmart', 3, 'old', id, 'Toys', null);
   day.tiers.markBuilt(3, 'old');
   const listings = [
     { itemId: 5000000, name: 'Older listing the searches never found', salePrice: 3 },
@@ -386,10 +388,10 @@ test('each night, the newest listings join tier 3; the first night finds where t
   const ids = day.tiers.itemIds(3);
   assert.ok(ids.includes('150000206') && ids.includes('150000207'));
   assert.ok(!ids.includes('5000000'), 'older listings are skipped');
-  assert.equal(day.db.getMeta('newItems:after:walmart:Toys'), '150000207');
+  assert.equal(day.db.getMeta('newItems:from:walmart:Toys'), '150000207');
   const st = day.checker.status();
   assert.equal(st.newItems.added, 2);
-  assert.ok(requests.length <= 10, `${requests.length} feed pages`);
+  assert.ok(requests.length <= 25, `${requests.length} feed pages (once; later nights read 1-2)`);
   assert.ok(day.lookups.some((l) => l.ids.includes('150000206')), 'new listings get tier 3 store checks');
 
   // The next night reads only what came after.
@@ -401,7 +403,7 @@ test('each night, the newest listings join tier 3; the first night finds where t
   await day.runUntilIdle();
   assert.deepEqual(requests.slice(before).map((q) => q.lastDoc), ['150000207', '9000000000'], 'until a page with no shelf listing');
   assert.ok(day.tiers.itemIds(3).includes('150000300'));
-  assert.equal(day.db.getMeta('newItems:after:walmart:Toys'), '150000300');
+  assert.equal(day.db.getMeta('newItems:from:walmart:Toys'), '150000300');
 });
 
 test('on rebuild day the new listings also go into the rebuild', async () => {

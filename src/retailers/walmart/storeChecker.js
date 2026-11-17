@@ -130,6 +130,11 @@ export class StoreChecker {
 
   toProduct = (item) => this.source.toProduct(item);
 
+  /** Rebuild the deal labels as of this checker's clock. */
+  refreshDeals() {
+    this.db.refreshMarkdowns(this.retailer, { now: this.now().getTime() });
+  }
+
   /** Queue the department searches of a list build: one per department query and filter set. */
   queueSearches(run, config, tiers) {
     this.tiers.dropQueue(run);
@@ -255,7 +260,7 @@ export class StoreChecker {
     if (state.day === today && hour < config.schedule.storeChecksHour && hour >= config.schedule.productListHour) return false;
     const seg = this.segments(state, config)[state.segment];
     if (!seg) {
-      this.db.refreshMarkdowns(this.retailer); // with today's online prices
+      this.refreshDeals(); // with today's online prices
       // A rebuild due today starts first, so the new listings also go into it.
       const tier3 = this.tier3Phase(state, config);
       this.state = { ...state, phase: config.nightlyNewItems ? 'newItems' : tier3, checksDoneAt: this.now().toISOString() };
@@ -263,7 +268,7 @@ export class StoreChecker {
     }
     if (state.segmentTotal === null) {
       // Fresh deal labels first: the later segments' lists come from them.
-      this.db.refreshMarkdowns(this.retailer);
+      this.refreshDeals();
       const ids = this.db.inDepartments(this.retailer, seg.ids(), config.departments);
       this.saveList('segment', ids);
       this.state = { ...state, segmentTotal: ids.length, offset: 0 };
@@ -316,17 +321,17 @@ export class StoreChecker {
       return true;
     }
     const job = f.jobs[f.index];
-    const cursorKey = `newItems:after:${this.retailer}:${job.department}`;
+    const cursorKey = `newItems:from:${this.retailer}:${job.department}`;
     const cursor = this.db.getMeta(cursorKey);
     if (!cursor) {
       const newestListed = f.seek ? null : this.tiers.maxTier3Id(job.department);
-      const from = f.seek ?? (newestListed && { lo: Number(newestListed), hi: null, step: SEEK_FIRST_STEP });
+      const from = f.seek ?? (newestListed && { start: Number(newestListed), lo: null, hi: null, step: SEEK_FIRST_STEP });
       if (!from) {
         this.state = { ...state, newItems: { ...f, index: f.index + 1 } };
         return true;
       }
       const seek = await this.seekNewest(job, from);
-      if (seek.hi !== null && seek.hi - seek.lo <= SEEK_PRECISION) this.db.setMeta(cursorKey, String(seek.lo));
+      if (seek.lo !== null && seek.hi !== null && seek.hi - seek.lo <= SEEK_PRECISION) this.db.setMeta(cursorKey, String(seek.lo));
       this.state = { ...state, newItems: { ...f, seek: this.db.getMeta(cursorKey) ? null : seek, pages: f.pages + 1, seekPages: (f.seekPages ?? 0) + 1 } };
       return true;
     }
@@ -348,14 +353,24 @@ export class StoreChecker {
 
   /**
    * One probe of where a department's newest shelf listing is: `lo` is an id
-   * with shelf listings after it, `hi` one without (null until found).
-   * Steps up (doubling) until past the newest, then halves the gap.
+   * with shelf listings after it, `hi` one without (each null until found).
+   * The first probe is at `start` (the newest id on the tier 3 list); from
+   * there it steps up, or down when nothing real follows `start` (a stray id
+   * on the list), doubling the step until it brackets the newest, then halves
+   * the gap.
    */
-  async seekNewest(job, { lo, hi, step }) {
-    const probe = hi === null ? lo + step : Math.floor((lo + hi) / 2);
+  async seekNewest(job, { start, lo, hi, step }) {
+    let probe;
+    if (lo === null && hi === null) probe = start;
+    else if (hi === null) probe = lo + step;
+    else if (lo === null) probe = Math.max(0, hi - step);
+    else probe = Math.floor((lo + hi) / 2);
     const page = await this.feedPage({ category: job.category, soldByWmt: 'true', lastDoc: String(probe) });
-    if (page.items.some(isShelfListing)) return { lo: probe, hi, step: hi === null ? step * 2 : step };
-    return { lo, hi: probe, step };
+    const next = { start, lo, hi, step };
+    if (page.items.some(isShelfListing)) Object.assign(next, { lo: probe, step: hi === null && lo !== null ? step * 2 : step });
+    else Object.assign(next, { hi: probe, step: lo === null && hi !== null ? step * 2 : step });
+    if (next.lo === null && probe === 0) next.lo = 0; // nothing real at all: start from the beginning
+    return next;
   }
 
   /**
@@ -435,7 +450,7 @@ export class StoreChecker {
       tier3Lookups: state.tier3Lookups + 1, rows: state.rows + saved,
     };
     // Add tier 3 finds to the deal lists as it runs (about every 35 minutes).
-    if ((state.tier3Lookups + 1) % TIER3_REFRESH_LOOKUPS === 0) this.db.refreshMarkdowns(this.retailer);
+    if ((state.tier3Lookups + 1) % TIER3_REFRESH_LOOKUPS === 0) this.refreshDeals();
     return true;
   }
 
@@ -489,7 +504,7 @@ export class StoreChecker {
   /** End the day's cycle. Returns false (nothing more to do today). */
   finish(state) {
     this.state = { ...state, phase: 'done', finishedAt: this.now().toISOString() };
-    this.db.refreshMarkdowns(this.retailer);
+    this.refreshDeals();
     console.log(`store check ${state.day}: done (${state.lookups} check lookups, ${state.tier3Lookups} tier 3 lookups)`);
     return false;
   }

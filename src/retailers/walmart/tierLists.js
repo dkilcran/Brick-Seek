@@ -231,10 +231,14 @@ export class TierStore {
     return this.db.prepare('SELECT COUNT(*) n FROM tier_items WHERE retailer = ? AND tier = ? AND run = ?').get(this.retailer, tier, run).n;
   }
 
-  /** The highest item id (as a number) on any tier 3 list in a department, or null. */
+  /**
+   * The highest item id (as a number) on any tier 3 list in a department, or
+   * null. Ids shaped like the feeds' non-shelf listings (see isShelfListing)
+   * are passed over.
+   */
   maxTier3Id(department) {
-    const row = this.db.prepare(`SELECT MAX(CAST(item_id AS INTEGER)) AS id FROM tier_items
-      WHERE retailer = ? AND tier = 3 AND department = ?`).get(this.retailer, department);
+    const row = this.db.prepare(`SELECT MAX(id) AS id FROM (SELECT CAST(item_id AS INTEGER) AS id FROM tier_items
+      WHERE retailer = ? AND tier = 3 AND department = ?) WHERE id < 100000000000 AND id % 1000 NOT BETWEEN 1 AND 3`).get(this.retailer, department);
     return row?.id == null ? null : String(row.id);
   }
 
