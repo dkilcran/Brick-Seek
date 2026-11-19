@@ -203,3 +203,29 @@ test('each deal label rebuild calls onRefresh', () => {
   db.refreshMarkdowns('walmart');
   assert.equal(calls, 2);
 });
+
+test('Walmart\'s Rollback flag at a store labels it Rollback, with a was-price there', () => {
+  const db = new StorePrices(new PriceTracker().db);
+  const day = new Date().toISOString().slice(0, 10);
+  db.recordStorePrices('walmart', '4590', [
+    { itemId: 'r1', price: 22.98, wasPrice: 27.98, rollback: true, seller: 'Walmart.com', inStock: true },
+    { itemId: 'r2', price: 5, rollback: true, seller: 'Walmart.com', inStock: true }, // no was-price: no deal
+  ], day);
+  db.refreshMarkdowns('walmart');
+  const rows = db.markdownRows('walmart', ['4590']);
+  assert.deepEqual(rows.map((r) => [r.item_id, r.kind, r.ref_price]), [['r1', 'rollback', 27.98]]);
+  // The flag is part of what's compared for the change log.
+  db.recordStorePrices('walmart', '4590', [{ itemId: 'r1', price: 22.98, wasPrice: 27.98, rollback: false, seller: 'Walmart.com', inStock: true }], day);
+  assert.equal(db.db.prepare("SELECT rollback FROM store_latest WHERE item_id = 'r1'").get().rollback, 0);
+});
+
+test('a database made before the rollback column gets it', async () => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const raw = new DatabaseSync(':memory:');
+  raw.exec(`CREATE TABLE store_latest (retailer TEXT NOT NULL, store_id TEXT NOT NULL, item_id TEXT NOT NULL, date TEXT NOT NULL,
+    price REAL, was_price REAL, in_stock INTEGER, seller TEXT, clearance INTEGER, prev_price REAL, prev_date TEXT,
+    PRIMARY KEY (retailer, store_id, item_id)) WITHOUT ROWID`);
+  const db = new StorePrices(raw);
+  db.recordStorePrices('walmart', '573', [{ itemId: '1', price: 3, wasPrice: 4, rollback: true, seller: 'Walmart.com' }], '2026-11-19');
+  assert.equal(raw.prepare('SELECT rollback FROM store_latest').get().rollback, 1);
+});

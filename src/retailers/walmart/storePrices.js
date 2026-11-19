@@ -7,7 +7,7 @@ const PRICE_DAYS = 14; // store prices older than this aren't shown, and history
 /** A store price at least this far below the item's highest valid store price is a Markdown. */
 const MARKDOWN_GAP = 0.1;
 /** Bump when the labeling rules change, so startup rebuilds store_markdowns with them. */
-const MARKDOWN_RULES = '4';
+const MARKDOWN_RULES = '5';
 const SOLD_BY_WALMART = "IN ('walmart', 'walmart.com')";
 
 const dayBefore = (now, days) => new Date(now - days * 86400000).toISOString().slice(0, 10);
@@ -36,6 +36,7 @@ export class StorePrices {
         in_stock INTEGER,  -- 1, 0, or null when unknown
         seller TEXT,
         clearance INTEGER, -- Walmart's Clearance flag at that store
+        rollback INTEGER,  -- Walmart's Rollback flag at that store
         PRIMARY KEY (retailer, store_id, item_id, date)
       ) WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS store_prices_by_item_date ON store_prices (retailer, item_id, date);
@@ -43,7 +44,7 @@ export class StorePrices {
       -- The current price per store and item (date = last check): what pages read.
       CREATE TABLE IF NOT EXISTS store_latest (
         retailer TEXT NOT NULL, store_id TEXT NOT NULL, item_id TEXT NOT NULL, date TEXT NOT NULL,
-        price REAL, was_price REAL, in_stock INTEGER, seller TEXT, clearance INTEGER,
+        price REAL, was_price REAL, in_stock INTEGER, seller TEXT, clearance INTEGER, rollback INTEGER,
         prev_price REAL, prev_date TEXT, -- the price before its last change, and when that was seen
         PRIMARY KEY (retailer, store_id, item_id)
       ) WITHOUT ROWID;
@@ -79,15 +80,20 @@ export class StorePrices {
       ) WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS store_markdowns_by_item ON store_markdowns (retailer, item_id);
     `);
-    const priceCols = '(retailer, store_id, item_id, date, price, was_price, in_stock, seller, clearance)';
+    // Added Nov 2026 to databases made before.
+    for (const table of ['store_prices', 'store_latest']) {
+      if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === 'rollback')) db.exec(`ALTER TABLE ${table} ADD COLUMN rollback INTEGER`);
+    }
+    const priceCols = '(retailer, store_id, item_id, date, price, was_price, in_stock, seller, clearance, rollback)';
     const priceUpdates = (table) => `price = excluded.price, was_price = excluded.was_price, in_stock = excluded.in_stock,
-      seller = excluded.seller, clearance = COALESCE(excluded.clearance, ${table}.clearance)`;
-    this.getLatest = db.prepare(`SELECT price, was_price, in_stock, seller, clearance FROM store_latest
+      seller = excluded.seller, clearance = COALESCE(excluded.clearance, ${table}.clearance),
+      rollback = COALESCE(excluded.rollback, ${table}.rollback)`;
+    this.getLatest = db.prepare(`SELECT price, was_price, in_stock, seller, clearance, rollback FROM store_latest
       WHERE retailer = ? AND store_id = ? AND item_id = ?`);
-    this.upsertPrice = db.prepare(`INSERT INTO store_prices ${priceCols} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    this.upsertPrice = db.prepare(`INSERT INTO store_prices ${priceCols} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (retailer, store_id, item_id, date) DO UPDATE SET ${priceUpdates('store_prices')}`);
     const changed = 'excluded.price IS NOT NULL AND store_latest.price IS NOT NULL AND excluded.price <> store_latest.price';
-    this.upsertLatest = db.prepare(`INSERT INTO store_latest ${priceCols} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    this.upsertLatest = db.prepare(`INSERT INTO store_latest ${priceCols} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (retailer, store_id, item_id) DO UPDATE SET date = excluded.date,
         prev_price = CASE WHEN ${changed} THEN store_latest.price ELSE store_latest.prev_price END,
         prev_date = CASE WHEN ${changed} THEN store_latest.date ELSE store_latest.prev_date END,
@@ -122,11 +128,11 @@ export class StorePrices {
         const id = String(r.itemId);
         this.upsertItem.run(retailer, id, r.title ?? null, r.imageUrl ?? null, r.category ?? null);
         if (r.listPrice > 0) this.setListPrice.run(retailer, id, r.listPrice);
-        const values = [retailer, storeId, id, date, r.price ?? null, r.wasPrice ?? null, flag(r.inStock), r.seller ?? null, flag(r.clearance)];
-        const [, , , , price, wasPrice, inStock, seller, clearance] = values;
+        const values = [retailer, storeId, id, date, r.price ?? null, r.wasPrice ?? null, flag(r.inStock), r.seller ?? null, flag(r.clearance), flag(r.rollback)];
+        const [, , , , price, wasPrice, inStock, seller, clearance, rollback] = values;
         const prev = this.getLatest.get(retailer, storeId, id);
         const same = prev && prev.price === price && prev.was_price === wasPrice && prev.in_stock === inStock
-          && prev.seller === seller && (clearance === null || prev.clearance === clearance);
+          && prev.seller === seller && (clearance === null || prev.clearance === clearance) && (rollback === null || prev.rollback === rollback);
         if (!same) this.upsertPrice.run(...values);
         this.upsertLatest.run(...values);
       }
@@ -212,6 +218,7 @@ export class StorePrices {
    * Rebuild store_markdowns from the current Walmart-sold prices. Each store
    * price gets at most one label, in this order:
    *  - clearance: Walmart's Clearance flag at that store;
+   *  - rollback: Walmart's Rollback flag at that store, below its was-price there;
    *  - rollback / reduced: on today's Walmart Rollback or Reduced Price list
    *    (tier 2) and below its was-price at that store;
    *  - markdown (ours): at least MARKDOWN_GAP below the item's highest valid
@@ -261,11 +268,11 @@ export class StorePrices {
         offers AS (${offers}),
         -- Rows that could get a label (before the online-price checks).
         cand AS (
-          SELECT c.store_id, c.item_id, c.date, c.price, c.was_price, c.in_stock, c.clearance, o.offer, t.high top_high,
+          SELECT c.store_id, c.item_id, c.date, c.price, c.was_price, c.in_stock, c.clearance, c.rollback, o.offer, t.high top_high,
             CASE WHEN c.prev_date >= :since AND c.prev_price > c.price THEN c.prev_price END prev
           FROM store_latest c LEFT JOIN top t ON t.item_id = c.item_id LEFT JOIN offers o ON o.item_id = c.item_id
           WHERE c.retailer = :retailer AND c.date >= :since AND c.price > 0 AND lower(c.seller) ${SOLD_BY_WALMART}
-            AND (c.clearance = 1 OR (o.offer IS NOT NULL AND c.was_price > c.price) OR c.price <= t.high * (1 - :gap)
+            AND (c.clearance = 1 OR ((o.offer IS NOT NULL OR c.rollback = 1) AND c.was_price > c.price) OR c.price <= t.high * (1 - :gap)
               OR (c.prev_date >= :since AND c.price <= c.prev_price * (1 - :gap)))),
         -- Walmart's own online price (recent) and the item's list price.
         priced AS (
@@ -284,6 +291,7 @@ export class StorePrices {
             CASE
               WHEN online IS NOT NULL AND price > online THEN NULL -- cheaper online: not a deal
               WHEN clearance = 1 THEN 'clearance'
+              WHEN rollback = 1 AND was_price > price THEN 'rollback' -- Walmart's Rollback flag at that store
               WHEN offer IS NOT NULL AND was_price > price THEN offer
               WHEN price <= high * (1 - :gap) THEN 'markdown'
             END kind

@@ -276,6 +276,7 @@ export class WalmartLiveSource {
         wasPrice: wasPriceOf(item),
         listPrice: p.msrp,
         clearance: item.clearance === true,
+        rollback: item.rollBack === true,
         inStock: p.inStockOnline, // with a storeId, "stock" describes that store
         seller: p.seller.name,
         isWalmart: p.seller.isRetailer,

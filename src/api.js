@@ -216,6 +216,28 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       };
     }],
 
+    // SerpApi's walmart.com product page for an item at a store (SERPAPI_KEY, free
+    // plan: 250 searches a month), to check what Walmart's affiliate API says
+    // about stores. ?account=1 shows the searches left instead (free).
+    ['GET', '/api/:retailer/debug/serp/:id', async ({ params, query }) => {
+      requireRetailer(registry, params.retailer);
+      const key = process.env.SERPAPI_KEY;
+      if (!key) throw new HttpError(501, 'SERPAPI_KEY is not set');
+      if (query.get('account') === '1') {
+        const a = await (await fetch(`https://serpapi.com/account.json?api_key=${encodeURIComponent(key)}`)).json();
+        return { plan: a.plan_name, searchesPerMonth: a.searches_per_month, searchesLeft: a.plan_searches_left ?? a.total_searches_left, thisMonth: a.this_month_usage };
+      }
+      if (!/^\d{1,15}$/.test(params.id)) throw new HttpError(400, 'Item id should be a number');
+      const store = query.get('store') ?? '';
+      if (store && !/^\d{1,6}$/.test(store)) throw new HttpError(400, 'store should be a store number');
+      const url = new URL('https://serpapi.com/search.json');
+      for (const [k, v] of Object.entries({ engine: 'walmart_product', product_id: params.id, store_id: store || undefined, api_key: key })) if (v) url.searchParams.set(k, v);
+      const data = await (await fetch(url)).json();
+      // Small fields only (no images, reviews or long text).
+      const small = (o) => Object.fromEntries(Object.entries(o ?? {}).filter(([, v]) => JSON.stringify(v ?? null).length <= 600));
+      return { status: data.search_metadata?.status, error: data.error ?? null, product: small(data.product_result) };
+    }],
+
     // Walmart's category tree below a category (or the top level): names and ids.
     ['GET', '/api/:retailer/debug/taxonomy', async ({ params, query }) => {
       const adapter = requireRetailer(registry, params.retailer);

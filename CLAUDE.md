@@ -48,8 +48,8 @@
   `publisherId`), so it could change without notice.
 - **`/items` with `storeId` also answers for items sold online only**
   (`offerType: "ONLINE_ONLY"`), with the online price at every store; those
-  are dropped. It has a `clearance` flag but no Rollback flag; Rollback and
-  Reduced Price come from the `/search` facet lists. `strikeThroughPrice` is
+  are dropped. It has `clearance` and `rollBack` flags (no Reduced Price
+  flag; that comes from the `/search` facet lists). `strikeThroughPrice` is
   often just a reference "was" price on items with no offer, and `msrp` can
   be below the sale price.
 - **Walmart's own online price**: `/search` with `retailer_type:Walmart` returns

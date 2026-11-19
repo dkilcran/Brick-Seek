@@ -71,9 +71,10 @@ crowded $1 band is read sorted both ways.
 Each store price gets at most one label, in this order:
 
 1. **Clearance**: Walmart's Clearance flag at that store.
-2. **Rollback** / **Reduced Price**: on today's Walmart Rollback or Reduced
+2. **Rollback**: Walmart's Rollback flag at that store, with a was-price there.
+3. **Rollback** / **Reduced Price**: on today's Walmart Rollback or Reduced
    Price list (tier 2), with a was-price at that store.
-3. **Markdown** (ours): at least `markdownPercent` below the item's highest
+4. **Markdown** (ours): at least `markdownPercent` below the item's highest
    valid store price: the highest current Walmart-sold price at any store, or
    that store's own earlier price if higher. A store price above the item's
    list price (Walmart's MSRP, or the highest was-price at any store) isn't

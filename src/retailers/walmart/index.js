@@ -323,6 +323,7 @@ export class WalmartAdapter extends RetailerAdapter {
     else {
       result = {
         storeId: String(storeId), price: item.price, wasPrice: item.wasPrice, clearance: item.clearance,
+        rollback: Boolean(item.rollback) && item.wasPrice > item.price,
         status: item.inStock === true ? STOCK_STATUS.IN_STOCK : item.inStock === false ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
         seenOn: day, checked: true,
       };
