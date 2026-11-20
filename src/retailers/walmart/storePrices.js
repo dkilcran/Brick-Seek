@@ -197,7 +197,10 @@ export class StorePrices {
    * @param {{ onlinePrices: (ids: string[]) => Promise<Map<string, object>> }} source
    */
   async ensureOnlineLookups(retailer, ids, date, source) {
-    const todo = ids.map(String).filter((id) => this.item(retailer, id)?.online_lookup_date !== date);
+    const todo = ids.map(String).filter((id) => {
+      const known = this.item(retailer, id);
+      return known?.online_lookup_date !== date || !known.online_signature;
+    });
     if (!todo.length || !source.onlinePrices) return 0;
     const online = await source.onlinePrices(todo);
     for (const id of todo) this.saveOnlineLookup(retailer, id, online.get(id), date);
