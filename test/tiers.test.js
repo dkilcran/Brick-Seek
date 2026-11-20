@@ -84,7 +84,7 @@ function makeDay({ start, catalog, config: extra = {} }) {
     async onlinePrices(ids) {
       this.onlineLookups.push([...ids]);
       clock = new Date(clock.getTime() + 60000);
-      return new Map(ids.map((id) => [String(id), { price: 99, isWalmart: true }]));
+      return new Map(ids.map((id) => [String(id), { price: 99, isWalmart: true, signature: `online:${id}` }]));
     },
     async storeLookup(ids, storeId) {
       lookups.push({ storeId, ids: [...ids], at: clock.toISOString() });
