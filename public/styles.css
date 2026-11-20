@@ -77,6 +77,7 @@ input:focus, select:focus { outline: 2px solid var(--retailer); outline-offset: 
 .chip:hover { text-decoration: none; border-color: var(--retailer); }
 .chip.active { background: var(--retailer); border-color: var(--retailer); color: #fff; }
 .badge.unknown { background: var(--border); color: var(--muted); }
+.badge.unconfirmed { background: transparent; border: 1px dashed var(--muted); color: var(--muted); }
 
 .product-head { display: grid; grid-template-columns: 220px 1fr; gap: 24px; align-items: start; }
 .product-head h1 { font-size: 24px; margin: 0 0 8px; }

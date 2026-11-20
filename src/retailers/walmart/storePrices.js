@@ -37,6 +37,7 @@ export class StorePrices {
         seller TEXT,
         clearance INTEGER, -- Walmart's Clearance flag at that store
         rollback INTEGER,  -- Walmart's Rollback flag at that store
+        confirmed INTEGER, -- 0: Walmart answered with its online offer unchanged (not confirmed in store); null: unknown
         PRIMARY KEY (retailer, store_id, item_id, date)
       ) WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS store_prices_by_item_date ON store_prices (retailer, item_id, date);
@@ -44,7 +45,7 @@ export class StorePrices {
       -- The current price per store and item (date = last check): what pages read.
       CREATE TABLE IF NOT EXISTS store_latest (
         retailer TEXT NOT NULL, store_id TEXT NOT NULL, item_id TEXT NOT NULL, date TEXT NOT NULL,
-        price REAL, was_price REAL, in_stock INTEGER, seller TEXT, clearance INTEGER, rollback INTEGER,
+        price REAL, was_price REAL, in_stock INTEGER, seller TEXT, clearance INTEGER, rollback INTEGER, confirmed INTEGER,
         prev_price REAL, prev_date TEXT, -- the price before its last change, and when that was seen
         PRIMARY KEY (retailer, store_id, item_id)
       ) WITHOUT ROWID;
@@ -61,6 +62,7 @@ export class StorePrices {
         online_only INTEGER,        -- 1: Walmart sells it online only
         online_available INTEGER,   -- 1/0: available on Walmart.com (online lookup)
         online_lookup_date TEXT,    -- day of the last online lookup
+        online_signature TEXT,      -- that lookup's answer (see liveSource offerSignature)
         PRIMARY KEY (retailer, item_id)
       ) WITHOUT ROWID;
       -- Walmart's store list per ZIP (stores rarely change), so pages don't wait on Walmart.
@@ -74,26 +76,28 @@ export class StorePrices {
         retailer TEXT NOT NULL, store_id TEXT NOT NULL, item_id TEXT NOT NULL, date TEXT NOT NULL,
         price REAL NOT NULL,
         ref_price REAL, -- what the discount is measured against
-        was_price REAL, in_stock INTEGER,
+        was_price REAL, in_stock INTEGER, confirmed INTEGER,
         kind TEXT NOT NULL, -- clearance | rollback | reduced | offer (rollback or reduced) | markdown
         PRIMARY KEY (retailer, store_id, item_id)
       ) WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS store_markdowns_by_item ON store_markdowns (retailer, item_id);
     `);
     // Added Nov 2026 to databases made before.
-    for (const table of ['store_prices', 'store_latest']) {
-      if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === 'rollback')) db.exec(`ALTER TABLE ${table} ADD COLUMN rollback INTEGER`);
+    for (const [table, column, type] of [['store_prices', 'rollback', 'INTEGER'], ['store_latest', 'rollback', 'INTEGER'],
+      ['store_prices', 'confirmed', 'INTEGER'], ['store_latest', 'confirmed', 'INTEGER'], ['store_markdowns', 'confirmed', 'INTEGER'],
+      ['store_items', 'online_signature', 'TEXT']]) {
+      if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     }
-    const priceCols = '(retailer, store_id, item_id, date, price, was_price, in_stock, seller, clearance, rollback)';
+    const priceCols = '(retailer, store_id, item_id, date, price, was_price, in_stock, seller, clearance, rollback, confirmed)';
     const priceUpdates = (table) => `price = excluded.price, was_price = excluded.was_price, in_stock = excluded.in_stock,
       seller = excluded.seller, clearance = COALESCE(excluded.clearance, ${table}.clearance),
-      rollback = COALESCE(excluded.rollback, ${table}.rollback)`;
+      rollback = COALESCE(excluded.rollback, ${table}.rollback), confirmed = excluded.confirmed`;
     this.getLatest = db.prepare(`SELECT price, was_price, in_stock, seller, clearance, rollback FROM store_latest
       WHERE retailer = ? AND store_id = ? AND item_id = ?`);
-    this.upsertPrice = db.prepare(`INSERT INTO store_prices ${priceCols} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    this.upsertPrice = db.prepare(`INSERT INTO store_prices ${priceCols} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (retailer, store_id, item_id, date) DO UPDATE SET ${priceUpdates('store_prices')}`);
     const changed = 'excluded.price IS NOT NULL AND store_latest.price IS NOT NULL AND excluded.price <> store_latest.price';
-    this.upsertLatest = db.prepare(`INSERT INTO store_latest ${priceCols} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    this.upsertLatest = db.prepare(`INSERT INTO store_latest ${priceCols} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (retailer, store_id, item_id) DO UPDATE SET date = excluded.date,
         prev_price = CASE WHEN ${changed} THEN store_latest.price ELSE store_latest.prev_price END,
         prev_date = CASE WHEN ${changed} THEN store_latest.date ELSE store_latest.prev_date END,
@@ -107,10 +111,12 @@ export class StorePrices {
     this.setOnline = db.prepare(`INSERT INTO store_items (retailer, item_id, online_price, online_date) VALUES (?, ?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET online_price = excluded.online_price, online_date = excluded.online_date`);
     this.setOnlineLookup = db.prepare(`INSERT INTO store_items
-      (retailer, item_id, online_price, online_date, online_was, online_only, online_available, online_lookup_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      (retailer, item_id, online_price, online_date, online_was, online_only, online_available, online_lookup_date, online_signature)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET online_price = excluded.online_price, online_date = excluded.online_date,
         online_was = excluded.online_was, online_only = COALESCE(excluded.online_only, store_items.online_only),
-        online_available = excluded.online_available, online_lookup_date = excluded.online_lookup_date`);
+        online_available = excluded.online_available, online_lookup_date = excluded.online_lookup_date,
+        online_signature = excluded.online_signature`);
     this.getItem = db.prepare('SELECT * FROM store_items WHERE retailer = ? AND item_id = ?');
   }
 
@@ -128,7 +134,7 @@ export class StorePrices {
         const id = String(r.itemId);
         this.upsertItem.run(retailer, id, r.title ?? null, r.imageUrl ?? null, r.category ?? null);
         if (r.listPrice > 0) this.setListPrice.run(retailer, id, r.listPrice);
-        const values = [retailer, storeId, id, date, r.price ?? null, r.wasPrice ?? null, flag(r.inStock), r.seller ?? null, flag(r.clearance), flag(r.rollback)];
+        const values = [retailer, storeId, id, date, r.price ?? null, r.wasPrice ?? null, flag(r.inStock), r.seller ?? null, flag(r.clearance), flag(r.rollback), flag(r.confirmed)];
         const [, , , , price, wasPrice, inStock, seller, clearance, rollback] = values;
         const prev = this.getLatest.get(retailer, storeId, id);
         const same = prev && prev.price === price && prev.was_price === wasPrice && prev.in_stock === inStock
@@ -150,7 +156,14 @@ export class StorePrices {
    * @param {{ found: object[], onlineOnly?: string[] }} lookup  WalmartLiveSource.storeLookup's result
    */
   recordStoreLookup(retailer, storeId, { found, onlineOnly = [] }, date) {
-    this.recordStorePrices(retailer, storeId, found, date);
+    // An answer identical to the same day's online lookup is Walmart's online
+    // offer, not store data: saved as not confirmed (no same-day lookup: unknown).
+    const confirmedOf = (r) => {
+      const online = this.item(retailer, r.itemId);
+      if (!r.signature || online?.online_lookup_date !== date || !online.online_signature) return null;
+      return r.signature !== online.online_signature;
+    };
+    this.recordStorePrices(retailer, storeId, found.map((r) => ({ ...r, confirmed: confirmedOf(r) })), date);
     if (onlineOnly.length) {
       this.markOnlineOnly(retailer, onlineOnly);
       this.dropItems(retailer, onlineOnly);
@@ -174,8 +187,21 @@ export class StorePrices {
     const walmart = o?.isWalmart === true;
     this.setOnlineLookup.run(retailer, String(itemId), walmart && o.price > 0 ? o.price : null, date,
       walmart && o.wasPrice > o.price ? o.wasPrice : null,
-      o ? (o.onlineOnly ? 1 : 0) : null, walmart ? (o.availableOnline ? 1 : 0) : null, date);
+      o ? (o.onlineOnly ? 1 : 0) : null, walmart ? (o.availableOnline ? 1 : 0) : null, date, o?.signature ?? null);
     this.onlineVersion += 1;
+  }
+
+  /**
+   * Look up Walmart.com's answer for the ids not yet looked up on `date`, so
+   * store answers that day can be compared with it (see recordStoreLookup).
+   * @param {{ onlinePrices: (ids: string[]) => Promise<Map<string, object>> }} source
+   */
+  async ensureOnlineLookups(retailer, ids, date, source) {
+    const todo = ids.map(String).filter((id) => this.item(retailer, id)?.online_lookup_date !== date);
+    if (!todo.length || !source.onlinePrices) return 0;
+    const online = await source.onlinePrices(todo);
+    for (const id of todo) this.saveOnlineLookup(retailer, id, online.get(id), date);
+    return todo.length;
   }
 
   /** Mark items as sold online only (a store lookup said so). */
@@ -243,7 +269,7 @@ export class StorePrices {
     this.db.exec('BEGIN');
     try {
       this.db.prepare('DELETE FROM store_markdowns WHERE retailer = ?').run(retailer);
-      this.db.prepare(`INSERT INTO store_markdowns (retailer, store_id, item_id, date, price, ref_price, was_price, in_stock, kind)
+      this.db.prepare(`INSERT INTO store_markdowns (retailer, store_id, item_id, date, price, ref_price, was_price, in_stock, confirmed, kind)
         WITH
         -- Each item's price spread over all saved prices, read in index order (no
         -- sort): a cheap superset of the items whose current Walmart prices differ
@@ -268,7 +294,7 @@ export class StorePrices {
         offers AS (${offers}),
         -- Rows that could get a label (before the online-price checks).
         cand AS (
-          SELECT c.store_id, c.item_id, c.date, c.price, c.was_price, c.in_stock, c.clearance, c.rollback, o.offer, t.high top_high,
+          SELECT c.store_id, c.item_id, c.date, c.price, c.was_price, c.in_stock, c.clearance, c.rollback, c.confirmed, o.offer, t.high top_high,
             CASE WHEN c.prev_date >= :since AND c.prev_price > c.price THEN c.prev_price END prev
           FROM store_latest c LEFT JOIN top t ON t.item_id = c.item_id LEFT JOIN offers o ON o.item_id = c.item_id
           WHERE c.retailer = :retailer AND c.date >= :since AND c.price > 0 AND lower(c.seller) ${SOLD_BY_WALMART}
@@ -303,7 +329,7 @@ export class StorePrices {
             WHEN kind <> 'markdown' AND was_price > price THEN was_price
             WHEN high > price THEN high
           END,
-          CASE WHEN was_price > price THEN was_price END, in_stock, kind
+          CASE WHEN was_price > price THEN was_price END, in_stock, confirmed, kind
         FROM labeled WHERE kind IS NOT NULL`)
         .run({ retailer, since, gap, ...(tier2Run ? { run: tier2Run } : {}) });
       this.db.exec('COMMIT');
@@ -355,14 +381,14 @@ export class StorePrices {
   latestPrices(retailer, storeIds, itemId, { days = PRICE_DAYS, now = Date.now() } = {}) {
     if (!storeIds.length) return [];
     const marks = storeIds.map(() => '?').join(',');
-    return this.db.prepare(`SELECT store_id, date, price, was_price, in_stock, seller, clearance FROM store_latest
+    return this.db.prepare(`SELECT store_id, date, price, was_price, in_stock, seller, clearance, confirmed FROM store_latest
       WHERE retailer = ? AND date >= ? AND store_id IN (${marks}) AND item_id = ?`)
       .all(retailer, dayBefore(now, days), ...storeIds, String(itemId));
   }
 
   /** Stores where Walmart itself sells an item, cheapest first (current prices from the last `days` days). */
   walmartStoreOffers(retailer, itemId, { days = PRICE_DAYS, now = Date.now() } = {}) {
-    return this.db.prepare(`SELECT store_id, date, price, was_price, in_stock FROM store_latest INDEXED BY store_latest_by_item_price
+    return this.db.prepare(`SELECT store_id, date, price, was_price, in_stock, confirmed FROM store_latest INDEXED BY store_latest_by_item_price
       WHERE retailer = ? AND item_id = ? AND date >= ? AND lower(seller) ${SOLD_BY_WALMART}
       ORDER BY price`).all(retailer, String(itemId), dayBefore(now, days));
   }

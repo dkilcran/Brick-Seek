@@ -72,6 +72,13 @@
   Walmart store brand is not small (Home Mainstays: 64,500) and is mostly old
   listings: Nov 17, 14 of 15 sampled were unknown to `/items` (`{}`), so
   brand feeds are off. `brand=` is also loose (other brands come along).
+- **`/items` with `storeId` often answers with the online offer unchanged**
+  (Nov 19: willow tree "Available" + Clearance at all 23 stores; walmart.com:
+  no store has it). Nothing in the answer marks it: same `offerId`, every
+  field equal to the online lookup. Sample of In Store deals: 8 of 10 store
+  answers equal online; SerpApi pickup at that store: 2 of 10 vs 5 of 5 for
+  answers that differ. So an answer identical to the same day's online lookup
+  is saved `confirmed = 0` and shown "not confirmed in store".
 - **`/items` with `storeId` leaves out ids Walmart doesn't know** (old,
   removed listings); an item not carried at that store still answers
   (e.g. "Not available").
@@ -84,8 +91,9 @@
 - **Affiliate links**: Walmart's program runs on Impact. `productTrackingUrl`
   is `goto.walmart.com/c/{publisherId}/568844/9383?veh=aff&sourceid=imp_000011112222333344&u={item url}`
   (`|PUBID|` when no publisherId is sent); `walmartProductUrl` builds it.
-- **SerpApi** (paid; its code was removed Nov 2026, see git history): `engine=walmart` with `store_id`
+- **SerpApi** (`SERPAPI_KEY` is set in Render; `/api/walmart/debug/serp/:id?store=`, `?account=1` for searches left): `engine=walmart` with `store_id`
   and facets finds store clearance; `engine=walmart_product` with `store_id`
-  adds aisle and pickup availability. 250 searches/month on the free plan.
+  adds `pickup_option.available` at that store (and `in_stock` online).
+  250 searches/month on the free plan.
 - Walmart's `categoryPath` starts with "Home Page/"; the department is the next segment.
 - `msrp` of 9999 is a placeholder, not a list price.

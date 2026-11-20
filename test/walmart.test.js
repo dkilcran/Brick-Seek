@@ -420,3 +420,31 @@ test('product search pages through every Walmart-sold result, then adds items th
   assert.equal(second.nextStart, null);
   assert.deepEqual(second.products.map((p) => p.id), [...all.slice(25).map((p) => p.id), '18140512295'], 'saved matches after the last page');
 });
+
+test('stores answered with Walmart.com\'s online offer show as not confirmed, and deal cards prefer confirmed stores', async () => {
+  const stores = [{ retailer: 'walmart', id: '573', name: 'Lee' }, { retailer: 'walmart', id: '4590', name: 'Lee SW' }];
+  const { adapter, db } = liveAdapter({ source: { stores: async () => stores, getById: async () => null }, tiers: true });
+  const day = today();
+  db.saveOnlineLookup('walmart', 'tree', { isWalmart: true, price: 32.25, wasPrice: 129, signature: 'online' }, day);
+  db.recordStoreLookup('walmart', '573', { found: [walmartRow('tree', 32.25, { title: 'Tree', wasPrice: 129, clearance: true, signature: 'online' })] }, day);
+  db.recordStoreLookup('walmart', '4590', { found: [walmartRow('tree', 32.25, { title: 'Tree', wasPrice: 129, clearance: true, signature: 'store' })] }, day);
+  db.refreshMarkdowns('walmart');
+  const inv = await adapter.checkInventory('tree', '64081');
+  const [lee, sw] = inv.results;
+  assert.deepEqual([lee.status, lee.unconfirmed, lee.clearance, lee.label], ['unconfirmed', true, false, 'Clearance']);
+  assert.match(lee.note, /not confirmed/);
+  assert.deepEqual([sw.status, sw.clearance], ['in_stock', true]);
+  const card = (await adapter.allDealCards({ zip: '64081' })).find((c) => c.product.id === 'tree');
+  assert.deepEqual([card.store.store.id, card.store.unconfirmed], ['4590', false], 'at the same price, the confirmed store');
+  assert.equal(card.store.storesWithDeal, 2, 'the unconfirmed store still counts as a store deal');
+});
+
+test('the store and online lookups give the same signature for the same answer', async () => {
+  const answer = { itemId: 7, name: 'Tree', salePrice: 32.25, strikeThroughPrice: 129, stock: 'Available', clearance: true, availableOnline: true, sellerInfo: 'Walmart.com', offerType: 'ONLINE_AND_STORE' };
+  const live = liveSource(() => ({ items: [answer] }));
+  const [store] = (await live.storeLookup(['7'], '573')).found;
+  const online = (await live.onlinePrices(['7'])).get('7');
+  assert.equal(store.signature, online.signature);
+  const live2 = liveSource(() => ({ items: [{ ...answer, salePrice: 17.56 }] }));
+  assert.notEqual((await live2.storeLookup(['7'], '573')).found[0].signature, online.signature);
+});

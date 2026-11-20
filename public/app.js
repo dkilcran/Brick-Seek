@@ -20,7 +20,7 @@ const state = {
   zip: storage.get('zip') ?? '',
 };
 
-const STATUS_LABEL = { in_stock: 'In stock', limited: 'Limited', out_of_stock: 'Out of stock', unknown: 'Check store' };
+const STATUS_LABEL = { in_stock: 'In stock', limited: 'Limited', out_of_stock: 'Out of stock', unknown: 'Check store', unconfirmed: 'Not confirmed' };
 
 // ---------- helpers ----------
 function esc(value) {
@@ -180,13 +180,13 @@ function dealLine(line, where) {
   if (!line) return '';
   const ref = where === 'Online' ? line.wasPrice : line.refPrice;
   const at = where === 'In store' && line.store
-    ? `<div class="muted" style="font-size:12px">${esc(line.store.name ?? `Walmart #${line.store.id}`)}${line.storesWithDeal > 1 ? ` (+${line.storesWithDeal - 1} more stores)` : ''}${line.seenOn ? ` · checked ${esc(line.seenOn)}` : ''}</div>`
+    ? `<div class="muted" style="font-size:12px">${esc(line.store.name ?? `Walmart #${line.store.id}`)}${line.storesWithDeal > 1 ? ` (+${line.storesWithDeal - 1} more stores)` : ''}${line.seenOn ? ` · checked ${esc(line.seenOn)}` : ''}${line.unconfirmed ? '<br>Same as walmart.com: not confirmed in store' : ''}</div>`
     : '';
   return `<div class="deal-line">
     <span class="deal-where">${where}</span>
     <span class="price">${money(line.price)}</span>
     ${ref > line.price ? `<span class="was">${money(ref)}</span>` : ''}
-    ${line.label ? `<span class="badge ${badgeClass(line.label)} ${where === 'Online' ? 'outline' : ''}">${esc(line.label)} · ${where}</span>` : ''}
+    ${line.label ? `<span class="badge ${badgeClass(line.label)} ${where === 'Online' || line.unconfirmed ? 'outline' : ''}">${esc(line.label)} · ${where}${line.unconfirmed ? '?' : ''}</span>` : ''}
     ${line.percentOff ? `<span class="badge off">${line.percentOff}% off</span>` : ''}
     ${at}
   </div>`;
@@ -406,6 +406,7 @@ async function itemView(retailerId, id, query) {
             ${o.label ? `<span class="badge ${badgeClass(o.label)}">${esc(o.label)}</span>` : ''}
             ${!o.label && o.wasPrice ? `<span class="muted" style="font-size:13px">Walmart "was" ${money(o.wasPrice)}</span>` : ''}
             ${o.inStock === false ? '<span class="badge out_of_stock">Out of stock</span>' : ''}
+            ${o.unconfirmed ? '<span class="muted" style="font-size:13px">same as walmart.com, not confirmed in store</span>' : ''}
             <span class="muted" style="font-size:13px">scanned ${esc(o.seenOn)}</span>
           </div>`).join('')}
         </div>` : ''}
@@ -467,7 +468,7 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
   const hasDistance = inv.results.some((x) => x.store.distanceMiles != null);
   $el.innerHTML = `
     <div class="stats">
-      <div class="stat"><div class="label">Store prices</div><div class="value">${s.storesPriced ?? s.storesChecked} of ${s.storesChecked}</div></div>
+      <div class="stat"><div class="label">Store prices</div><div class="value">${s.storesPriced ?? s.storesChecked} of ${s.storesChecked}</div>${s.unconfirmed ? `<div class="muted" style="font-size:12px">${s.unconfirmed} not confirmed</div>` : ''}</div>
       <div class="stat"><div class="label">In stock</div><div class="value" style="color:var(--ok)">${s.inStock + s.limited}</div></div>
       <div class="stat"><div class="label">Lowest price</div><div class="value">${money(s.lowestPrice)}</div></div>
       <div class="stat"><div class="label">Clearance stores</div><div class="value" style="color:var(--brand)">${s.clearanceStores}</div></div>
@@ -509,7 +510,7 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
     drawTable(currentFilter());
     try {
       const res = await api(`/api/${r.id}/products/${encodeURIComponent(product.id)}/check-store?store=${encodeURIComponent(storeId)}`);
-      Object.assign(row, { price: res.price, status: res.status, clearance: Boolean(res.clearance), label: res.clearance ? 'Clearance' : res.rollback ? 'Rollback' : null, wasPrice: res.wasPrice ?? null, seenOn: res.seenOn ?? row.seenOn, note: res.note ?? null, checked: res.price != null, justChecked: true });
+      Object.assign(row, { price: res.price, status: res.status, clearance: Boolean(res.clearance), label: res.clearance ? 'Clearance' : res.rollback ? 'Rollback' : null, unconfirmed: Boolean(res.unconfirmed), wasPrice: res.wasPrice ?? null, seenOn: res.seenOn ?? row.seenOn, note: res.note ?? null, checked: res.price != null, justChecked: true });
     } catch (err) {
       row.note = err.message;
     }
@@ -548,7 +549,7 @@ function priceCell(x, product, r) {
   if (x.price == null) return check('Check store') || '—';
   const online = product.onlinePrice ?? (product.storeOffers?.length ? null : product.price);
   const label = x.label ?? (x.clearance ? 'Clearance' : null);
-  return `<strong>${money(x.price)}</strong>${label ? ` <span class="badge ${badgeClass(label)}">${esc(label)}</span>` : ''}${online != null && x.price < online - 0.01 && !label ? ' <span class="badge off">Below online</span>' : ''}${!label && x.wasPrice ? `<div class="muted" style="font-size:12px">Walmart "was" ${money(x.wasPrice)}</div>` : ''}${x.checked ? `<div style="font-size:12px">${check('Recheck')}</div>` : ''}`;
+  return `<strong>${money(x.price)}</strong>${label ? ` <span class="badge ${badgeClass(label)}${x.unconfirmed ? ' outline' : ''}">${esc(label)}${x.unconfirmed ? '?' : ''}</span>` : ''}${online != null && x.price < online - 0.01 && !label ? ' <span class="badge off">Below online</span>' : ''}${!label && x.wasPrice ? `<div class="muted" style="font-size:12px">Walmart "was" ${money(x.wasPrice)}</div>` : ''}${x.checked ? `<div style="font-size:12px">${check('Recheck')}</div>` : ''}`;
 }
 
 function priceChart(history) {

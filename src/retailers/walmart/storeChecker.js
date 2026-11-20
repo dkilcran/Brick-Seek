@@ -295,6 +295,7 @@ export class StoreChecker {
       return true;
     }
     const storeId = seg.stores[Math.floor(state.offset / batches)];
+    await this.db.ensureOnlineLookups(this.retailer, batch, state.day, this.source);
     const saved = this.db.recordStoreLookup(this.retailer, storeId, await this.source.storeLookup(batch, storeId), state.day);
     this.state = { ...state, offset: state.offset + 1, lookups: state.lookups + 1, rows: state.rows + saved };
     return true;
@@ -444,6 +445,7 @@ export class StoreChecker {
       slice = { ids, storeIndex: 0 };
     }
     const storeId = daily[slice.storeIndex];
+    await this.db.ensureOnlineLookups(this.retailer, slice.ids, state.day, this.source);
     const lookup = await this.source.storeLookup(slice.ids, storeId);
     const saved = this.db.recordStoreLookup(this.retailer, storeId, lookup, state.day);
     // Items Walmart's lookup doesn't know at all (old, removed listings) leave the tier 3 list.

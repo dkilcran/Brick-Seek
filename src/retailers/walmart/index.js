@@ -17,6 +17,7 @@ const SEARCH_PAGE = 25;
 const STORES_SHOWN = 15; // nearest stores listed on a product page
 const CHECKS_PER_HOUR = 120; // visitors' "Check store" lookups, so they can't crowd out the daily checks
 const CHECK_REUSE_MS = 15 * 60000;
+const UNCONFIRMED_NOTE = 'Same as walmart.com: not confirmed in store';
 const CARD_SETS = 10; // deal card sets kept, one per ZIP (about 2 MB each)
 const ONLINE_REBUILD_MS = 5 * 60000; // while online prices are being saved, cards are rebuilt at most this often
 
@@ -285,11 +286,14 @@ export class WalmartAdapter extends RetailerAdapter {
           return { store, price: null, quantity: null, status: STOCK_STATUS.UNKNOWN, aisle: null, clearance: false, checked: false };
         }
         const kind = deals.get(store.id)?.kind;
+        const unconfirmed = row.confirmed === 0;
         return {
-          store, price: row.price, quantity: null, aisle: null, checked: true, seenOn: row.date,
-          status: row.in_stock === 1 ? STOCK_STATUS.IN_STOCK : row.in_stock === 0 ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
+          store, price: row.price, quantity: null, aisle: null, checked: true, seenOn: row.date, unconfirmed,
+          note: unconfirmed ? UNCONFIRMED_NOTE : null,
+          status: unconfirmed ? STOCK_STATUS.UNCONFIRMED
+            : row.in_stock === 1 ? STOCK_STATUS.IN_STOCK : row.in_stock === 0 ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
           label: DEAL_LABELS[kind] ?? null,
-          clearance: kind === 'clearance',
+          clearance: kind === 'clearance' && !unconfirmed,
           wasPrice: row.was_price > row.price ? row.was_price : null,
         };
       });
@@ -311,8 +315,9 @@ export class WalmartAdapter extends RetailerAdapter {
       throw Object.assign(new Error('Too many store checks right now; try again in a few minutes'), { status: 429 });
     }
     this.checkTimes.push(now);
-    const lookup = await this.source.storeLookup([String(itemId)], String(storeId));
     const day = scheduleDayKey(new Date(now), this.storeConfig()?.schedule?.productListHour ?? 4);
+    await this.storeData.ensureOnlineLookups(this.id, [String(itemId)], day, this.source);
+    const lookup = await this.source.storeLookup([String(itemId)], String(storeId));
     this.storeData.recordStoreLookup(this.id, String(storeId), lookup, day);
     const item = lookup.found[0];
     const none = (note) => ({ storeId: String(storeId), price: null, status: STOCK_STATUS.UNKNOWN, note });
@@ -321,10 +326,13 @@ export class WalmartAdapter extends RetailerAdapter {
     else if (!item) result = none('Walmart has no listing for this item at this store');
     else if (!item.isWalmart) result = none(`Sold by ${item.seller ?? 'another seller'} here, not Walmart`);
     else {
+      const unconfirmed = this.storeData.latestPrices(this.id, [String(storeId)], String(itemId), { now })[0]?.confirmed === 0;
       result = {
         storeId: String(storeId), price: item.price, wasPrice: item.wasPrice, clearance: item.clearance,
-        rollback: Boolean(item.rollback) && item.wasPrice > item.price,
-        status: item.inStock === true ? STOCK_STATUS.IN_STOCK : item.inStock === false ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
+        rollback: Boolean(item.rollback) && item.wasPrice > item.price, unconfirmed,
+        status: unconfirmed ? STOCK_STATUS.UNCONFIRMED
+          : item.inStock === true ? STOCK_STATUS.IN_STOCK : item.inStock === false ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
+        note: unconfirmed ? UNCONFIRMED_NOTE : null,
         seenOn: day, checked: true,
       };
     }
@@ -352,7 +360,8 @@ export class WalmartAdapter extends RetailerAdapter {
         // What a deal's discount is measured against (see refreshMarkdowns).
         refPrice: deal?.ref_price > r.price ? deal.ref_price : null,
         label: DEAL_LABELS[deal?.kind] ?? null,
-        inStock: r.in_stock === null ? null : r.in_stock === 1,
+        unconfirmed: r.confirmed === 0,
+        inStock: r.in_stock === null || r.confirmed === 0 ? null : r.in_stock === 1,
         seenOn: r.date,
       };
     });
@@ -398,6 +407,7 @@ export class WalmartAdapter extends RetailerAdapter {
           refPrice: ref,
           quantity: null,
           kind: r.kind,
+          unconfirmed: r.confirmed === 0,
           discountPercent: discount(r.price, ref).percentOff,
         };
       });
@@ -431,9 +441,10 @@ export class WalmartAdapter extends RetailerAdapter {
       const { retailer, id, name, imageUrl, category, url } = r.product;
       const card = cardFor({ retailer, id, name, imageUrl, category, url });
       storesWithDeal.set(id, (storesWithDeal.get(id) ?? 0) + 1);
-      if (card.store && card.store.price <= r.price) continue;
+      // The cheapest store deal, preferring ones the store confirmed.
+      if (card.store && (card.store.unconfirmed === r.unconfirmed ? card.store.price <= r.price : r.unconfirmed)) continue;
       card.store = {
-        price: r.price, refPrice: r.refPrice, kind: r.kind, label: DEAL_LABELS[r.kind], store: r.store, seenOn: r.store.seenOn,
+        price: r.price, refPrice: r.refPrice, kind: r.kind, label: DEAL_LABELS[r.kind], store: r.store, seenOn: r.store.seenOn, unconfirmed: r.unconfirmed,
         ...discount(r.price, r.refPrice),
       };
     }

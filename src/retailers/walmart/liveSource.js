@@ -55,6 +55,14 @@ const wasPriceOf = (item) => {
   return strike > (item.salePrice ?? 0) ? strike : null;
 };
 
+/**
+ * What a lookup said about an offer. With a storeId Walmart answers some items
+ * with its online offer unchanged (no store data); such an answer has the same
+ * signature as the online lookup, and nothing else in it tells them apart.
+ */
+const offerSignature = (item) => JSON.stringify([item.salePrice ?? null, item.strikeThroughPrice ?? null, item.stock ?? null,
+  item.clearance === true, item.rollBack === true, item.availableOnline === true]);
+
 export function signWalmartRequest({ consumerId, keyVersion, privateKey, timestamp = Date.now() }) {
   const ts = String(timestamp);
   const signer = createSign('RSA-SHA256');
@@ -277,6 +285,7 @@ export class WalmartLiveSource {
         listPrice: p.msrp,
         clearance: item.clearance === true,
         rollback: item.rollBack === true,
+        signature: offerSignature(item),
         inStock: p.inStockOnline, // with a storeId, "stock" describes that store
         seller: p.seller.name,
         isWalmart: p.seller.isRetailer,
@@ -306,7 +315,7 @@ export class WalmartLiveSource {
           const p = this.toProduct(item);
           out.set(p.id, {
             price: p.price, wasPrice: wasPriceOf(item), seller: p.seller.name, isWalmart: p.seller.isRetailer,
-            onlineOnly: p.onlineOnly, availableOnline: item.availableOnline === true,
+            onlineOnly: p.onlineOnly, availableOnline: item.availableOnline === true, signature: offerSignature(item),
           });
         }
       } catch (err) {

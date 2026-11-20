@@ -34,6 +34,8 @@ export const STOCK_STATUS = Object.freeze({
   LIMITED: 'limited',
   OUT_OF_STOCK: 'out_of_stock',
   UNKNOWN: 'unknown',
+  // The retailer answered with its online offer, so the store's stock isn't known.
+  UNCONFIRMED: 'unconfirmed',
 });
 
 export class NotSupportedError extends Error {
@@ -196,7 +198,8 @@ export function isSoldByRetailer(product) {
 
 /** Collapse store-level availability into a summary for the UI. */
 export function summarizeAvailability(results) {
-  const priced = results.filter((r) => typeof r.price === 'number');
+  // Only prices the store itself confirmed.
+  const priced = results.filter((r) => typeof r.price === 'number' && r.status !== STOCK_STATUS.UNCONFIRMED);
   const prices = priced.map((r) => r.price);
   const count = (s) => results.filter((r) => r.status === s).length;
   return {
@@ -206,6 +209,7 @@ export function summarizeAvailability(results) {
     limited: count(STOCK_STATUS.LIMITED),
     outOfStock: count(STOCK_STATUS.OUT_OF_STOCK),
     unknown: count(STOCK_STATUS.UNKNOWN),
+    unconfirmed: count(STOCK_STATUS.UNCONFIRMED),
     lowestPrice: prices.length ? Math.min(...prices) : null,
     highestPrice: prices.length ? Math.max(...prices) : null,
     clearanceStores: results.filter((r) => r.clearance).length,

@@ -229,3 +229,29 @@ test('a database made before the rollback column gets it', async () => {
   db.recordStorePrices('walmart', '573', [{ itemId: '1', price: 3, wasPrice: 4, rollback: true, seller: 'Walmart.com' }], '2026-11-19');
   assert.equal(raw.prepare('SELECT rollback FROM store_latest').get().rollback, 1);
 });
+
+test('a store answer identical to the same day\'s online answer is saved as not confirmed', () => {
+  const db = new StorePrices(new PriceTracker().db);
+  const day = '2026-11-20';
+  db.saveOnlineLookup('walmart', 'tree', { isWalmart: true, price: 32.25, wasPrice: 129, signature: 'S-online' }, day);
+  db.saveOnlineLookup('walmart', 'soda', { isWalmart: true, price: 91.54, signature: 'S-online2' }, day);
+  db.recordStoreLookup('walmart', '573', { found: [
+    { itemId: 'tree', price: 32.25, wasPrice: 129, clearance: true, inStock: true, seller: 'Walmart.com', signature: 'S-online' },
+    { itemId: 'soda', price: 17.56, inStock: true, seller: 'Walmart.com', signature: 'S-store' },
+    { itemId: 'new', price: 5, inStock: true, seller: 'Walmart.com', signature: 'S-x' }, // no online lookup that day
+  ] }, day);
+  const confirmed = Object.fromEntries(db.db.prepare('SELECT item_id, confirmed FROM store_latest').all().map((r) => [r.item_id, r.confirmed]));
+  assert.deepEqual(confirmed, { tree: 0, soda: 1, new: null });
+  db.refreshMarkdowns('walmart', { now: Date.parse('2026-11-20T12:00:00Z') });
+  const tree = db.markdownRows('walmart', ['573']).find((r) => r.item_id === 'tree');
+  assert.deepEqual([tree.kind, tree.confirmed], ['clearance', 0], 'still a store deal, marked not confirmed');
+});
+
+test('online lookups before store checks: once a day per item', async () => {
+  const db = new StorePrices(new PriceTracker().db);
+  const asked = [];
+  const source = { onlinePrices: async (ids) => { asked.push(...ids); return new Map(ids.filter((id) => id !== 'gone').map((id) => [id, { isWalmart: true, price: 1, signature: 's' }])); } };
+  assert.equal(await db.ensureOnlineLookups('walmart', ['a', 'b', 'gone'], '2026-11-20', source), 3);
+  assert.equal(await db.ensureOnlineLookups('walmart', ['a', 'c'], '2026-11-20', source), 1);
+  assert.deepEqual(asked, ['a', 'b', 'gone', 'c']);
+});
