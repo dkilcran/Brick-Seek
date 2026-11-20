@@ -459,17 +459,19 @@ test('Check store on an unconfirmed store asks walmart.com about pickup, within 
     storeLookup: async (ids) => ({ found: [walmartRow(ids[0], 32.25, { title: 'Tree', wasPrice: 129, clearance: true, signature: 'online', isWalmart: true })], missing: [], onlineOnly: [] }),
   };
   const { adapter, db } = liveAdapter({ source });
-  adapter.pickupChecker = { pickupAt: async (item, store) => { calls.push(`${item}@${store}`); return { pickup: pickups[store], price: 32.25 }; } };
+  adapter.pickupChecker = { pickupAt: async (item, store) => { calls.push(`${item}@${store}`); return { pickup: pickups[store], aisle: pickups[store] ? 'J4' : null, price: 32.25 }; } };
   const now = Date.now();
   const all = await adapter.checkStore('tree', '573', { now }); // "Check all stores": no walmart.com check
   assert.deepEqual([all.status, calls.length], ['unconfirmed', 0]);
   const lee = await adapter.checkStore('tree', '573', { now, verify: true });
   assert.deepEqual([lee.status, lee.unconfirmed, lee.verified, calls], ['out_of_stock', false, true, ['tree@573']]);
   const sw = await adapter.checkStore('tree', '4590', { now, verify: true });
-  assert.equal(sw.status, 'in_stock');
+  assert.deepEqual([sw.status, sw.aisle], ['in_stock', 'J4']);
+  assert.match(sw.note, /aisle J4/);
   const inv = await adapter.checkInventory('tree', '64081');
   assert.deepEqual(inv.results.map((r) => [r.store.id, r.status]), [['573', 'out_of_stock'], ['4590', 'in_stock']]);
-  assert.match(inv.results[1].note, /offers pickup/);
+  assert.match(inv.results[1].note, /offers pickup here · aisle J4/);
+  assert.equal(inv.results[1].aisle, 'J4');
   // The next scheduled check gets Walmart's online offer again: the pickup check still stands.
   db.recordStoreLookup('walmart', '4590', await source.storeLookup(['tree']), today());
   assert.equal((await adapter.checkInventory('tree', '64081')).results[1].status, 'in_stock');

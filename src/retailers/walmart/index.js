@@ -293,9 +293,10 @@ export class WalmartAdapter extends RetailerAdapter {
         const kind = deals.get(store.id)?.kind;
         const unconfirmed = row.confirmed === 0;
         return {
-          store, price: row.price, quantity: null, aisle: null, checked: true, seenOn: row.date, unconfirmed,
+          store, price: row.price, quantity: null, checked: true, seenOn: row.date, unconfirmed,
           note: unconfirmed ? UNCONFIRMED_NOTE
-            : row.verified_on ? `walmart.com ${row.verified_pickup ? 'offers pickup here' : 'has no pickup here'} (checked ${row.verified_on})` : null,
+            : row.verified_on ? `walmart.com ${row.verified_pickup ? `offers pickup here${row.verified_aisle ? ` · aisle ${row.verified_aisle}` : ''}` : 'has no pickup here'} (checked ${row.verified_on})` : null,
+          aisle: row.verified_pickup ? row.verified_aisle ?? null : null,
           status: unconfirmed ? STOCK_STATUS.UNCONFIRMED
             : row.in_stock === 1 ? STOCK_STATUS.IN_STOCK : row.in_stock === 0 ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
           label: DEAL_LABELS[kind] ?? null,
@@ -365,18 +366,19 @@ export class WalmartAdapter extends RetailerAdapter {
     if (budget.used >= budget.cap) return { ...result, note: `${UNCONFIRMED_NOTE} (this month's walmart.com checks are used up)` };
     this.storeData.setMeta(`serpapi:used:${new Date(now).toISOString().slice(0, 7)}`, budget.used + 1);
     let pickup;
+    let aisle;
     try {
-      ({ pickup } = await this.pickupChecker.pickupAt(itemId, storeId));
+      ({ pickup, aisle } = await this.pickupChecker.pickupAt(itemId, storeId));
     } catch (err) {
       console.warn(`walmart: pickup check failed: ${err.message}`);
       return { ...result, note: `${UNCONFIRMED_NOTE} (the walmart.com check failed)` };
     }
     if (pickup === null) return { ...result, note: `${UNCONFIRMED_NOTE} (walmart.com doesn't say)` };
-    this.storeData.saveVerification(this.id, storeId, itemId, pickup, result.seenOn);
+    this.storeData.saveVerification(this.id, storeId, itemId, pickup, result.seenOn, aisle);
     const verified = {
-      ...result, unconfirmed: false, verified: true,
+      ...result, unconfirmed: false, verified: true, aisle: aisle ?? null,
       status: pickup ? STOCK_STATUS.IN_STOCK : STOCK_STATUS.OUT_OF_STOCK,
-      note: pickup ? 'walmart.com offers pickup here' : 'walmart.com: no pickup at this store',
+      note: pickup ? `walmart.com offers pickup here${aisle ? ` · aisle ${aisle}` : ''}` : 'walmart.com: no pickup at this store',
     };
     this.recentChecks.set(key, { at: now, result: verified });
     return verified;

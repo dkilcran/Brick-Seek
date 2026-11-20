@@ -12,7 +12,7 @@ export class SerpApiWalmart {
 
   /**
    * Whether walmart.com offers pickup of an item at a store.
-   * @returns {Promise<{ pickup: boolean|null, price: number|null }>} pickup null when the page doesn't say
+   * @returns {Promise<{ pickup: boolean|null, aisle: string|null, price: number|null }>} pickup null when the page doesn't say
    */
   async pickupAt(itemId, storeId) {
     const url = new URL('https://serpapi.com/search.json');
@@ -21,6 +21,10 @@ export class SerpApiWalmart {
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(`SerpApi: ${data.error ?? res.status}`);
     const p = data.product_result ?? {};
-    return { pickup: typeof p.pickup_option?.available === 'boolean' ? p.pickup_option.available : null, price: p.price_map?.price ?? null };
+    return {
+      pickup: typeof p.pickup_option?.available === 'boolean' ? p.pickup_option.available : null,
+      aisle: p.pickup_option?.aisle ? String(p.pickup_option.aisle) : null, // e.g. "J4", when pickup is offered
+      price: p.price_map?.price ?? null,
+    };
   }
 }

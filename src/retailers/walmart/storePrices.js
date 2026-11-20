@@ -47,7 +47,7 @@ export class StorePrices {
       CREATE TABLE IF NOT EXISTS store_latest (
         retailer TEXT NOT NULL, store_id TEXT NOT NULL, item_id TEXT NOT NULL, date TEXT NOT NULL,
         price REAL, was_price REAL, in_stock INTEGER, seller TEXT, clearance INTEGER, rollback INTEGER, confirmed INTEGER,
-        verified_on TEXT, verified_pickup INTEGER, -- walmart.com's pickup at this store (SerpApi), when checked
+        verified_on TEXT, verified_pickup INTEGER, verified_aisle TEXT, -- walmart.com's pickup (and aisle) at this store (SerpApi), when checked
         prev_price REAL, prev_date TEXT, -- the price before its last change, and when that was seen
         PRIMARY KEY (retailer, store_id, item_id)
       ) WITHOUT ROWID;
@@ -87,7 +87,8 @@ export class StorePrices {
     // Added Nov 2026 to databases made before.
     for (const [table, column, type] of [['store_prices', 'rollback', 'INTEGER'], ['store_latest', 'rollback', 'INTEGER'],
       ['store_prices', 'confirmed', 'INTEGER'], ['store_latest', 'confirmed', 'INTEGER'], ['store_markdowns', 'confirmed', 'INTEGER'],
-      ['store_items', 'online_signature', 'TEXT'], ['store_latest', 'verified_on', 'TEXT'], ['store_latest', 'verified_pickup', 'INTEGER']]) {
+      ['store_items', 'online_signature', 'TEXT'], ['store_latest', 'verified_on', 'TEXT'], ['store_latest', 'verified_pickup', 'INTEGER'],
+      ['store_latest', 'verified_aisle', 'TEXT']]) {
       if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     }
     const priceCols = '(retailer, store_id, item_id, date, price, was_price, in_stock, seller, clearance, rollback, confirmed)';
@@ -219,10 +220,10 @@ export class StorePrices {
    * Save a walmart.com pickup check (SerpApi) of an item at a store: the store's
    * price counts as confirmed, in stock when pickup is offered, for VERIFIED_DAYS.
    */
-  saveVerification(retailer, storeId, itemId, pickup, date) {
+  saveVerification(retailer, storeId, itemId, pickup, date, aisle = null) {
     const inStock = pickup ? 1 : 0;
-    this.db.prepare(`UPDATE store_latest SET verified_on = ?, verified_pickup = ?, confirmed = 1, in_stock = ?
-      WHERE retailer = ? AND store_id = ? AND item_id = ?`).run(date, inStock, inStock, retailer, String(storeId), String(itemId));
+    this.db.prepare(`UPDATE store_latest SET verified_on = ?, verified_pickup = ?, verified_aisle = ?, confirmed = 1, in_stock = ?
+      WHERE retailer = ? AND store_id = ? AND item_id = ?`).run(date, inStock, aisle, inStock, retailer, String(storeId), String(itemId));
     this.db.prepare(`UPDATE store_markdowns SET confirmed = 1, in_stock = ? WHERE retailer = ? AND store_id = ? AND item_id = ?`)
       .run(inStock, retailer, String(storeId), String(itemId));
     this.markdownVersion += 1;
@@ -405,7 +406,7 @@ export class StorePrices {
   latestPrices(retailer, storeIds, itemId, { days = PRICE_DAYS, now = Date.now() } = {}) {
     if (!storeIds.length) return [];
     const marks = storeIds.map(() => '?').join(',');
-    return this.db.prepare(`SELECT store_id, date, price, was_price, in_stock, seller, clearance, confirmed, verified_on, verified_pickup FROM store_latest
+    return this.db.prepare(`SELECT store_id, date, price, was_price, in_stock, seller, clearance, confirmed, verified_on, verified_pickup, verified_aisle FROM store_latest
       WHERE retailer = ? AND date >= ? AND store_id IN (${marks}) AND item_id = ?`)
       .all(retailer, dayBefore(now, days), ...storeIds, String(itemId));
   }
