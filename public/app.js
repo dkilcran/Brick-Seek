@@ -503,13 +503,14 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
   const currentFilter = () => $el.querySelector('#f2').value;
 
   // "Check store": look the item up at that store now and update its row.
-  const checkOne = async (storeId) => {
+  // One store at a time also asks walmart.com about pickup when Walmart's answer can't say.
+  const checkOne = async (storeId, { verify = false } = {}) => {
     const row = inv.results.find((x) => x.store.id === storeId);
     if (!row) return;
     row.checking = true;
     drawTable(currentFilter());
     try {
-      const res = await api(`/api/${r.id}/products/${encodeURIComponent(product.id)}/check-store?store=${encodeURIComponent(storeId)}`);
+      const res = await api(`/api/${r.id}/products/${encodeURIComponent(product.id)}/check-store?store=${encodeURIComponent(storeId)}${verify ? '&verify=1' : ''}`);
       Object.assign(row, { price: res.price, status: res.status, clearance: Boolean(res.clearance), label: res.clearance ? 'Clearance' : res.rollback ? 'Rollback' : null, unconfirmed: Boolean(res.unconfirmed), wasPrice: res.wasPrice ?? null, seenOn: res.seenOn ?? row.seenOn, note: res.note ?? null, checked: res.price != null, justChecked: true });
     } catch (err) {
       row.note = err.message;
@@ -519,7 +520,7 @@ function renderInventory($el, r, product, inv, { radius, sort }) {
   };
   $el.querySelector('#store-table').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-check-store]');
-    if (btn) checkOne(btn.dataset.checkStore);
+    if (btn) checkOne(btn.dataset.checkStore, { verify: true });
   });
   const $all = $el.querySelector('#check-all');
   $all?.addEventListener('click', async () => {

@@ -105,7 +105,8 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const storeId = query.get('store') ?? '';
       if (!/^\d{1,6}$/.test(storeId)) throw new HttpError(400, 'store should be a store number');
       if (!/^\d{1,15}$/.test(params.id)) throw new HttpError(400, 'Item id should be a number');
-      const result = await adapter.checkStore?.(params.id, storeId); // 429 when over the hourly cap
+      // verify=1 (one store at a time): an unconfirmed answer is checked against walmart.com's pickup.
+      const result = await adapter.checkStore?.(params.id, storeId, { verify: query.get('verify') === '1' }); // 429 over the hourly cap
       if (!result) throw new HttpError(501, `${adapter.name} store checks need live mode`);
       return result;
     }],
@@ -155,7 +156,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       const adapter = requireRetailer(registry, params.retailer);
       if (!adapter.storeChecker) return { enabled: false, reason: 'Live mode only' };
       const data = adapter.storeData;
-      return { enabled: true, ...adapter.storeChecker.status(), prices: data.priceCount(adapter.id), databaseMb: data.sizeMb(), databaseFreeMb: data.freeMb() };
+      return { enabled: true, ...adapter.storeChecker.status(), pickupChecks: adapter.pickupBudget?.() ?? null, prices: data.priceCount(adapter.id), databaseMb: data.sizeMb(), databaseFreeMb: data.freeMb() };
     }],
 
     // The store-check settings as loaded, checked against the retailer's departments.

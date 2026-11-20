@@ -448,3 +448,36 @@ test('the store and online lookups give the same signature for the same answer',
   const live2 = liveSource(() => ({ items: [{ ...answer, salePrice: 17.56 }] }));
   assert.notEqual((await live2.storeLookup(['7'], '573')).found[0].signature, online.signature);
 });
+
+test('Check store on an unconfirmed store asks walmart.com about pickup, within a monthly budget', async () => {
+  const calls = [];
+  const pickups = { 573: false, 4590: true };
+  const source = {
+    stores: async () => [{ retailer: 'walmart', id: '573', name: 'Lee' }, { retailer: 'walmart', id: '4590', name: 'Lee SW' }],
+    getById: async () => null,
+    onlinePrices: async (ids) => new Map(ids.map((id) => [id, { isWalmart: true, price: 32.25, wasPrice: 129, signature: 'online' }])),
+    storeLookup: async (ids) => ({ found: [walmartRow(ids[0], 32.25, { title: 'Tree', wasPrice: 129, clearance: true, signature: 'online', isWalmart: true })], missing: [], onlineOnly: [] }),
+  };
+  const { adapter, db } = liveAdapter({ source });
+  adapter.pickupChecker = { pickupAt: async (item, store) => { calls.push(`${item}@${store}`); return { pickup: pickups[store], price: 32.25 }; } };
+  const now = Date.now();
+  const all = await adapter.checkStore('tree', '573', { now }); // "Check all stores": no walmart.com check
+  assert.deepEqual([all.status, calls.length], ['unconfirmed', 0]);
+  const lee = await adapter.checkStore('tree', '573', { now, verify: true });
+  assert.deepEqual([lee.status, lee.unconfirmed, lee.verified, calls], ['out_of_stock', false, true, ['tree@573']]);
+  const sw = await adapter.checkStore('tree', '4590', { now, verify: true });
+  assert.equal(sw.status, 'in_stock');
+  const inv = await adapter.checkInventory('tree', '64081');
+  assert.deepEqual(inv.results.map((r) => [r.store.id, r.status]), [['573', 'out_of_stock'], ['4590', 'in_stock']]);
+  assert.match(inv.results[1].note, /offers pickup/);
+  // The next scheduled check gets Walmart's online offer again: the pickup check still stands.
+  db.recordStoreLookup('walmart', '4590', await source.storeLookup(['tree']), today());
+  assert.equal((await adapter.checkInventory('tree', '64081')).results[1].status, 'in_stock');
+  // Budget.
+  db.setMeta(`serpapi:used:${new Date(now).toISOString().slice(0, 7)}`, 150);
+  adapter.recentChecks.clear();
+  const capped = await adapter.checkStore('lamp', '573', { now, verify: true });
+  assert.match(capped.note, /used up/);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(adapter.pickupBudget(now), { enabled: true, used: 150, cap: 150 });
+});

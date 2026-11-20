@@ -8,6 +8,7 @@ const PRICE_DAYS = 14; // store prices older than this aren't shown, and history
 const MARKDOWN_GAP = 0.1;
 /** Bump when the labeling rules change, so startup rebuilds store_markdowns with them. */
 const MARKDOWN_RULES = '5';
+const VERIFIED_DAYS = 7; // how long a walmart.com pickup check stands in for the store lookup
 const SOLD_BY_WALMART = "IN ('walmart', 'walmart.com')";
 
 const dayBefore = (now, days) => new Date(now - days * 86400000).toISOString().slice(0, 10);
@@ -46,6 +47,7 @@ export class StorePrices {
       CREATE TABLE IF NOT EXISTS store_latest (
         retailer TEXT NOT NULL, store_id TEXT NOT NULL, item_id TEXT NOT NULL, date TEXT NOT NULL,
         price REAL, was_price REAL, in_stock INTEGER, seller TEXT, clearance INTEGER, rollback INTEGER, confirmed INTEGER,
+        verified_on TEXT, verified_pickup INTEGER, -- walmart.com's pickup at this store (SerpApi), when checked
         prev_price REAL, prev_date TEXT, -- the price before its last change, and when that was seen
         PRIMARY KEY (retailer, store_id, item_id)
       ) WITHOUT ROWID;
@@ -85,13 +87,16 @@ export class StorePrices {
     // Added Nov 2026 to databases made before.
     for (const [table, column, type] of [['store_prices', 'rollback', 'INTEGER'], ['store_latest', 'rollback', 'INTEGER'],
       ['store_prices', 'confirmed', 'INTEGER'], ['store_latest', 'confirmed', 'INTEGER'], ['store_markdowns', 'confirmed', 'INTEGER'],
-      ['store_items', 'online_signature', 'TEXT']]) {
+      ['store_items', 'online_signature', 'TEXT'], ['store_latest', 'verified_on', 'TEXT'], ['store_latest', 'verified_pickup', 'INTEGER']]) {
       if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     }
     const priceCols = '(retailer, store_id, item_id, date, price, was_price, in_stock, seller, clearance, rollback, confirmed)';
-    const priceUpdates = (table) => `price = excluded.price, was_price = excluded.was_price, in_stock = excluded.in_stock,
-      seller = excluded.seller, clearance = COALESCE(excluded.clearance, ${table}.clearance),
-      rollback = COALESCE(excluded.rollback, ${table}.rollback), confirmed = excluded.confirmed`;
+    const priceUpdates = (table, { inStock = 'excluded.in_stock', confirmed = 'excluded.confirmed' } = {}) => `price = excluded.price,
+      was_price = excluded.was_price, in_stock = ${inStock}, seller = excluded.seller,
+      clearance = COALESCE(excluded.clearance, ${table}.clearance), rollback = COALESCE(excluded.rollback, ${table}.rollback),
+      confirmed = ${confirmed}`;
+    // An unconfirmed answer within VERIFIED_DAYS of a walmart.com pickup check keeps that check's result.
+    const verified = `excluded.confirmed = 0 AND store_latest.verified_on >= date(excluded.date, '-${VERIFIED_DAYS} days')`;
     this.getLatest = db.prepare(`SELECT price, was_price, in_stock, seller, clearance, rollback FROM store_latest
       WHERE retailer = ? AND store_id = ? AND item_id = ?`);
     this.upsertPrice = db.prepare(`INSERT INTO store_prices ${priceCols} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -101,7 +106,10 @@ export class StorePrices {
       ON CONFLICT (retailer, store_id, item_id) DO UPDATE SET date = excluded.date,
         prev_price = CASE WHEN ${changed} THEN store_latest.price ELSE store_latest.prev_price END,
         prev_date = CASE WHEN ${changed} THEN store_latest.date ELSE store_latest.prev_date END,
-        ${priceUpdates('store_latest')}
+        ${priceUpdates('store_latest', {
+    inStock: `CASE WHEN ${verified} THEN store_latest.verified_pickup ELSE excluded.in_stock END`,
+    confirmed: `CASE WHEN ${verified} THEN 1 ELSE excluded.confirmed END`,
+  })}
       WHERE excluded.date >= store_latest.date`);
     this.upsertItem = db.prepare(`INSERT INTO store_items (retailer, item_id, title, image_url, department) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT (retailer, item_id) DO UPDATE SET title = COALESCE(excluded.title, store_items.title),
@@ -205,6 +213,19 @@ export class StorePrices {
     const online = await source.onlinePrices(todo);
     for (const id of todo) this.saveOnlineLookup(retailer, id, online.get(id), date);
     return todo.length;
+  }
+
+  /**
+   * Save a walmart.com pickup check (SerpApi) of an item at a store: the store's
+   * price counts as confirmed, in stock when pickup is offered, for VERIFIED_DAYS.
+   */
+  saveVerification(retailer, storeId, itemId, pickup, date) {
+    const inStock = pickup ? 1 : 0;
+    this.db.prepare(`UPDATE store_latest SET verified_on = ?, verified_pickup = ?, confirmed = 1, in_stock = ?
+      WHERE retailer = ? AND store_id = ? AND item_id = ?`).run(date, inStock, inStock, retailer, String(storeId), String(itemId));
+    this.db.prepare(`UPDATE store_markdowns SET confirmed = 1, in_stock = ? WHERE retailer = ? AND store_id = ? AND item_id = ?`)
+      .run(inStock, retailer, String(storeId), String(itemId));
+    this.markdownVersion += 1;
   }
 
   /** Mark items as sold online only (a store lookup said so). */
@@ -384,7 +405,7 @@ export class StorePrices {
   latestPrices(retailer, storeIds, itemId, { days = PRICE_DAYS, now = Date.now() } = {}) {
     if (!storeIds.length) return [];
     const marks = storeIds.map(() => '?').join(',');
-    return this.db.prepare(`SELECT store_id, date, price, was_price, in_stock, seller, clearance, confirmed FROM store_latest
+    return this.db.prepare(`SELECT store_id, date, price, was_price, in_stock, seller, clearance, confirmed, verified_on, verified_pickup FROM store_latest
       WHERE retailer = ? AND date >= ? AND store_id IN (${marks}) AND item_id = ?`)
       .all(retailer, dayBefore(now, days), ...storeIds, String(itemId));
   }

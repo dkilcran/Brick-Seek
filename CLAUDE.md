@@ -94,6 +94,8 @@
 - **SerpApi** (`SERPAPI_KEY` is set in Render; `/api/walmart/debug/serp/:id?store=`, `?account=1` for searches left): `engine=walmart` with `store_id`
   and facets finds store clearance; `engine=walmart_product` with `store_id`
   adds `pickup_option.available` at that store (and `in_stock` online).
-  250 searches/month on the free plan.
+  250 searches/month on the free plan. "Check store" (one store, not "Check
+  all") on an unconfirmed row asks it about pickup, at most 150 a month
+  (`/store-check` shows `pickupChecks`); the result stands 7 days.
 - Walmart's `categoryPath` starts with "Home Page/"; the department is the next segment.
 - `msrp` of 9999 is a placeholder, not a list price.

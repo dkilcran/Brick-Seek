@@ -12,12 +12,14 @@ import { WalmartLiveSource } from './liveSource.js';
 import { StorePrices } from './storePrices.js';
 import { StoreChecker } from './storeChecker.js';
 import { TierStore } from './tierLists.js';
+import { SerpApiWalmart } from './serpApi.js';
 
 const SEARCH_PAGE = 25;
 const STORES_SHOWN = 15; // nearest stores listed on a product page
 const CHECKS_PER_HOUR = 120; // visitors' "Check store" lookups, so they can't crowd out the daily checks
 const CHECK_REUSE_MS = 15 * 60000;
 const UNCONFIRMED_NOTE = 'Same as walmart.com: not confirmed in store';
+const PICKUP_CHECKS_PER_MONTH = 150; // SerpApi's free plan has 250 searches a month
 const CARD_SETS = 10; // deal card sets kept, one per ZIP (about 2 MB each)
 const ONLINE_REBUILD_MS = 5 * 60000; // while online prices are being saved, cards are rebuilt at most this often
 
@@ -26,7 +28,7 @@ export class WalmartAdapter extends RetailerAdapter {
    * Live mode also takes the saved store data, the tier lists and a settings
    * loader (see fromEnv); without them the adapter serves the source as is.
    */
-  constructor({ source, mode = 'demo', tracker = new PriceTracker(), storeData = null, tierStore = null, loadStoreConfig = null } = {}) {
+  constructor({ source, mode = 'demo', tracker = new PriceTracker(), storeData = null, tierStore = null, loadStoreConfig = null, pickupChecker = null } = {}) {
     super();
     this.source = source ?? new WalmartDemoSource();
     this._mode = mode;
@@ -36,6 +38,8 @@ export class WalmartAdapter extends RetailerAdapter {
     /** @type {TierStore|null} */
     this.tierStore = tierStore;
     this.loadStoreConfig = loadStoreConfig;
+    /** @type {SerpApiWalmart|null} walmart.com's pickup at a store, for "Check store" on unconfirmed rows */
+    this.pickupChecker = pickupChecker;
     this.recentChecks = new Map(); // "store|item" -> { at, result }
     this.checkTimes = [];
     this.cardCache = new Map(); // zip -> { key, online, at, cards }
@@ -73,7 +77,8 @@ export class WalmartAdapter extends RetailerAdapter {
       },
     });
     const loadStoreConfig = () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH);
-    const adapter = new WalmartAdapter({ source, mode: 'live', tracker, storeData, tierStore, loadStoreConfig });
+    const pickupChecker = env.SERPAPI_KEY ? new SerpApiWalmart({ apiKey: env.SERPAPI_KEY }) : null;
+    const adapter = new WalmartAdapter({ source, mode: 'live', tracker, storeData, tierStore, loadStoreConfig, pickupChecker });
     storeData.onRefresh = () => adapter.warmCards();
     adapter.storeChecker = new StoreChecker({
       source, db: storeData, tiers: tierStore, loadConfig: loadStoreConfig,
@@ -289,7 +294,8 @@ export class WalmartAdapter extends RetailerAdapter {
         const unconfirmed = row.confirmed === 0;
         return {
           store, price: row.price, quantity: null, aisle: null, checked: true, seenOn: row.date, unconfirmed,
-          note: unconfirmed ? UNCONFIRMED_NOTE : null,
+          note: unconfirmed ? UNCONFIRMED_NOTE
+            : row.verified_on ? `walmart.com ${row.verified_pickup ? 'offers pickup here' : 'has no pickup here'} (checked ${row.verified_on})` : null,
           status: unconfirmed ? STOCK_STATUS.UNCONFIRMED
             : row.in_stock === 1 ? STOCK_STATUS.IN_STOCK : row.in_stock === 0 ? STOCK_STATUS.OUT_OF_STOCK : STOCK_STATUS.UNKNOWN,
           label: DEAL_LABELS[kind] ?? null,
@@ -305,11 +311,11 @@ export class WalmartAdapter extends RetailerAdapter {
    * and stock. A check of the same store and item in the last 15 minutes is
    * reused, and live checks are capped per hour.
    */
-  async checkStore(itemId, storeId, { now = Date.now() } = {}) {
+  async checkStore(itemId, storeId, { now = Date.now(), verify = false } = {}) {
     if (!this.source.storeLookup || !this.storeData) return null;
     const key = `${storeId}|${itemId}`;
     const recent = this.recentChecks.get(key);
-    if (recent && now - recent.at < CHECK_REUSE_MS) return { ...recent.result, reused: true };
+    if (recent && now - recent.at < CHECK_REUSE_MS) return this.verifyPickup({ ...recent.result, reused: true }, itemId, storeId, { now, verify, key });
     this.checkTimes = this.checkTimes.filter((t) => now - t < 3600000);
     if (this.checkTimes.length >= CHECKS_PER_HOUR) {
       throw Object.assign(new Error('Too many store checks right now; try again in a few minutes'), { status: 429 });
@@ -338,7 +344,42 @@ export class WalmartAdapter extends RetailerAdapter {
     }
     if (this.recentChecks.size > 2000) this.recentChecks.clear();
     this.recentChecks.set(key, { at: now, result });
-    return result;
+    return this.verifyPickup(result, itemId, storeId, { now, verify, key });
+  }
+
+  /** Walmart.com pickup checks (SerpApi) used this month, and the monthly cap. */
+  pickupBudget(now = Date.now()) {
+    const used = Number(this.storeData?.getMeta(`serpapi:used:${new Date(now).toISOString().slice(0, 7)}`) ?? 0);
+    return { enabled: Boolean(this.pickupChecker), used, cap: PICKUP_CHECKS_PER_MONTH };
+  }
+
+  /**
+   * For a single "Check store" (verify) whose answer was Walmart.com's online
+   * offer: ask walmart.com (SerpApi) whether this store offers pickup, save it
+   * (it stands for VERIFIED_DAYS, see StorePrices.saveVerification) and show it.
+   * At most PICKUP_CHECKS_PER_MONTH a month.
+   */
+  async verifyPickup(result, itemId, storeId, { now, verify, key }) {
+    if (!verify || !result.unconfirmed || !this.pickupChecker) return result;
+    const budget = this.pickupBudget(now);
+    if (budget.used >= budget.cap) return { ...result, note: `${UNCONFIRMED_NOTE} (this month's walmart.com checks are used up)` };
+    this.storeData.setMeta(`serpapi:used:${new Date(now).toISOString().slice(0, 7)}`, budget.used + 1);
+    let pickup;
+    try {
+      ({ pickup } = await this.pickupChecker.pickupAt(itemId, storeId));
+    } catch (err) {
+      console.warn(`walmart: pickup check failed: ${err.message}`);
+      return { ...result, note: `${UNCONFIRMED_NOTE} (the walmart.com check failed)` };
+    }
+    if (pickup === null) return { ...result, note: `${UNCONFIRMED_NOTE} (walmart.com doesn't say)` };
+    this.storeData.saveVerification(this.id, storeId, itemId, pickup, result.seenOn);
+    const verified = {
+      ...result, unconfirmed: false, verified: true,
+      status: pickup ? STOCK_STATUS.IN_STOCK : STOCK_STATUS.OUT_OF_STOCK,
+      note: pickup ? 'walmart.com offers pickup here' : 'walmart.com: no pickup at this store',
+    };
+    this.recentChecks.set(key, { at: now, result: verified });
+    return verified;
   }
 
   /**
