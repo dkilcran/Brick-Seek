@@ -75,6 +75,10 @@ export class WalmartAdapter extends RetailerAdapter {
         get: (zip) => storeData.zipStores('walmart', zip),
         set: (zip, stores) => storeData.saveZipStores('walmart', zip, stores),
       },
+      refusedStore: {
+        load: () => storeData.refusedIds('walmart'),
+        add: (id) => storeData.markRefused('walmart', id, new Date().toISOString().slice(0, 10)),
+      },
     });
     const loadStoreConfig = () => loadScanConfig(env.SCAN_CONFIG_PATH || DEFAULT_SCAN_CONFIG_PATH);
     const pickupChecker = env.SERPAPI_KEY ? new SerpApiWalmart({ apiKey: env.SERPAPI_KEY }) : null;

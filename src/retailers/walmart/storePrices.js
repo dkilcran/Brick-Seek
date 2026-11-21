@@ -9,6 +9,7 @@ const MARKDOWN_GAP = 0.1;
 /** Bump when the labeling rules change, so startup rebuilds store_markdowns with them. */
 const MARKDOWN_RULES = '5';
 const VERIFIED_DAYS = 7; // how long a walmart.com pickup check stands in for the store lookup
+const REFUSED_DAYS = 30; // how long an id Walmart's /items refused is skipped before it's tried again
 const SOLD_BY_WALMART = "IN ('walmart', 'walmart.com')";
 
 const dayBefore = (now, days) => new Date(now - days * 86400000).toISOString().slice(0, 10);
@@ -65,6 +66,7 @@ export class StorePrices {
         online_available INTEGER,   -- 1/0: available on Walmart.com (online lookup)
         online_lookup_date TEXT,    -- day of the last online lookup
         online_signature TEXT,      -- that lookup's answer (see liveSource offerSignature)
+        refused_date TEXT,          -- day Walmart's /items refused this id (400: excluded from the API, or unknown)
         PRIMARY KEY (retailer, item_id)
       ) WITHOUT ROWID;
       -- Walmart's store list per ZIP (stores rarely change), so pages don't wait on Walmart.
@@ -88,9 +90,10 @@ export class StorePrices {
     for (const [table, column, type] of [['store_prices', 'rollback', 'INTEGER'], ['store_latest', 'rollback', 'INTEGER'],
       ['store_prices', 'confirmed', 'INTEGER'], ['store_latest', 'confirmed', 'INTEGER'], ['store_markdowns', 'confirmed', 'INTEGER'],
       ['store_items', 'online_signature', 'TEXT'], ['store_latest', 'verified_on', 'TEXT'], ['store_latest', 'verified_pickup', 'INTEGER'],
-      ['store_latest', 'verified_aisle', 'TEXT']]) {
+      ['store_latest', 'verified_aisle', 'TEXT'], ['store_items', 'refused_date', 'TEXT']]) {
       if (!db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
     }
+    db.exec('CREATE INDEX IF NOT EXISTS store_items_refused ON store_items (retailer, refused_date) WHERE refused_date IS NOT NULL');
     const priceCols = '(retailer, store_id, item_id, date, price, was_price, in_stock, seller, clearance, rollback, confirmed)';
     const priceUpdates = (table, { inStock = 'excluded.in_stock', confirmed = 'excluded.confirmed' } = {}) => `price = excluded.price,
       was_price = excluded.was_price, in_stock = ${inStock}, seller = excluded.seller,
@@ -235,6 +238,29 @@ export class StorePrices {
       ON CONFLICT (retailer, item_id) DO UPDATE SET online_only = 1`);
     for (const id of ids) mark.run(retailer, String(id));
     this.onlineVersion += 1;
+  }
+
+  /** Remember that Walmart's /items refused an id, so later lookups (and restarts) skip it. */
+  markRefused(retailer, id, date) {
+    this.setRefused ??= this.db.prepare(`INSERT INTO store_items (retailer, item_id, refused_date) VALUES (?, ?, ?)
+      ON CONFLICT (retailer, item_id) DO UPDATE SET refused_date = excluded.refused_date`);
+    this.setRefused.run(retailer, String(id), date);
+  }
+
+  /** Ids Walmart refused within the last `days` days (older ones are tried again). */
+  refusedIds(retailer, { days = REFUSED_DAYS, today = new Date().toISOString().slice(0, 10) } = {}) {
+    return this.db.prepare(`SELECT item_id FROM store_items WHERE retailer = ? AND refused_date >= date(?, '-${Number(days)} days')`)
+      .all(retailer, today).map((r) => r.item_id);
+  }
+
+  /** Saved refused ids: how many, by department and by day, and a few titles (to see what Walmart excludes). */
+  refusedSummary(retailer, { sample = 15 } = {}) {
+    const rows = this.db.prepare(`SELECT item_id, title, department, refused_date FROM store_items
+      WHERE retailer = ? AND refused_date IS NOT NULL ORDER BY refused_date DESC, item_id`).all(retailer);
+    const tally = (key) => Object.fromEntries([...rows.reduce((m, r) => m.set(r[key] ?? '(unknown)', (m.get(r[key] ?? '(unknown)') ?? 0) + 1), new Map())]
+      .sort((a, b) => b[1] - a[1]));
+    return { total: rows.length, byDay: tally('refused_date'), byDepartment: tally('department'),
+      sample: rows.slice(0, sample).map((r) => ({ id: r.item_id, title: r.title, department: r.department })) };
   }
 
   /** Forget items' current store prices everywhere (e.g. Walmart sells them online only). */

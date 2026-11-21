@@ -506,3 +506,26 @@ test('a lookup Walmart refuses for one excluded or unknown id still answers for 
   assert.equal((await live.onlinePrices(ids)).size, 19);
   assert.equal(requests.length, before + 1, 'the refused id is skipped from then on');
 });
+
+test('refused ids are saved, so a restarted source skips them without asking Walmart', async () => {
+  const saved = [];
+  const refusedStore = { load: () => [...saved], add: (id) => saved.push(id) };
+  const requests = [];
+  const make = () => new WalmartLiveSource({
+    consumerId: 'x', privateKey: pem(), minIntervalMs: 0, maxRetries: 0, refusedStore,
+    fetchImpl: async (url) => {
+      const ids = new URL(String(url)).searchParams.get('ids').split(',');
+      requests.push(ids);
+      if (ids.includes('13')) return { ok: false, status: 400, json: async () => ({}), text: async () => '{"errors":[{"code":4035,"message":"excluded from our API"}]}' };
+      return { ok: true, status: 200, json: async () => ({ items: ids.map((id) => ({ itemId: Number(id), name: `Item ${id}`, salePrice: 5, sellerInfo: 'Walmart.com', stock: 'Available' })) }), text: async () => '' };
+    },
+  });
+  await make().storeLookup(['12', '13'], '573');
+  assert.deepEqual(saved, ['13']);
+  const restarted = make();
+  assert.equal(restarted.isRefused(13), true);
+  requests.length = 0;
+  const res = await restarted.storeLookup(['12', '13'], '573');
+  assert.deepEqual(requests, [['12']]);
+  assert.deepEqual(res.missing, ['13']);
+});

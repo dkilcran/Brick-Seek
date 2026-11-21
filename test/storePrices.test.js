@@ -255,3 +255,23 @@ test('online lookups before store checks: once a day per item', async () => {
   assert.equal(await db.ensureOnlineLookups('walmart', ['a', 'c'], '2026-11-20', source), 1);
   assert.deepEqual(asked, ['a', 'b', 'gone', 'c']);
 });
+
+test('ids Walmart refused are saved, and tried again after 30 days', () => {
+  const db = new StorePrices(new PriceTracker().db);
+  db.markRefused('walmart', '13', '2026-11-20');
+  db.markRefused('walmart', '14', '2026-10-01');
+  assert.deepEqual(db.refusedIds('walmart', { today: '2026-11-21' }), ['13']);
+  assert.deepEqual(db.refusedIds('target', { today: '2026-11-21' }), []);
+});
+
+test('a summary of refused ids, by department', () => {
+  const db = new StorePrices(new PriceTracker().db);
+  db.recordStoreLookup('walmart', '573', { found: [{ itemId: '13', title: 'Gift card', category: 'Gift Cards', price: 25 }] }, '2026-11-20');
+  db.markRefused('walmart', '13', '2026-11-20');
+  db.markRefused('walmart', '99', '2026-11-21');
+  const s = db.refusedSummary('walmart');
+  assert.equal(s.total, 2);
+  assert.deepEqual(s.byDepartment, { 'Gift Cards': 1, '(unknown)': 1 });
+  assert.deepEqual(s.byDay, { '2026-11-21': 1, '2026-11-20': 1 });
+  assert.equal(s.sample.find((r) => r.id === '13').title, 'Gift card');
+});

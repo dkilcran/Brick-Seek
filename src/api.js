@@ -157,7 +157,7 @@ export function createRoutes(registry, { scanConfigPath = process.env.SCAN_CONFI
       if (!adapter.storeChecker) return { enabled: false, reason: 'Live mode only' };
       const data = adapter.storeData;
       return { enabled: true, ...adapter.storeChecker.status(), pickupChecks: adapter.pickupBudget?.() ?? null,
-        walmartLastHour: adapter.source?.apiStats?.() ?? null, prices: data.priceCount(adapter.id), databaseMb: data.sizeMb(), databaseFreeMb: data.freeMb() };
+        walmartLastHour: adapter.source?.apiStats?.() ?? null, refusedIds: data.refusedSummary?.(adapter.id) ?? null, prices: data.priceCount(adapter.id), databaseMb: data.sizeMb(), databaseFreeMb: data.freeMb() };
     }],
 
     // The store-check settings as loaded, checked against the retailer's departments.

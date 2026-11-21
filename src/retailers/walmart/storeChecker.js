@@ -107,10 +107,18 @@ export class StoreChecker {
     return h >= config.schedule.endHour || h < config.schedule.productListHour;
   }
 
-  /** Search results to keep: items in the settings' departments (or with no department). */
+  /** Whether Walmart's /items refuses this id (the source remembers them). */
+  isRefused(id) {
+    return this.source.isRefused?.(id) ?? false;
+  }
+
+  /**
+   * Search results to keep: items in the settings' departments (or with no
+   * department), leaving out ids Walmart's /items refuses (store checks can't look them up).
+   */
   keepProduct(config) {
     const allowed = new Set(config.departments ?? []);
-    return (p) => !allowed.size || !p.category || allowed.has(p.category);
+    return (p) => (!allowed.size || !p.category || allowed.has(p.category)) && !this.isRefused(p.id);
   }
 
   /** The settings' departments with their Walmart category ids. */
@@ -269,7 +277,8 @@ export class StoreChecker {
     if (state.segmentTotal === null) {
       // Fresh deal labels first: the later segments' lists come from them.
       this.refreshDeals();
-      const ids = this.db.inDepartments(this.retailer, seg.ids(), config.departments);
+      // Ids Walmart's /items refuses are left out, so batches stay full.
+      const ids = this.db.inDepartments(this.retailer, seg.ids(), config.departments).filter((id) => !this.isRefused(id));
       this.saveList('segment', ids);
       this.state = { ...state, segmentTotal: ids.length, offset: 0 };
       return true;
@@ -477,7 +486,7 @@ export class StoreChecker {
         candidates = this.tiers.tier3Batch(at, BATCH * 5);
         if (!candidates.length) break;
       }
-      for (const id of this.db.inDepartments(this.retailer, candidates, config.departments).filter((x) => !this.db.isOnlineOnly(this.retailer, x))) {
+      for (const id of this.db.inDepartments(this.retailer, candidates, config.departments).filter((x) => !this.db.isOnlineOnly(this.retailer, x) && !this.isRefused(x))) {
         if (ids.length >= BATCH) break;
         if (wrapped && cursor && id > cursor) break; // a full lap
         ids.push(id);

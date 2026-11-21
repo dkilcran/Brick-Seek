@@ -80,10 +80,11 @@ export class WalmartLiveSource {
    * @param {object} opts
    * @param {{ get(zip): object[]|null, set(zip, stores): void }} [opts.zipStoreCache]  saved store lists per ZIP
    * @param {number} [opts.minIntervalMs]  spacing between calls; Walmart rate-limits the API
+   * @param {{ load(): string[], add(id: string): void }} [opts.refusedStore]  saved ids Walmart's /items refuses
    */
   constructor({
     consumerId, keyVersion = '1', privateKey, privateKeyPath, publisherId, fetchImpl = fetch,
-    zipStoreCache = null, minIntervalMs = 2000, maxRetries = 3,
+    zipStoreCache = null, refusedStore = null, minIntervalMs = 2000, maxRetries = 3,
   } = {}) {
     if (!consumerId) throw new Error('WALMART_CONSUMER_ID is required for live mode');
     this.consumerId = consumerId;
@@ -93,6 +94,7 @@ export class WalmartLiveSource {
     this.fetch = fetchImpl;
     this.cache = new TtlCache({ ttlMs: 10 * 60 * 1000 });
     this.zipStoreCache = zipStoreCache;
+    this.refusedStore = refusedStore;
     this.minIntervalMs = minIntervalMs;
     this.maxRetries = maxRetries;
     this.nextSlot = 0;
@@ -289,12 +291,12 @@ export class WalmartLiveSource {
    * Walmart's /items answers for ids (up to 20). Walmart refuses a whole request
    * (400) when it has an id it doesn't know or has "excluded from our API", so
    * a refused request is split in halves until the refused ids are alone; those
-   * are left out, like ids Walmart doesn't know, and skipped from then on (until
-   * a restart) so later lookups don't pay for the split again.
+   * are left out, like ids Walmart doesn't know, and skipped from then on (saved
+   * through refusedStore, so restarts don't relearn them) so later lookups don't
+   * pay for the split again.
    */
   async lookupItems(ids, params = {}) {
-    this.refusedIds ??= new Set();
-    ids = ids.filter((id) => !this.refusedIds.has(id));
+    ids = ids.filter((id) => !this.isRefused(id));
     if (!ids.length) return [];
     try {
       const data = await this.request('/items', { ids: ids.join(','), ...params }, { cache: false });
@@ -303,11 +305,18 @@ export class WalmartLiveSource {
       if (!/\b400\b/.test(err.message) || !/not found|excluded/i.test(err.message)) throw err;
       if (ids.length === 1) {
         this.refusedIds.add(ids[0]);
+        this.refusedStore?.add(ids[0]);
         return [];
       }
       const half = Math.ceil(ids.length / 2);
       return [...await this.lookupItems(ids.slice(0, half), params), ...await this.lookupItems(ids.slice(half), params)];
     }
+  }
+
+  /** Whether Walmart's /items refused this id (loaded from refusedStore on first use). */
+  isRefused(id) {
+    this.refusedIds ??= new Set(this.refusedStore?.load() ?? []);
+    return this.refusedIds.has(String(id));
   }
 
   async storeLookup(ids, storeId) {

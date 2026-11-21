@@ -17,11 +17,12 @@ settings, deal-label rules) and the code. Live state on Nov 21, 18:50 UTC:
   1. Check `/api/walmart/store-check`: `day`, `phase`, `lastError`, and
      `walmartLastHour` (requests, `rateLimited`, `refused`,
      `refusedIdsSkipped`). The cycle should reach `done` and a new `day`.
-  2. Refused ids are remembered in memory only, so every deploy relearns them
-     at ~8 extra requests each. Save them in the database (e.g. a
-     `store_items` flag) and leave them out of the tier lists and store checks.
+  2. Done Nov 21: refused ids are saved (`store_items.refused_date`), skipped
+     for 30 days (then tried again), and left out of new tier lists, check
+     segments and Tier 3 batches. The deploy relearned the ids once.
   3. Find out which items Walmart excludes (a category or brand?) and note it
-     in `CLAUDE.md`.
+     in `CLAUDE.md`: `/api/walmart/store-check` now has `refusedIds` (total,
+     `byDay`, `byDepartment`, sample titles). Read it once a few hundred are saved.
 - **Unconfirmed store answers (Nov 19-20):** store answers identical to the
   online lookup are saved `confirmed = 0` and shown "not confirmed in store";
   "Check store" on one such row asks SerpApi about pickup (150 a month,
