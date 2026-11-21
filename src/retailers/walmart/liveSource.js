@@ -269,15 +269,22 @@ export class WalmartLiveSource {
    * Walmart's /items answers for ids (up to 20). Walmart refuses a whole request
    * (400) when it has an id it doesn't know or has "excluded from our API", so
    * a refused request is split in halves until the refused ids are alone; those
-   * are left out, like ids Walmart doesn't know.
+   * are left out, like ids Walmart doesn't know, and skipped from then on (until
+   * a restart) so later lookups don't pay for the split again.
    */
   async lookupItems(ids, params = {}) {
+    this.refusedIds ??= new Set();
+    ids = ids.filter((id) => !this.refusedIds.has(id));
+    if (!ids.length) return [];
     try {
       const data = await this.request('/items', { ids: ids.join(','), ...params }, { cache: false });
       return data?.items ?? [];
     } catch (err) {
       if (!/\b400\b/.test(err.message) || !/not found|excluded/i.test(err.message)) throw err;
-      if (ids.length === 1) return [];
+      if (ids.length === 1) {
+        this.refusedIds.add(ids[0]);
+        return [];
+      }
       const half = Math.ceil(ids.length / 2);
       return [...await this.lookupItems(ids.slice(0, half), params), ...await this.lookupItems(ids.slice(half), params)];
     }

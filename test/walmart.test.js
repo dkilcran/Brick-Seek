@@ -502,5 +502,7 @@ test('a lookup Walmart refuses for one excluded or unknown id still answers for 
   assert.equal(res.found.length, 19);
   assert.deepEqual(res.missing, ['13']);
   assert.ok(requests.length <= 10, `${requests.length} requests`);
+  const before = requests.length;
   assert.equal((await live.onlinePrices(ids)).size, 19);
+  assert.equal(requests.length, before + 1, 'the refused id is skipped from then on');
 });
