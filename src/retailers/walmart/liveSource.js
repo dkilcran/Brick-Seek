@@ -98,6 +98,25 @@ export class WalmartLiveSource {
     this.nextSlot = 0;
   }
 
+  /** Count a request by minute (kept an hour), for apiStats. */
+  countCall(status) {
+    const minute = Math.floor(Date.now() / 60000);
+    this.calls ??= new Map();
+    const c = this.calls.get(minute) ?? { calls: 0, rateLimited: 0, refused: 0 };
+    c.calls += 1;
+    if (status === 429) c.rateLimited += 1;
+    else if (status === 400) c.refused += 1;
+    this.calls.set(minute, c);
+    for (const m of this.calls.keys()) if (m < minute - 60) this.calls.delete(m);
+  }
+
+  /** Walmart requests in the last hour: total, answered 429 (rate limited), and 400 (refused). */
+  apiStats() {
+    const out = { calls: 0, rateLimited: 0, refused: 0, refusedIdsSkipped: this.refusedIds?.size ?? 0 };
+    for (const c of this.calls?.values() ?? []) for (const k of ['calls', 'rateLimited', 'refused']) out[k] += c[k];
+    return out;
+  }
+
   /** Wait for this request's turn: at most one request per minIntervalMs. */
   async throttle() {
     const now = Date.now();
@@ -129,6 +148,7 @@ export class WalmartLiveSource {
           }),
         },
       });
+      this.countCall(res.status);
       if (res.status === 404) return null;
       if (res.status === 429 && attempt < this.maxRetries) {
         // Honor Retry-After when given, otherwise back off 2s, 4s, 8s.
