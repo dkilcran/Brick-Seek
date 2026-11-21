@@ -2,6 +2,9 @@
 
 ## Working with the owner
 
+- **New session? Read `TODO.md` first**: its handoff section lists the live
+  state, the next fixes, and a check-in to ask the owner about.
+
 - If adding a domain to the cloud environment's allowed network list would help
   (docs, APIs, data sources), say so and name the domain, instead of working
   around it.
@@ -18,7 +21,11 @@
   waits instead: a Render deploy ~60-70 s, a Walmart rate-limit wait ~30-60 s,
   a production-size timing run ~20 s; then a code change with tests, push and
   live check is 5-15 min, a Walmart measurement 1-2 min, a large refactor
-  about an hour. The machine's clock is accurate (it matches the live
+  about an hour.
+- Tools: `node scripts/perf.mjs` (times the pages' queries on a production-size
+  database) and `scripts/boot-test.sh [commit]` (boots this tree on a database
+  made by that commit). Push only when `npm test` prints `# fail 0` (a pipe
+  through grep doesn't stop a chain on failure). The machine's clock is accurate (it matches the live
   server's Date header); compare each actual time with the estimate.
 
 ## What the data sources really return (learned the hard way)
@@ -79,6 +86,10 @@
   answers equal online; SerpApi pickup at that store: 2 of 10 vs 5 of 5 for
   answers that differ. So an answer identical to the same day's online lookup
   is saved `confirmed = 0` and shown "not confirmed in store".
+- **`/items` refuses some items since Nov 20**: 400 code 4035 "The items that
+  you're trying to access are excluded from our API", failing the whole
+  request (also "not found" 400s). `lookupItems` splits such a request and
+  skips refused ids; which items are excluded isn't known yet.
 - **`/items` with `storeId` leaves out ids Walmart doesn't know** (old,
   removed listings); an item not carried at that store still answers
   (e.g. "Not available").
