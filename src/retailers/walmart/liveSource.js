@@ -265,15 +265,26 @@ export class WalmartLiveSource {
    * come back with the online price, so they're returned apart.
    * @returns {Promise<{ found: object[], missing: string[], onlineOnly: string[] }>}
    */
-  async storeLookup(ids, storeId) {
-    let data;
+  /**
+   * Walmart's /items answers for ids (up to 20). Walmart refuses a whole request
+   * (400) when it has an id it doesn't know or has "excluded from our API", so
+   * a refused request is split in halves until the refused ids are alone; those
+   * are left out, like ids Walmart doesn't know.
+   */
+  async lookupItems(ids, params = {}) {
     try {
-      data = await this.request('/items', { ids: ids.join(','), storeId }, { cache: false });
+      const data = await this.request('/items', { ids: ids.join(','), ...params }, { cache: false });
+      return data?.items ?? [];
     } catch (err) {
-      if (/\b400\b/.test(err.message) && /not found/i.test(err.message)) return { found: [], missing: ids.map(String), onlineOnly: [] };
-      throw err;
+      if (!/\b400\b/.test(err.message) || !/not found|excluded/i.test(err.message)) throw err;
+      if (ids.length === 1) return [];
+      const half = Math.ceil(ids.length / 2);
+      return [...await this.lookupItems(ids.slice(0, half), params), ...await this.lookupItems(ids.slice(half), params)];
     }
-    const all = (data?.items ?? []).map((item) => {
+  }
+
+  async storeLookup(ids, storeId) {
+    const all = (await this.lookupItems(ids.map(String), { storeId })).map((item) => {
       const p = this.toProduct(item);
       return {
         itemId: p.id,
@@ -308,18 +319,12 @@ export class WalmartLiveSource {
   async onlinePrices(ids) {
     const out = new Map();
     for (let i = 0; i < ids.length; i += LOOKUP_BATCH) {
-      const batch = ids.slice(i, i + LOOKUP_BATCH);
-      try {
-        const data = await this.request('/items', { ids: batch.join(',') }, { cache: false });
-        for (const item of data?.items ?? []) {
-          const p = this.toProduct(item);
-          out.set(p.id, {
-            price: p.price, wasPrice: wasPriceOf(item), seller: p.seller.name, isWalmart: p.seller.isRetailer,
-            onlineOnly: p.onlineOnly, availableOnline: item.availableOnline === true, signature: offerSignature(item),
-          });
-        }
-      } catch (err) {
-        if (!/not found/i.test(err.message)) throw err;
+      for (const item of await this.lookupItems(ids.slice(i, i + LOOKUP_BATCH).map(String))) {
+        const p = this.toProduct(item);
+        out.set(p.id, {
+          price: p.price, wasPrice: wasPriceOf(item), seller: p.seller.name, isWalmart: p.seller.isRetailer,
+          onlineOnly: p.onlineOnly, availableOnline: item.availableOnline === true, signature: offerSignature(item),
+        });
       }
     }
     return out;

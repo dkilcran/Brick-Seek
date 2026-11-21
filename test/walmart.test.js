@@ -483,3 +483,24 @@ test('Check store on an unconfirmed store asks walmart.com about pickup, within 
   assert.equal(calls.length, 2);
   assert.deepEqual(adapter.pickupBudget(now), { enabled: true, used: 150, cap: 150 });
 });
+
+test('a lookup Walmart refuses for one excluded or unknown id still answers for the rest', async () => {
+  const requests = [];
+  const live = new WalmartLiveSource({
+    consumerId: 'x', privateKey: pem(), minIntervalMs: 0, maxRetries: 0,
+    fetchImpl: async (url) => {
+      const ids = new URL(String(url)).searchParams.get('ids').split(',');
+      requests.push(ids.length);
+      if (ids.includes('13')) {
+        return { ok: false, status: 400, json: async () => ({}), text: async () => '{"errors":[{"code":4035,"message":"The items that you’re trying to access are excluded from our API."}]}' };
+      }
+      return { ok: true, status: 200, json: async () => ({ items: ids.map((id) => ({ itemId: Number(id), name: `Item ${id}`, salePrice: 5, sellerInfo: 'Walmart.com', stock: 'Available' })) }), text: async () => '' };
+    },
+  });
+  const ids = Array.from({ length: 20 }, (_, i) => String(i + 1));
+  const res = await live.storeLookup(ids, '573');
+  assert.equal(res.found.length, 19);
+  assert.deepEqual(res.missing, ['13']);
+  assert.ok(requests.length <= 10, `${requests.length} requests`);
+  assert.equal((await live.onlinePrices(ids)).size, 19);
+});
